@@ -95,6 +95,7 @@ import com.tuxundown.android.core.DownloadCenter
 import com.tuxundown.android.core.DownloadedFiles
 import com.tuxundown.android.core.Format
 import com.tuxundown.android.core.FtpClient
+import com.tuxundown.android.core.LinkExtract
 import com.tuxundown.android.core.ProxySettings
 import com.tuxundown.android.core.PublicStorage
 import com.tuxundown.android.core.ScheduleTime
@@ -383,7 +384,9 @@ fun DownApp() {
             val clip = cm.primaryClip
             if (clip != null && clip.itemCount > 0) {
                 val text = clip.getItemAt(0).coerceToText(context)?.toString() ?: ""
-                val url = Regex("https?://\\S+").find(text)?.value?.trimEnd('.', ',', '，', '。')
+                // v2.1: same extractor as the add dialog (adds
+                // ftp:// and proper CJK punctuation handling).
+                val url = LinkExtract.extract(text).firstOrNull()
                 if (!url.isNullOrBlank() && url != DownloadCenter.clipboardPrompted &&
                     store.tasks.none { it.url == url }
                 ) {
@@ -690,8 +693,20 @@ fun DownApp() {
     }
 
     fun startSmart(raw: String) {
-        val u = raw.trim()
+        var u = raw.trim()
         if (u.isBlank() || sniffing) return
+        // v2.1: arbitrary text — a paragraph shared from a chat
+        // app, a forum post — can carry the link(s) inside prose.
+        // Extract first (LinkExtract): several links go down the
+        // batch path; exactly one embedded link continues as if it
+        // had been pasted bare; a bare link extracts to itself and
+        // nothing changes.
+        val foundLinks = LinkExtract.extract(u)
+        if (foundLinks.size > 1) {
+            startBatch(foundLinks.joinToString("\n"))
+            return
+        }
+        if (foundLinks.size == 1 && foundLinks[0] != u) u = foundLinks[0]
         if (scheduleMode == 1) {
             // v1.8: daily mode — validate the wall-clock time and
             // resolve it to the next occurrence.
