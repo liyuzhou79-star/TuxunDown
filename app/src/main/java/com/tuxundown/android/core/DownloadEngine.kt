@@ -51,7 +51,19 @@ class DownloadEngine(
      *  size is known) and once a second during the transfer; returning
      *  false pauses the task instead of burning mobile data. */
     private val trafficGuard: () -> Boolean = { true },
+    /** v1.5: remembered optimal thread count for this host (0 = none).
+     *  A fresh segmented start begins AT this count and skips probing. */
+    private val initialThreadsHint: Int = 0,
+    /** v1.5: called once when a segmented download COMPLETES, with the
+     *  thread count it settled at, so the caller can remember it. */
+    private val onThreadsSettled: (Int) -> Unit = {},
+    /** v1.5: called once when a segmented download FAILS, so the
+     *  caller can age out the remembered count for this host. */
+    private val onHostFailed: () -> Unit = {},
 ) {
+    /** False once the thread count is settled (hint used, plateau
+     *  reached or ceiling hit): the sampler stops growing workers. */
+    @Volatile private var probingActive = true
     /** Seekable destination in the public download folder, opened after probing. */
     private lateinit var target: DownloadTarget
     @Volatile var paused = false
@@ -129,7 +141,15 @@ class DownloadEngine(
                 if (task.singleThreadOnly || task.totalSize <= 0) {
                     return runSingleStream()
                 }
-                return runSegmented()
+                val result = runSegmented()
+                // v1.5 host memory: only a COMPLETED segmented run
+                // proves a thread count; a failure ages the memory.
+                if (result == TaskStatus.DONE) {
+                    runCatching { onThreadsSettled(task.threads) }
+                } else if (result == TaskStatus.FAILED) {
+                    runCatching { onHostFailed() }
+                }
+                return result
             } finally {
                 runCatching { target.close() }
             }
@@ -295,8 +315,22 @@ class DownloadEngine(
             var lastSpeed = 0L
             var plateauSteps = 0
             var ticks = 0
+            // v1.5: fixed-period ticks. The old sleep(1000)+work loop
+            // drifted long, so the chart's "90 samples = 90 seconds"
+            // axis quietly lied and the displayed speed lagged the
+            // samples. Now each tick is scheduled against a deadline,
+            // keeping samples, chart and the big speed number on the
+            // exact same 1 s grid (single source: this sampler's EMA).
+            var nextTick = System.currentTimeMillis() + 1000
             while (stopSampler.get() == 0 && !stopped()) {
-                try { Thread.sleep(1000) } catch (e: InterruptedException) { break }
+                val waitMs = nextTick - System.currentTimeMillis()
+                try {
+                    Thread.sleep(waitMs.coerceIn(50, 1000))
+                } catch (e: InterruptedException) { break }
+                nextTick += 1000
+                if (nextTick < System.currentTimeMillis()) {
+                    nextTick = System.currentTimeMillis() + 1000
+                }
                 if (!networkGuard()) {
                     netBlocked = true
                     break
@@ -331,15 +365,20 @@ class DownloadEngine(
                 // Every 2 s decide whether more threads still help.
                 if (ticks % 2 == 0) {
                     val cur = task.speedBps
-                    if (task.threads < MAX_THREADS && nextChunk.get() < count) {
+                    if (probingActive && task.threads < MAX_THREADS && nextChunk.get() < count) {
                         if (lastSpeed == 0L || cur > lastSpeed * 11 / 10) {
                             val want = (task.threads * 2).coerceAtMost(MAX_THREADS)
                             val add = want - activeWorkers.get()
                             if (add > 0) repeat(add) { spawnWorker(count) }
                             task.threads = want
                             plateauSteps = 0
+                            if (want >= MAX_THREADS) probingActive = false
                         } else {
                             plateauSteps++
+                            // First plateau = settled (the class doc
+                            // always promised this; now it also stops
+                            // the controller from re-checking forever).
+                            probingActive = false
                             if (plateauSteps >= 1 && task.note.isBlank() && task.threads <= 8) {
                                 task.note = "加线程后速度不再提升，服务器可能按 IP 总限速，已用最优线程数。"
                             }
@@ -361,10 +400,22 @@ class DownloadEngine(
         // the persisted count but starts at most at 8 and lets the
         // prober grow it again if the network wants more.
         val resuming = firstOpen > 0 || downloadedBytes.get() > 0
-        val initial = if (resuming) {
-            task.threads.coerceIn(1, 8)
+        // v1.5: a FRESH start with a remembered optimum for this host
+        // begins at that count and skips probing altogether — the
+        // first ~6 s of ramp-up are pure waste on a known server.
+        val hint = if (!resuming && initialThreadsHint in 2..MAX_THREADS) {
+            initialThreadsHint
         } else {
-            4
+            0
+        }
+        val initial = when {
+            resuming -> task.threads.coerceIn(1, 8)
+            hint > 0 -> hint
+            else -> 4
+        }
+        probingActive = hint == 0
+        if (hint > 0 && task.note.isBlank()) {
+            task.note = "这个服务器上次的最佳线程数是 $hint，已直接用它下载，跳过试探。"
         }
         task.threads = initial
         repeat(initial) { spawnWorker(count) }
@@ -527,7 +578,7 @@ class DownloadEngine(
             throw IllegalStateException("服务器返回的分片位置不对，已重试")
         }
         val input: InputStream = c.inputStream
-        val buf = ByteArray(BUFFER_SIZE)
+        val buf = ByteArray(bufferSizeFor(task.threads))
         var pos = from
         while (!stopped()) {
             val limit = ac.end // may shrink when split
@@ -557,8 +608,19 @@ class DownloadEngine(
         val sampler = Thread {
             var lastBytes = 0L
             var lastTime = System.currentTimeMillis()
+            // v1.5: fixed-period ticks, same as the segmented sampler
+            // (chart window, big number and notification all read this
+            // one EMA, sampled on an exact 1 s grid).
+            var nextTick = System.currentTimeMillis() + 1000
             while (stopSampler.get() == 0 && !stopped()) {
-                try { Thread.sleep(1000) } catch (e: InterruptedException) { break }
+                val waitMs = nextTick - System.currentTimeMillis()
+                try {
+                    Thread.sleep(waitMs.coerceIn(50, 1000))
+                } catch (e: InterruptedException) { break }
+                nextTick += 1000
+                if (nextTick < System.currentTimeMillis()) {
+                    nextTick = System.currentTimeMillis() + 1000
+                }
                 if (!networkGuard()) {
                     netBlocked = true
                     break
@@ -590,7 +652,7 @@ class DownloadEngine(
             if (task.totalSize <= 0) task.totalSize = c.contentLengthLong
             c.inputStream.use { input ->
                 target.openStream().use { out ->
-                    val buf = ByteArray(BUFFER_SIZE)
+                    val buf = ByteArray(bufferSizeFor(1))
                     while (!stopped()) {
                         val n = input.read(buf)
                         if (n < 0) break
@@ -649,6 +711,24 @@ class DownloadEngine(
         const val STALL_EVICT_MS = 12_000L
         const val DEFAULT_UA =
             "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
+
+        /**
+         * v1.5 buffer sizing: the per-connection read buffer shrinks
+         * as the worker count grows, so total read-buffer memory
+         * stays bounded (~2 MB worst case at 32 threads) instead of
+         * scaling linearly with threads. Few threads keep the full
+         * 128 KB (fewest syscalls per MB); many threads trade a
+         * little per-connection efficiency for a hard memory cap.
+         * Connection reuse itself is the platform's keep-alive pool:
+         * every path here fully consumes or explicitly closes its
+         * streams, which is what lets HttpURLConnection recycle the
+         * underlying sockets — audited in v1.5, no change needed.
+         */
+        fun bufferSizeFor(threads: Int): Int {
+            val t = threads.coerceAtLeast(1)
+            val budget = 2 * 1024 * 1024 / t
+            return budget.coerceIn(32 * 1024, BUFFER_SIZE)
+        }
 
         fun fileNameFrom(contentDisposition: String?, url: String): String {
             if (!contentDisposition.isNullOrBlank()) {

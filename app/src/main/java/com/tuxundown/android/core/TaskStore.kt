@@ -57,6 +57,9 @@ class TaskRecord(
     // Live-only fields (speedHistory IS persisted since v1.4 so a
     // finished task keeps its curve; the rest stay transient):
     @Transient var downloaded: Long = 0,
+    /** v1.5: parked by the service after a network-outage failure;
+     *  the queue skips it until connectivity returns (see NetRetry). */
+    @Transient var netDeferred: Boolean = false,
     @Transient var speedBps: Long = 0,
     @Transient var peakBps: Long = 0,
     @Transient val speedHistory: MutableList<Long> = mutableListOf(),

@@ -32,7 +32,7 @@ object QueueOrder {
         now: Long,
         excludeIds: Set<String> = emptySet(),
     ): TaskRecord? = tasks.firstOrNull {
-        it.status == TaskStatus.QUEUED && it.id !in excludeIds &&
+        it.status == TaskStatus.QUEUED && it.id !in excludeIds && !it.netDeferred &&
             (it.scheduledAt <= 0 || it.scheduledAt <= now)
     }
 

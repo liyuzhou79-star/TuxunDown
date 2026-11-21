@@ -14,65 +14,65 @@ object DownloadCenter {
     private val engines = mutableMapOf<String, DownloadEngine>()
 
     var wifiOnly: Boolean
-        get() = prefs().getBoolean("wifiOnly", false)
+        get() = pBool("wifiOnly", false)
         set(v) { prefs().edit().putBoolean("wifiOnly", v).apply() }
 
     /** Custom download folder (SAF tree Uri string); "" = the public Download folder root itself. */
     var downloadDirUri: String
-        get() = prefs().getString("downloadDirUri", "") ?: ""
+        get() = pString("downloadDirUri", "")
         set(v) { prefs().edit().putString("downloadDirUri", v).apply() }
 
     var downloadDirName: String
-        get() = prefs().getString("downloadDirName", "") ?: ""
+        get() = pString("downloadDirName", "")
         set(v) { prefs().edit().putString("downloadDirName", v).apply() }
 
     /** Windows-style "详细信息" expanded state for task cards; remembered globally. */
     var detailsExpanded: Boolean
-        get() = prefs().getBoolean("detailsExpanded", true)
+        get() = pBool("detailsExpanded", true)
         set(v) { prefs().edit().putBoolean("detailsExpanded", v).apply() }
 
     /** Global per-task speed limit in KB/s (v1.3); 0 = unlimited. */
     var speedLimitKBps: Int
-        get() = prefs().getInt("speedLimitKBps", 0)
+        get() = pInt("speedLimitKBps", 0)
         set(v) { prefs().edit().putInt("speedLimitKBps", v).apply() }
 
     /** Completion feedback switches (v1.3). */
     var completeVibrate: Boolean
-        get() = prefs().getBoolean("completeVibrate", true)
+        get() = pBool("completeVibrate", true)
         set(v) { prefs().edit().putBoolean("completeVibrate", v).apply() }
 
     var completeSound: Boolean
-        get() = prefs().getBoolean("completeSound", false)
+        get() = pBool("completeSound", false)
         set(v) { prefs().edit().putBoolean("completeSound", v).apply() }
 
     /** versionName the full-screen onboarding guide was last shown for (v1.3). */
     var guideSeenVersion: String
-        get() = prefs().getString("guideSeenVersion", "") ?: ""
+        get() = pString("guideSeenVersion", "")
         set(v) { prefs().edit().putString("guideSeenVersion", v).apply() }
 
     /** Last clipboard link the user was prompted about (don't nag twice). */
     var clipboardPrompted: String
-        get() = prefs().getString("clipboardPrompted", "") ?: ""
+        get() = pString("clipboardPrompted", "")
         set(v) { prefs().edit().putString("clipboardPrompted", v).apply() }
 
     /** v1.4: how many tasks may download at the same time (1–5). */
     var maxConcurrent: Int
-        get() = prefs().getInt("maxConcurrent", 1).coerceIn(1, 5)
+        get() = pInt("maxConcurrent", 1).coerceIn(1, 5)
         set(v) { prefs().edit().putInt("maxConcurrent", v.coerceIn(1, 5)).apply() }
 
     /** v1.4: whole-task automatic retries after a failure (0 = off). */
     var autoRetryCount: Int
-        get() = prefs().getInt("autoRetryCount", 0).coerceIn(0, 5)
+        get() = pInt("autoRetryCount", 0).coerceIn(0, 5)
         set(v) { prefs().edit().putInt("autoRetryCount", v.coerceIn(0, 5)).apply() }
 
     /** v1.4: mobile-data protection threshold in MB (0 = off). */
     var trafficThresholdMB: Int
-        get() = prefs().getInt("trafficThresholdMB", 0).coerceAtLeast(0)
+        get() = pInt("trafficThresholdMB", 0).coerceAtLeast(0)
         set(v) { prefs().edit().putInt("trafficThresholdMB", v.coerceAtLeast(0)).apply() }
 
     /** v1.4: pages sniffed recently (newest first, max 10), for one-tap re-entry. */
     var sniffHistory: List<String>
-        get() = (prefs().getString("sniffHistory", "") ?: "")
+        get() = pString("sniffHistory", "")
             .lines().map { it.trim() }.filter { it.isNotBlank() }
         set(v) {
             prefs().edit().putString(
@@ -105,6 +105,48 @@ object DownloadCenter {
 
     private fun prefs() = appContext!!.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
+    // v1.5 startup-safety audit: a SharedPreferences value stored
+    // under the wrong type by an older build makes the typed getter
+    // throw ClassCastException — on a first-frame settings read that
+    // is a launch crash (the v1.3.0 lesson: never again). Every read
+    // below therefore goes through a runCatching helper with the
+    // documented default as the fallback. Writes stay direct.
+    private fun pBool(key: String, def: Boolean): Boolean =
+        runCatching { prefs().getBoolean(key, def) }.getOrDefault(def)
+
+    private fun pInt(key: String, def: Int): Int =
+        runCatching { prefs().getInt(key, def) }.getOrDefault(def)
+
+    private fun pString(key: String, def: String): String =
+        runCatching { prefs().getString(key, def) }.getOrDefault(def) ?: def
+
+    // ---- v1.5: per-host optimal thread memory (see HostMemory) ----
+
+    private fun hostEntries(): List<HostMemory.Entry> =
+        HostMemory.parse(pString("hostThreads", ""))
+
+    private fun saveHostEntries(entries: List<HostMemory.Entry>) {
+        prefs().edit().putString("hostThreads", HostMemory.serialize(entries)).apply()
+    }
+
+    /** Remembered thread count for this URL's host, 0 = unknown. */
+    fun hostThreadsHint(url: String): Int =
+        HostMemory.lookup(hostEntries(), HostMemory.hostOf(url), System.currentTimeMillis())
+
+    fun recordHostThreads(url: String, threads: Int) {
+        saveHostEntries(
+            HostMemory.recordSuccess(
+                hostEntries(), HostMemory.hostOf(url), threads, System.currentTimeMillis()
+            )
+        )
+    }
+
+    fun recordHostFailure(url: String) {
+        saveHostEntries(
+            HostMemory.recordFailure(hostEntries(), HostMemory.hostOf(url), System.currentTimeMillis())
+        )
+    }
+
     @Synchronized
     fun init(context: Context) {
         if (appContext != null) return
@@ -122,6 +164,7 @@ object DownloadCenter {
     /** Queue a task and kick the foreground service. Returns false if blocked. */
     fun enqueue(task: TaskRecord): Boolean {
         task.autoRetriesUsed = 0
+        task.netDeferred = false // v1.5: user action always wins over the outage park
         // v1.4: pressing 继续 on a paused task while on mobile data,
         // when the traffic guard would block it, IS the user's
         // explicit confirmation for this one task.
