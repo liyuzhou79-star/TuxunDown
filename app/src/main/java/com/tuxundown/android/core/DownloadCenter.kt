@@ -75,6 +75,29 @@ object DownloadCenter {
         get() = pBool("completeSound", false)
         set(v) { prefs().edit().putBoolean("completeSound", v).apply() }
 
+    /**
+     * v2.5: notification quiet hours. Inside the window a
+     * completion still posts its notification (with 打开 /
+     * 分享 actions), but the phone neither vibrates nor rings
+     * for it. Default OFF; the default window is 23:00-07:00.
+     */
+    var notifyQuietEnabled: Boolean
+        get() = pBool("notifyQuietEnabled", false)
+        set(v) { prefs().edit().putBoolean("notifyQuietEnabled", v).apply() }
+
+    var notifyQuietStartMin: Int
+        get() = pInt("notifyQuietStartMin", QuietHours.DEFAULT_START_MIN).coerceIn(0, 1439)
+        set(v) { prefs().edit().putInt("notifyQuietStartMin", v.coerceIn(0, 1439)).apply() }
+
+    var notifyQuietEndMin: Int
+        get() = pInt("notifyQuietEndMin", QuietHours.DEFAULT_END_MIN).coerceIn(0, 1439)
+        set(v) { prefs().edit().putInt("notifyQuietEndMin", v.coerceIn(0, 1439)).apply() }
+
+    /** True when completion feedback should stay silent now. */
+    fun quietHoursActive(nowMs: Long = System.currentTimeMillis()): Boolean =
+        notifyQuietEnabled &&
+            QuietHours.isQuietAt(notifyQuietStartMin, notifyQuietEndMin, nowMs)
+
     /** versionName the full-screen onboarding guide was last shown for (v1.3). */
     var guideSeenVersion: String
         get() = pString("guideSeenVersion", "")
@@ -239,6 +262,9 @@ object DownloadCenter {
         o.put("amoledBlack", amoledBlack)
         o.put("completeVibrate", completeVibrate)
         o.put("completeSound", completeSound)
+        o.put("notifyQuietEnabled", notifyQuietEnabled)
+        o.put("notifyQuietStartMin", notifyQuietStartMin)
+        o.put("notifyQuietEndMin", notifyQuietEndMin)
         o.put("autoInstallApk", autoInstallApk)
         o.put("autoOpenFile", autoOpenFile)
         o.put("archiveAfterDays", archiveAfterDays)
@@ -272,6 +298,15 @@ object DownloadCenter {
             completeVibrate = o.optBoolean("completeVibrate", completeVibrate)
         }
         if (o.has("completeSound")) completeSound = o.optBoolean("completeSound", completeSound)
+        if (o.has("notifyQuietEnabled")) {
+            notifyQuietEnabled = o.optBoolean("notifyQuietEnabled", notifyQuietEnabled)
+        }
+        if (o.has("notifyQuietStartMin")) {
+            notifyQuietStartMin = o.optInt("notifyQuietStartMin", notifyQuietStartMin)
+        }
+        if (o.has("notifyQuietEndMin")) {
+            notifyQuietEndMin = o.optInt("notifyQuietEndMin", notifyQuietEndMin)
+        }
         if (o.has("autoInstallApk")) autoInstallApk = o.optBoolean("autoInstallApk", autoInstallApk)
         if (o.has("autoOpenFile")) autoOpenFile = o.optBoolean("autoOpenFile", autoOpenFile)
         if (o.has("archiveAfterDays")) {

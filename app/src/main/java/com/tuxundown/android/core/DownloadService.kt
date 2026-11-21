@@ -33,6 +33,11 @@ class DownloadService : Service() {
     private val workerLock = Object()
     private val notifyLock = Object()
 
+    /** v2.5: recent completions, for the merge window (see
+     *  CompletionMerge). Guarded by [completionLock]. */
+    private val completionLock = Object()
+    private var recentCompletions: List<CompletionMerge.Done> = emptyList()
+
     /**
      * v2.1 audit (round 7, C1): start the ONE drain loop, atomically.
      * onStartCommand and the connectivity callback both used to do
@@ -77,6 +82,15 @@ class DownloadService : Service() {
             val nm = getSystemService(NotificationManager::class.java)
             nm.createNotificationChannel(
                 NotificationChannel(CHANNEL, "下载进度", NotificationManager.IMPORTANCE_LOW)
+            )
+            // v2.5: completions get their own channel — also
+            // LOW (silent by design): whether a completion makes
+            // noise is the user's 震动 / 提示音 switches' call
+            // (plus quiet hours), not the channel's.
+            nm.createNotificationChannel(
+                NotificationChannel(
+                    COMPLETE_CHANNEL, "下载完成", NotificationManager.IMPORTANCE_LOW
+                )
             )
         }
         registerNetworkCallback()
@@ -637,7 +651,7 @@ class DownloadService : Service() {
                 .getOrDefault("")
             if (verdict.isNotBlank()) note += " $verdict"
             task.note = note
-            notifyUpdate("下载完成", displayName, 100)
+            notifyCompletion(task, displayName)
             // v1.6: feed the statistics screen (local counters).
             DownloadCenter.recordCompletion(task)
             completionFeedback()
@@ -703,6 +717,10 @@ class DownloadService : Service() {
 
     /** Completion vibration / sound, per the user's switches. */
     private fun completionFeedback() {
+        // v2.5: quiet hours silence the feedback entirely; the
+        // completion notification itself still posts (its own
+        // channel is silent by design — see onCreate).
+        if (DownloadCenter.quietHoursActive()) return
         if (DownloadCenter.completeVibrate) {
             runCatching {
                 val vibrator = if (android.os.Build.VERSION.SDK_INT >= 31) {
@@ -726,6 +744,136 @@ class DownloadService : Service() {
                     .getDefaultUri(android.media.RingtoneManager.TYPE_NOTIFICATION)
                 android.media.RingtoneManager.getRingtone(this, uri)?.play()
             }
+        }
+    }
+
+    // ---------- v2.5: completion notifications ----------
+
+    /** Tap-anywhere intent for notifications: open the app. */
+    private fun appPendingIntent(): PendingIntent = PendingIntent.getActivity(
+        this, 0, Intent(this, MainActivity::class.java),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+
+    /**
+     * Post a completion on its OWN channel + id. (The old code
+     * posted "下载完成" over the foreground progress
+     * notification — it vanished when the service stopped and
+     * could never carry actions.) A single completion carries
+     * 打开/安装 and 分享 actions for the finished file;
+     * several completions inside the merge window collapse
+     * into ONE summary (see CompletionMerge) so a batch
+     * finishing together cannot stack up a wall of cards.
+     */
+    private fun notifyCompletion(task: TaskRecord, displayName: String) {
+        runCatching {
+            val now = System.currentTimeMillis()
+            val merged: List<CompletionMerge.Done>
+            synchronized(completionLock) {
+                recentCompletions = CompletionMerge.add(
+                    recentCompletions,
+                    CompletionMerge.Done(displayName, task.savedUri, now),
+                    now,
+                )
+                merged = recentCompletions
+            }
+            val nm = getSystemService(NotificationManager::class.java)
+            if (CompletionMerge.isMerged(merged)) {
+                val b = NotificationCompat.Builder(this, COMPLETE_CHANNEL)
+                    .setSmallIcon(android.R.drawable.stat_sys_download)
+                    .setContentTitle(CompletionMerge.title(merged))
+                    .setContentText("都已保存到下载目录，点开查看")
+                    .setStyle(
+                        NotificationCompat.BigTextStyle()
+                            .bigText(CompletionMerge.lines(merged))
+                    )
+                    .setContentIntent(appPendingIntent())
+                    .setAutoCancel(true)
+                nm.notify(COMPLETE_NOTIF_ID, b.build())
+            } else {
+                val b = NotificationCompat.Builder(this, COMPLETE_CHANNEL)
+                    .setSmallIcon(android.R.drawable.stat_sys_download)
+                    .setContentTitle("下载完成")
+                    .setContentText(displayName)
+                    .setContentIntent(appPendingIntent())
+                    .setAutoCancel(true)
+                completionOpenIntent(task, displayName)?.let { open ->
+                    val label =
+                        if (displayName.endsWith(".apk", ignoreCase = true)) {
+                            "安装"
+                        } else {
+                            "打开"
+                        }
+                    b.addAction(
+                        android.R.drawable.ic_media_play, label,
+                        PendingIntent.getActivity(
+                            this, 101 * 31 + task.id.hashCode(), open,
+                            PendingIntent.FLAG_UPDATE_CURRENT or
+                                PendingIntent.FLAG_IMMUTABLE,
+                        ),
+                    )
+                }
+                completionShareIntent(task, displayName)?.let { share ->
+                    b.addAction(
+                        android.R.drawable.ic_menu_share, "分享",
+                        PendingIntent.getActivity(
+                            this, 102 * 31 + task.id.hashCode(), share,
+                            PendingIntent.FLAG_UPDATE_CURRENT or
+                                PendingIntent.FLAG_IMMUTABLE,
+                        ),
+                    )
+                }
+                nm.notify(COMPLETE_NOTIF_ID, b.build())
+            }
+            // The widget's "last completed" state rides along,
+            // like it does on progress posts.
+            com.tuxundown.android.widget.WidgetUpdater.refresh(this)
+        }
+    }
+
+    /** 打开/安装 action for a finished file: the system
+     *  installer for an APK, a viewer for everything else —
+     *  the same intents the task card uses. */
+    private fun completionOpenIntent(
+        task: TaskRecord,
+        displayName: String,
+    ): Intent? {
+        val uriText = task.savedUri
+        if (uriText.isBlank()) return null
+        val uri = android.net.Uri.parse(uriText)
+        val mime = if (displayName.endsWith(".apk", ignoreCase = true)) {
+            "application/vnd.android.package-archive"
+        } else {
+            val ext = displayName.substringAfterLast('.', "").lowercase()
+            android.webkit.MimeTypeMap.getSingleton()
+                .getMimeTypeFromExtension(ext) ?: "*/*"
+        }
+        return Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, mime)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+    }
+
+    /** 分享 action: hand the finished file to the system
+     *  share sheet (read permission granted for the pick). */
+    private fun completionShareIntent(
+        task: TaskRecord,
+        displayName: String,
+    ): Intent? {
+        val uriText = task.savedUri
+        if (uriText.isBlank()) return null
+        val ext = displayName.substringAfterLast('.', "").lowercase()
+        val mime = android.webkit.MimeTypeMap.getSingleton()
+            .getMimeTypeFromExtension(ext) ?: "*/*"
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = mime
+            putExtra(Intent.EXTRA_STREAM, android.net.Uri.parse(uriText))
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        return Intent.createChooser(send, "分享文件").apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
     }
 
@@ -854,6 +1002,10 @@ class DownloadService : Service() {
     companion object {
         private const val CHANNEL = "downloads"
         private const val NOTIF_ID = 1
+        // v2.5: completion notifications live apart from the
+        // foreground progress notification.
+        private const val COMPLETE_CHANNEL = "download_complete"
+        private const val COMPLETE_NOTIF_ID = 2
         // v1.8: notification action buttons.
         const val ACTION_PAUSE = "com.tuxundown.android.action.PAUSE_TASK"
         const val ACTION_CANCEL = "com.tuxundown.android.action.CANCEL_TASK"
