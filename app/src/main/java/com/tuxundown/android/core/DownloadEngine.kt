@@ -373,6 +373,19 @@ class DownloadEngine(
                 "User-Agent",
                 UserAgents.resolve(task.headers["User-Agent"], customUserAgent),
             )
+            // v2.4 audit round 10 (byte integrity): byte ranges are
+            // defined over the IDENTITY representation of a file.
+            // Android's HttpURLConnection otherwise adds
+            // "Accept-Encoding: gzip" by itself and transparently
+            // decompresses the response — a server that ranges over
+            // a gzip representation, or wraps range bodies in one,
+            // would hand us bytes that do not belong at the
+            // requested offsets, silently. "identity" pins every
+            // response on every engine path (probe, chunks, single
+            // stream, HLS playlists/segments, mirror samples) to
+            // the raw file bytes. The SNIFFER is different: it asks
+            // for gzip explicitly and decompresses HTML itself.
+            c.setRequestProperty("Accept-Encoding", "identity")
             // v1.9: HTTP-proxy credentials ride every hop.
             proxySettings.proxyAuthHeader()?.let {
                 c.setRequestProperty("Proxy-Authorization", it)
@@ -1032,6 +1045,34 @@ class DownloadEngine(
             c.disconnect()
             throw IllegalStateException("服务器返回的分片位置不对，已重试")
         }
+        // v2.4 audit round 10: bind this response to the file the
+        // probe validated, not just to the right offset. The
+        // Content-Range TOTAL is the size the responding server
+        // believes the file has NOW; if it no longer matches the
+        // probed total, the file was swapped mid-download and
+        // these bytes belong to a different file — refuse them
+        // (the retry rotates to the next source, which may still
+        // serve the right file). Applies to mirrors too: their
+        // totals were validated equal before use.
+        val crTotal = contentRangeTotal(cr)
+        if (crTotal > 0 && task.totalSize > 0 && crTotal != task.totalSize) {
+            c.disconnect()
+            throw IllegalStateException("服务器上的文件在下载途中变了（大小对不上），已停下重试")
+        }
+        // Same binding via a strong ETag — PRIMARY source only.
+        // Mirrors are different servers and legitimately mint
+        // different ETags for identical bytes; the primary is the
+        // server the probe captured the validator from. A failed
+        // check fails the task loudly (never silently mixes two
+        // versions' bytes); a manual resume then re-validates
+        // and, if the file really changed, restarts it cleanly.
+        if (sourceUrl == task.url) {
+            val respEtag = c.getHeaderField("ETag") ?: ""
+            if (etagChanged(task.etag, respEtag)) {
+                c.disconnect()
+                throw IllegalStateException("服务器上的文件在下载途中变了（校验标记对不上），已停下重试")
+            }
+        }
         val input: InputStream = c.inputStream
         val buf = ByteArray(bufferSizeFor(task.threads))
         var pos = from
@@ -1285,6 +1326,21 @@ class DownloadEngine(
                         }
                         val iv = seg.keyIv ?: Hls.sequenceIv(seg.sequence)
                         data = Hls.decryptAes128(data, key, iv)
+                    }
+                    // v2.4 audit round 10: a .ts segment MUST begin
+                    // with the MPEG-TS sync byte 0x47. A CDN error
+                    // page (or a swapped segment) served with a 200
+                    // would otherwise be merged into a "successful"
+                    // file no player can open. Scoped to .ts on
+                    // purpose: raw AAC/MP3 audio segments are legal
+                    // HLS and carry no sync byte, so they are not
+                    // judged here.
+                    if (isTsSegment(seg.url) && data.isNotEmpty() &&
+                        data[0] != TS_SYNC_BYTE
+                    ) {
+                        throw IllegalStateException(
+                            "分片内容不对（不像视频分片），可能是服务器返回了错误页面，已重试"
+                        )
                     }
                     return data
                 } catch (e: InterruptedException) {
@@ -1606,7 +1662,51 @@ class DownloadEngine(
             if (code != HttpURLConnection.HTTP_OK && code != HttpURLConnection.HTTP_PARTIAL) {
                 throw IllegalStateException(Errors.httpMessage(code))
             }
-            if (task.totalSize <= 0) task.totalSize = c.contentLengthLong
+            // v2.4 audit round 10: this GET is a SECOND request —
+            // the probe's 200 body was thrown away — so bind it to
+            // the probed file before a single byte is written. A
+            // 206 answer to a request that carried no Range is
+            // only usable if it starts at byte 0 and its total is
+            // the probed one; a 200 whose length disagrees with
+            // the probe means the server swapped the file between
+            // the two requests (the old code trusted whichever
+            // body arrived and could call a different, shorter or
+            // longer file "done").
+            if (code == HttpURLConnection.HTTP_PARTIAL) {
+                val cr = c.getHeaderField("Content-Range") ?: ""
+                if (contentRangeStart(cr) != 0L) {
+                    c.disconnect()
+                    throw IllegalStateException("服务器返回的分片位置不对，已停下")
+                }
+                val crTotal = contentRangeTotal(cr)
+                if (crTotal > 0) {
+                    if (task.totalSize > 0 && crTotal != task.totalSize) {
+                        c.disconnect()
+                        throw IllegalStateException(
+                            "服务器在下载途中换了文件（大小和刚才探到的对不上），已停下；点继续会重新开始"
+                        )
+                    }
+                    task.totalSize = crTotal
+                }
+            } else {
+                val len = c.contentLengthLong
+                if (len > 0) {
+                    if (task.totalSize > 0 && len != task.totalSize) {
+                        c.disconnect()
+                        throw IllegalStateException(
+                            "服务器在下载途中换了文件（大小和刚才探到的对不上），已停下；点继续会重新开始"
+                        )
+                    }
+                    task.totalSize = len
+                }
+                val respEtag = c.getHeaderField("ETag") ?: ""
+                if (etagChanged(task.etag, respEtag)) {
+                    c.disconnect()
+                    throw IllegalStateException(
+                        "服务器在下载途中换了文件（校验标记对不上），已停下；点继续会重新开始"
+                    )
+                }
+            }
             c.inputStream.use { input ->
                 target.openStream().use { out ->
                     val buf = ByteArray(bufferSizeFor(1))
@@ -1681,6 +1781,47 @@ class DownloadEngine(
         fun isHlsUrl(url: String): Boolean =
             url.substringBefore('?').substringBefore('#')
                 .endsWith(".m3u8", ignoreCase = true)
+
+        /** v2.4 audit round 10: the MPEG-TS sync byte every .ts
+         *  segment starts with. */
+        const val TS_SYNC_BYTE: Byte = 0x47
+
+        /** True when the URL path ends in .ts (query/fragment aside). */
+        fun isTsSegment(url: String): Boolean =
+            url.substringBefore('?').substringBefore('#')
+                .endsWith(".ts", ignoreCase = true)
+
+        /**
+         * v2.4 audit round 10: the total length out of a
+         * "bytes start-end/total" Content-Range value; -1 when the
+         * header is absent, malformed, or carries "*" (unknown).
+         * Pure — unit-tested.
+         */
+        fun contentRangeTotal(contentRange: String?): Long {
+            if (contentRange.isNullOrBlank()) return -1
+            return contentRange.substringAfter('/', "").trim().toLongOrNull() ?: -1
+        }
+
+        /** The start offset out of a Content-Range value; -1 when unparsable. */
+        fun contentRangeStart(contentRange: String?): Long {
+            if (contentRange.isNullOrBlank()) return -1
+            return contentRange.removePrefix("bytes ")
+                .substringBefore('-').trim().toLongOrNull() ?: -1
+        }
+
+        /**
+         * v2.4 audit round 10: mid-download identity verdict. Only
+         * a STRONG ETag testifies byte identity — a weak ("W/…")
+         * tag explicitly does not, per RFC 9110 — so only a
+         * strong-vs-strong mismatch condemns the response. Either
+         * side missing or weak = no verdict (false). Pure —
+         * unit-tested.
+         */
+        fun etagChanged(stored: String, current: String): Boolean {
+            if (stored.isBlank() || current.isBlank()) return false
+            if (stored.startsWith("W/") || current.startsWith("W/")) return false
+            return stored != current
+        }
         const val DEFAULT_UA =
             "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
 
