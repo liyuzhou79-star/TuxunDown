@@ -337,6 +337,9 @@ fun DownApp() {
     var autoRetry by remember { mutableStateOf(DownloadCenter.autoRetryCount) }
     var trafficMB by remember { mutableStateOf(DownloadCenter.trafficThresholdMB) }
     var dualChan by remember { mutableStateOf(DownloadCenter.dualChannel) }
+    // v2.6: boot resume + category subfolders (both default off).
+    var bootResumeUi by remember { mutableStateOf(DownloadCenter.bootResume) }
+    var sortFoldersUi by remember { mutableStateOf(DownloadCenter.sortSubfolders) }
     var archiveDaysUi by remember { mutableStateOf(DownloadCenter.archiveAfterDays) }
     var userAgentUi by remember { mutableStateOf(DownloadCenter.userAgent) }
     var amoledUi by remember { mutableStateOf(DownloadCenter.amoledBlack) }
@@ -437,7 +440,7 @@ fun DownApp() {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "2.5.0"
+        }.getOrNull() ?: "2.6.0"
     }
     var showGuide by remember {
         // v2.2 safe mode: after 2+ consecutive crashes, first-
@@ -1182,6 +1185,10 @@ fun DownApp() {
             onTraffic = { trafficMB = it; DownloadCenter.trafficThresholdMB = it },
             dualChan = dualChan,
             onDualChan = { dualChan = it; DownloadCenter.dualChannel = it },
+            bootResume = bootResumeUi,
+            onBootResume = { bootResumeUi = it; DownloadCenter.bootResume = it },
+            sortFolders = sortFoldersUi,
+            onSortFolders = { sortFoldersUi = it; DownloadCenter.sortSubfolders = it },
             archiveDays = archiveDaysUi,
             onArchiveDays = { days ->
                 archiveDaysUi = days
@@ -3162,6 +3169,10 @@ fun SettingsScreen(
     onTraffic: (Int) -> Unit,
     dualChan: Boolean,
     onDualChan: (Boolean) -> Unit,
+    bootResume: Boolean,
+    onBootResume: (Boolean) -> Unit,
+    sortFolders: Boolean,
+    onSortFolders: (Boolean) -> Unit,
     archiveDays: Int,
     onArchiveDays: (Int) -> Unit,
     userAgent: String,
@@ -3212,7 +3223,7 @@ fun SettingsScreen(
     val settingsKeywords = mapOf(
         "s-download" to "下载 仅wifi wifi 同时下载 任务数 并发 全局限速 限速 速度 " +
             "自动重试 重试 流量保护 流量 阈值 双通道 user-agent ua 浏览器标识 " +
-            "下载目录 文件夹 保存位置",
+            "下载目录 文件夹 保存位置 开机 自启 恢复 重启 续传 分类 分文件夹 类型",
         "s-proxy" to "代理 proxy http socks 端口 地址 服务器 用户名 密码 认证",
         "s-look" to "外观 amoled 纯黑 深色 暗色 主题 黑色",
         "s-notify" to "提示 震动 声音 响铃 完成 自动安装 安装 自动打开 打开 静默 夜间 时段 勿扰",
@@ -3471,6 +3482,41 @@ fun SettingsScreen(
                     onClick = { onUserAgent(uaCustom.trim()) },
                     modifier = Modifier.padding(top = 6.dp),
                 ) { Text("用这个自定义 UA") }
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("开机后自动恢复未完成任务")
+                        Text(
+                            "手机重启后，没下完的任务按队列自动接着下；" +
+                                "仍受「仅 WiFi 下载」和流量保护限制，你手动暂停的任务不会被自动恢复。默认关",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = bootResume, onCheckedChange = onBootResume)
+                }
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("按类型分文件夹")
+                        Text(
+                            "新下完的文件按类型放进公共「下载」目录的" +
+                                " 视频 / 音频 / 图片 / 文档 / 压缩包 / APK 子文件夹；" +
+                                "已下好的文件不搬家。用自定义下载文件夹时不生效。默认关",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = sortFolders, onCheckedChange = onSortFolders)
+                }
             }
         }
         if (groupVisible("s-proxy")) item(key = "s-proxy") {
@@ -4070,11 +4116,10 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 迅雷链接能直接用了：thunder:// 开头的链接粘进来（或分享、扫码、从文本文件导入），App 会自动解开外壳、拿到真实地址再按正常流程下载。解不开的会明说，不会假装在下。注意：这只是解码——ed2k、磁力这类需要专门客户端的链接仍然不支持\n" +
-            "· 完成通知带按钮了：下载完成的通知上直接有「打开 / 安装」和「分享」，不用再先进 App 找文件。通知也独立出来了，不会再被下载进度通知顶掉\n" +
-            "· 通知静默时段（设置 → 提示）：设好时段（默认 23:00–07:00），这段时间里下载完成不震动、不响铃，通知照常挂着，早上起来点开就能打开文件\n" +
-            "· 一批任务同时下完，只合并成一条汇总通知，不再刷屏\n" +
-            "· 升级迁移专审：把从 1.2 到 2.1 每一代的任务记录和设置都造出来实测过——老版本升上来，任务、断点、设置都不会丢、不会乱；启动也再梳了一遍，非必需的加载都挪到首屏显示之后，打开更快",
+            "· 开机后自动恢复（设置 → 下载，默认关）：打开后，手机重启完，没下完的任务会按队列自己接着下；下载中被系统杀掉进程的任务，服务被系统重新拉起时也会自动续上。你亲手暂停的任务永远不会被自动恢复\n" +
+            "· 按类型分文件夹（设置 → 下载，默认关）：打开后，新下完的文件按类型进公共「下载」目录里的 视频 / 音频 / 图片 / 文档 / 压缩包 / APK 子文件夹，找文件更方便；已下好的文件不搬家，关掉开关后新文件回到「下载」第一层；用自定义文件夹时不生效\n" +
+            "· 连接竞速：服务器同时有 IPv6 和 IPv4 两个地址时，两条路同时连、谁先通就用谁，不再干等一条不通的路超时（只对 https 直连生效；普通 http 和走代理时维持原来的连法——系统没给这种改法，快不快取决于你的网络环境）\n" +
+            "· 三处进度对齐了：主页顶部的总进度、下载通知、桌面小部件改成同一套算法。以前下大文件时，主页的百分比偶尔会和通知差 1%，现在三处永远一致",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
             "· 文件直链 → 直接开始多线程下载，还能预先改好保存文件名\n" +
