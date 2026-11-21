@@ -13,6 +13,17 @@ object DownloadCenter {
     private var appContext: Context? = null
     private val engines = mutableMapOf<String, DownloadEngine>()
 
+    // v2.1 audit (round 7, C1): one-task-one-engine claims, held by
+    // the service for the whole runOne invocation. See EngineClaims.
+    private val engineClaims = EngineClaims()
+
+    /** Take the run claim for [taskId]; false = another run owns it. */
+    fun claimEngine(taskId: String): Boolean = engineClaims.claim(taskId)
+
+    fun releaseEngine(taskId: String) = engineClaims.release(taskId)
+
+    fun isClaimed(taskId: String): Boolean = engineClaims.isClaimed(taskId)
+
     var wifiOnly: Boolean
         get() = pBool("wifiOnly", false)
         set(v) { prefs().edit().putBoolean("wifiOnly", v).apply() }
@@ -410,9 +421,14 @@ object DownloadCenter {
     }
 
     /** v1.4 插队： move a queued task to the front of the queue.
-     *  v1.6: a jumped task also gains bandwidth-budget weight. */
+     *  v1.6: a jumped task also gains bandwidth-budget weight.
+     *  v2.1 audit (C5): the reorder is a compound indexOf/remove/add
+     *  over the shared list — hold the list's monitor so a drain-loop
+     *  or composition iteration never observes the half-moved state. */
     fun moveToFrontOfQueue(task: TaskRecord): Boolean {
-        val changed = QueueOrder.moveToFrontOfQueue(store.tasks, task)
+        val changed = synchronized(store.tasks) {
+            QueueOrder.moveToFrontOfQueue(store.tasks, task)
+        }
         if (changed) {
             if (task.priority == 0) task.priority = 1
             store.save()

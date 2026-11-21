@@ -18,7 +18,11 @@ class TaskRecord(
     var chunkDone: BooleanArray = BooleanArray(0),
     var singleThreadOnly: Boolean = false,
     var threads: Int = 4,
-    var status: TaskStatus = TaskStatus.QUEUED,
+    /** v2.1 audit (C5): written by engine/service threads, read by
+     *  the UI thread and the drain loop — volatile so a pause or a
+     *  completion written on one thread is the value every other
+     *  thread acts on, not a stale cached copy. */
+    @Volatile var status: TaskStatus = TaskStatus.QUEUED,
     /** Plain-language note shown in the UI (e.g. why we fell back to 1 thread). */
     var note: String = "",
     var error: String = "",
@@ -84,7 +88,7 @@ class TaskRecord(
     var hlsDone: BooleanArray = BooleanArray(0),
     // Live-only fields (speedHistory IS persisted since v1.4 so a
     // finished task keeps its curve; the rest stay transient):
-    @Transient var downloaded: Long = 0,
+    @Transient @Volatile var downloaded: Long = 0,
     /** v1.5: parked by the service after a network-outage failure;
      *  the queue skips it until connectivity returns (see NetRetry). */
     @Transient var netDeferred: Boolean = false,
@@ -129,7 +133,20 @@ class TaskRecord(
 class TaskStore(context: Context) {
     private val dir = File(context.filesDir, "downloads").apply { mkdirs() }
     private val metaFile = File(context.filesDir, "tasks.json")
-    val tasks: MutableList<TaskRecord> = mutableListOf()
+    /**
+     * v2.1 audit (round 7, C5): this list is iterated and mutated
+     * from the UI thread (add / remove / 插队 / composition filters),
+     * service threads (drain picks, the connectivity callback, the
+     * cancel path in runOne) and the save executor (serialize) —
+     * a plain ArrayList under that access pattern can throw
+     * ConcurrentModificationException mid-iteration (a dead drain
+     * loop silently stalls the whole queue; in composition it is a
+     * crash) or hand out torn reads. Mutations are rare and
+     * iterations are constant, so a copy-on-write list is the right
+     * trade: every iterator sees one consistent snapshot.
+     */
+    val tasks: MutableList<TaskRecord> =
+        java.util.concurrent.CopyOnWriteArrayList()
 
     fun fileOf(task: TaskRecord): File = File(dir, task.id + ".bin")
     fun finalName(task: TaskRecord): String = task.fileName.ifBlank { "download" }

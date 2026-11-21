@@ -27,6 +27,28 @@ class DownloadService : Service() {
 
     @Volatile private var worker: Thread? = null
     @Volatile private var lastNotifyMs = 0L
+    /** v2.1 audit (C1/C7): monitors for the two check-then-act pairs
+     *  that used to race — the drain-worker start and the
+     *  notification throttle gate. */
+    private val workerLock = Object()
+    private val notifyLock = Object()
+
+    /**
+     * v2.1 audit (round 7, C1): start the ONE drain loop, atomically.
+     * onStartCommand and the connectivity callback both used to do
+     * `if (worker?.isAlive != true) worker = Thread{...}` with no
+     * synchronization — two callers in the same instant could both
+     * pass the check and start TWO drain loops, and two loops could
+     * run two engines over the same task (each loop keeps its own
+     * running-map). The claim in runOne is the hard invariant; this
+     * lock removes the duplicate loop itself.
+     */
+    private fun ensureWorker() {
+        synchronized(workerLock) {
+            if (worker?.isAlive == true) return
+            worker = Thread { drainQueue() }.apply { isDaemon = true; start() }
+        }
+    }
 
     /** v1.5: per-task network-outage recovery attempts spent. */
     private val netAttempts = java.util.concurrent.ConcurrentHashMap<String, Int>()
@@ -129,11 +151,7 @@ class DownloadService : Service() {
                     }
                     if (cleared) {
                         DownloadCenter.store.save()
-                        if (worker?.isAlive != true) {
-                            worker = Thread { drainQueue() }.apply {
-                                isDaemon = true; start()
-                            }
-                        }
+                        ensureWorker()
                     }
                 }
             }
@@ -156,7 +174,13 @@ class DownloadService : Service() {
             ACTION_CANCEL -> intent.getStringExtra(EXTRA_TASK_ID)?.let { id ->
                 val t = DownloadCenter.store.byId(id)
                 if (t != null) {
-                    if (t.status == TaskStatus.RUNNING) {
+                    // v2.1 audit (C8): a task inside its retry
+                    // backoff is not RUNNING but IS owned by a live
+                    // runOne — deleting its file/record directly
+                    // raced that owner (it would rebuild the target
+                    // and download a ghost). Claimed tasks always go
+                    // through the cancel flow; the owner deletes.
+                    if (t.status == TaskStatus.RUNNING || DownloadCenter.isClaimed(t.id)) {
                         DownloadCenter.cancelTask(t)
                     } else {
                         Thread {
@@ -170,9 +194,7 @@ class DownloadService : Service() {
             }
         }
         startForeground(NOTIF_ID, buildNotification("准备下载…", "", 0))
-        if (worker?.isAlive != true) {
-            worker = Thread { drainQueue() }.apply { isDaemon = true; start() }
-        }
+        ensureWorker()
         return START_STICKY
     }
 
@@ -277,11 +299,34 @@ class DownloadService : Service() {
 
     /** Run one task to a terminal state, with automatic retries. */
     private fun runOne(task: TaskRecord) {
+        // v2.1 audit (round 7, C1): claim the task for the WHOLE
+        // invocation — transfer, retry backoff and finalize — so no
+        // second runOne for this task can ever overlap it, whatever
+        // thread or drain loop asks. A refused claim means another
+        // run already owns the task; step aside silently.
+        if (!DownloadCenter.claimEngine(task.id)) return
+        try {
+            runOneClaimed(task)
+        } finally {
+            DownloadCenter.releaseEngine(task.id)
+        }
+    }
+
+    private fun runOneClaimed(task: TaskRecord) {
         val store = DownloadCenter.store
         while (true) {
             // The record may have been deleted from the UI in the
             // same instant we picked it up; never download a ghost.
             if (store.byId(task.id) == null) return
+            // v2.1 audit (C4): the user can tap pause in the instant
+            // between the drain loop picking this task and this
+            // thread starting — the engine is not registered yet, so
+            // the pause has nothing to bite on, and the old code
+            // then overwrote PAUSED with RUNNING and downloaded
+            // anyway. A first entry must still find the task QUEUED
+            // (the retry loop re-enters through its own QUEUED set
+            // below); PAUSED here is the user's intent — honour it.
+            if (task.status == TaskStatus.PAUSED) return
             task.status = TaskStatus.RUNNING
             // v1.6 dual channel honesty: the card says whether the
             // second network really came up — never fake it.
@@ -365,7 +410,14 @@ class DownloadService : Service() {
             )
             DownloadCenter.registerEngine(task, engine)
             try {
-                engine.run()
+                // v2.1 audit (C8): last-moment existence re-check —
+                // a direct delete that landed while the engine was
+                // being built must not leave us downloading a ghost
+                // whose record (and target) are already gone. Any
+                // delete arriving after this point sees the task
+                // RUNNING and routes through cancelTask instead.
+                if (store.byId(task.id) == null) return
+                val runResult = engine.run()
                 if (DownloadCenter.consumeCancelled(task)) {
                     // Audit A7: the user deleted this task while it
                     // was running. The engine has fully stopped NOW,
@@ -375,9 +427,28 @@ class DownloadService : Service() {
                     store.remove(task)
                     return
                 }
-                if (task.status == TaskStatus.DONE) {
+                // v2.1 audit (C9): decide completion from the
+                // engine's RETURNED status, not the shared field —
+                // a pause tap landing in the engine's final instant
+                // could overwrite task.status with PAUSED after the
+                // last byte landed, and the old check then never
+                // finalized a byte-complete file (it sat as .part
+                // until the user happened to resume). The bytes are
+                // all there; DONE is the truth.
+                if (runResult == TaskStatus.DONE) {
+                    task.status = TaskStatus.DONE
                     netAttempts.remove(task.id)
                     finalizeFinished(task)
+                    // v2.1 audit (C3): a delete tap that landed
+                    // DURING finalize (after the check above) used
+                    // to be silently dropped — the flag stayed in
+                    // the cancelled set and the task survived as
+                    // DONE. Honour it now: the record goes away,
+                    // the finished file stays — exactly the
+                    // semantics of deleting a DONE card.
+                    if (DownloadCenter.consumeCancelled(task)) {
+                        store.remove(task)
+                    }
                     return
                 }
             } finally {
@@ -429,6 +500,19 @@ class DownloadService : Service() {
                 (task.progress * 100).toInt(),
             )
             if (!sleepBackoff(waitMs, task)) return
+            // v2.1 audit (round 7, C2): a delete that landed DURING
+            // the backoff went unnoticed here — the record is still
+            // present (the service owns its deletion) and the status
+            // is still FAILED, so the old code re-queued and started
+            // a whole new engine run for a task the user had already
+            // deleted; the cancel flag was only consumed after that
+            // run ended. Honour the delete NOW: file + record go,
+            // no extra download.
+            if (DownloadCenter.consumeCancelled(task)) {
+                PublicStorage.deleteTarget(this, task)
+                store.remove(task)
+                return
+            }
             // If the user took over meanwhile (paused / re-queued /
             // deleted), step aside and let the normal flow own it.
             if (store.byId(task.id) == null || task.status != TaskStatus.FAILED) return
@@ -561,9 +645,14 @@ class DownloadService : Service() {
     private fun notifyAggregate() {
         // v1.4: several engines may report in the same second; the
         // notification never needs more than one post per ~second.
+        // v2.1 audit (C7): the gate itself is check-then-set from
+        // several engine threads at once — hold a monitor so two
+        // threads cannot both slip through in the same instant.
         val now = System.currentTimeMillis()
-        if (now - lastNotifyMs < 900) return
-        lastNotifyMs = now
+        synchronized(notifyLock) {
+            if (now - lastNotifyMs < 900) return
+            lastNotifyMs = now
+        }
         val store = DownloadCenter.store
         val runningTasks = store.tasks.filter { it.status == TaskStatus.RUNNING }
         if (runningTasks.isEmpty()) {
