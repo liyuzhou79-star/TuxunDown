@@ -866,6 +866,9 @@ fun DownApp() {
             PublicStorage.deleteTarget(context, task)
         }
         store.remove(task)
+        // v2.1: a deleted queued task may never wake the service —
+        // refresh the home-screen widget from here too.
+        com.tuxundown.android.widget.WidgetUpdater.refresh(context)
     }
 
     // One card wiring, reused by the narrow list and the wide

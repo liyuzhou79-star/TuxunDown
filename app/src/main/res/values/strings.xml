@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The app hardcodes its UI strings in code; this file exists
+         for resources that must reference a string (the widget
+         description shown in the launcher's widget picker). -->
+    <string name="widget_description">看正在下载的任务数和总进度，点一下打开 TuxunDown</string>
+</resources>

@@ -50,6 +50,22 @@
             android:name=".core.DownloadService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <!-- v2.1: home-screen widget (in-flight task count + total
+             progress). Updates are pushed by the download service;
+             the provider only answers the launcher's broadcasts,
+             which come from the system — exported=false is the
+             documented shape for an AppWidgetProvider. -->
+        <receiver
+            android:name=".widget.DownloadWidgetProvider"
+            android:exported="false"
+            android:label="TuxunDown 下载进度">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_download_info" />
+        </receiver>
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="com.tuxundown.android.files"

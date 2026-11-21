@@ -293,6 +293,9 @@ class DownloadService : Service() {
             }
         }
         releaseCellular()
+        // v2.1: settle the widget on the final state before the
+        // service goes away (no more posts will come from here).
+        com.tuxundown.android.widget.WidgetUpdater.refresh(this)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -814,6 +817,10 @@ class DownloadService : Service() {
     ) {
         getSystemService(NotificationManager::class.java)
             .notify(NOTIF_ID, buildNotification(title, text, pct, actionTask, bigText))
+        // v2.1: the home-screen widget rides the same posts (the
+        // aggregate path is already throttled to ~1/s; the other
+        // callers are state transitions). Best-effort inside.
+        com.tuxundown.android.widget.WidgetUpdater.refresh(this)
     }
 
     companion object {

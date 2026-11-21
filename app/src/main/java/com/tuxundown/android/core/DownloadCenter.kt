@@ -433,6 +433,7 @@ object DownloadCenter {
             // task starts by itself when WiFi returns.
             val ctx = appContext!!
             ContextCompat.startForegroundService(ctx, Intent(ctx, DownloadService::class.java))
+            refreshWidget()
             return false
         }
         task.status = TaskStatus.QUEUED
@@ -440,6 +441,7 @@ object DownloadCenter {
         store.save()
         val ctx = appContext!!
         ContextCompat.startForegroundService(ctx, Intent(ctx, DownloadService::class.java))
+        refreshWidget()
         return true
     }
 
@@ -475,6 +477,18 @@ object DownloadCenter {
             task.status = TaskStatus.PAUSED
         }
         store.save()
+        refreshWidget()
+    }
+
+    /**
+     * v2.1: keep the home-screen widget honest after changes that
+     * may not wake the service (a pause of the last task, an
+     * enqueue that returns early). Best-effort — the updater
+     * swallows every failure and no-ops when no widget exists.
+     */
+    private fun refreshWidget() {
+        val ctx = appContext ?: return
+        com.tuxundown.android.widget.WidgetUpdater.refresh(ctx)
     }
 
     fun nextQueued(): TaskRecord? =
