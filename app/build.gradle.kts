@@ -81,6 +81,18 @@ android {
         resources {
             excludes += "DebugProbesKt.bin"
         }
+        // v2.0.0 slimming, the big lever: since AGP 7 the default
+        // packaging stores classes.dex UNCOMPRESSED in the APK
+        // (page-aligned for direct mmap). That is a runtime
+        // nicety this project does not need — its hard constraint
+        // is the DOWNLOAD size of the APK (the whole feature set
+        // lives in one ~2.2 MB dex that deflates to roughly
+        // half). Legacy packaging compresses the dex again; the
+        // platform extracts it at install time as it always did
+        // pre-AGP-7. Measured effect is recorded in CHECKPOINT.
+        dex {
+            useLegacyPackaging = true
+        }
     }
 }
 
