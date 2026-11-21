@@ -88,6 +88,32 @@ class TaskStoreJsonTest {
     }
 
     @Test
+    fun hostileBackupRecordsAreContained() {
+        // v1.9 audit: an imported backup is untrusted input.
+        // - a record claiming an astronomical file with 1-byte
+        //   chunks must not blow up memory (chunk count clamps);
+        // - one structurally broken record must not discard the
+        //   healthy records around it;
+        // - absurd HLS segment counts clamp.
+        val hostile = """
+            [
+              {"id":"ok1","url":"https://a.b/good.bin","status":"PAUSED"},
+              {"id":"boom","url":"https://a.b/evil.bin","totalSize":9223372036854775806,"chunkSize":1,"chunkDone":"ffff","status":"PAUSED"},
+              {"id":"broken"},
+              {"id":"hls","url":"https://a.b/x.m3u8","isHls":true,"hlsTotalSegments":2147483647,"hlsDone":"ff","status":"PAUSED"}
+            ]
+        """.trimIndent()
+        val back = TaskStore.deserialize(hostile)
+        val byId = back.associateBy { it.id }
+        assertTrue(byId.containsKey("ok1"))
+        assertTrue("the broken record is skipped, the rest survive", byId.size >= 3)
+        val hls = byId["hls"]
+        assertTrue(hls != null)
+        assertTrue(hls!!.hlsTotalSegments <= TaskStore.MAX_HLS_SEGMENTS)
+        assertTrue(hls.hlsDone.size <= TaskStore.MAX_HLS_SEGMENTS)
+    }
+
+    @Test
     fun oldFormatWithoutV14FieldsStillLoads() {
         // A v1.3-era record: none of the v1.4 keys exist.
         val old = """[{"id":"x1","url":"https://a.b/c.bin","fileName":"c.bin","status":"DONE"}]"""

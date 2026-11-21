@@ -132,6 +132,27 @@ class ScanActivity : Activity() {
         super.onPause()
     }
 
+    override fun onResume() {
+        super.onResume()
+        // v1.9 audit: onPause releases the camera, but the only
+        // restart paths were surfaceCreated and the permission
+        // callback. When the surface SURVIVES a pause (translucent
+        // overlay, multi-window), neither fires again and the
+        // preview stayed black until the screen was recreated.
+        // startCamera already no-ops when a camera is held.
+        if (hasCameraPermission()) {
+            surfaceView?.holder?.let { startCamera(it) }
+        }
+    }
+
+    override fun onDestroy() {
+        // v1.9 audit: belt and braces — never outlive the screen
+        // holding the camera, even on destroy-without-pause paths.
+        stopCamera()
+        decodeExecutor.shutdownNow()
+        super.onDestroy()
+    }
+
     private fun hasCameraPermission(): Boolean =
         checkSelfPermission(android.Manifest.permission.CAMERA) ==
             PackageManager.PERMISSION_GRANTED
@@ -204,11 +225,6 @@ class ScanActivity : Activity() {
                 decodeBusy = false
             }
         }
-    }
-
-    override fun onDestroy() {
-        decodeExecutor.shutdownNow()
-        super.onDestroy()
     }
 
     private fun decode(source: com.google.zxing.LuminanceSource): String? =

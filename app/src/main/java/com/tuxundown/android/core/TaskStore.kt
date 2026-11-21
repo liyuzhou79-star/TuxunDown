@@ -265,6 +265,14 @@ class TaskStore(context: Context) {
         /** v1.7: coalesced-save window — at most one flush per 1.5 s. */
         const val SAVE_DELAY_MS = 1500L
 
+        /** v1.9 audit: sanity ceilings for count-shaped fields in
+         *  parsed records (real HLS playlists have at most a few
+         *  thousand segments; real tasks a handful of mirrors and
+         *  headers). Anything above is corrupt or hostile input. */
+        const val MAX_HLS_SEGMENTS = 200_000
+        const val MAX_SOURCES = 20
+        const val MAX_HEADERS = 50
+
         /** Pure serialization — same format on disk and for export. */
         fun serialize(list: List<TaskRecord>): String {
             val arr = JSONArray()
@@ -321,9 +329,16 @@ class TaskStore(context: Context) {
         /** Pure parsing; a corrupt text yields an empty list, never a crash. */
         fun deserialize(text: String): MutableList<TaskRecord> {
             val out = mutableListOf<TaskRecord>()
-            runCatching {
-                val arr = JSONArray(text)
-                for (i in 0 until arr.length()) {
+            val arr = runCatching { JSONArray(text) }.getOrNull() ?: return out
+            for (i in 0 until arr.length()) {
+                // v1.9 audit (round 5): the guard is PER RECORD now.
+                // This parser also reads imported backups — fully
+                // untrusted input — and one poisoned record (bad
+                // types, absurd counts) used to discard the whole
+                // list; now it only discards itself. Count-shaped
+                // fields are additionally clamped below so a record
+                // cannot size a giant allocation (see ChunkPlanner).
+                runCatching {
                     val o = arr.getJSONObject(i)
                     val t = TaskRecord(
                         id = o.getString("id"),
@@ -352,7 +367,8 @@ class TaskStore(context: Context) {
                         mobileConfirmed = o.optBoolean("mobileConfirmed", false),
                         priority = o.optInt("priority", 0),
                         isHls = o.optBoolean("isHls", false),
-                        hlsTotalSegments = o.optInt("hlsTotalSegments", 0),
+                        hlsTotalSegments = o.optInt("hlsTotalSegments", 0)
+                            .coerceIn(0, MAX_HLS_SEGMENTS),
                         expectedSha256 = o.optString("expectedSha256"),
                         expectedMd5 = o.optString("expectedMd5"),
                         checksumState = o.optInt("checksumState", 0),
@@ -367,7 +383,9 @@ class TaskStore(context: Context) {
                     if (srcArr != null) {
                         for (j in 0 until srcArr.length()) {
                             val s = srcArr.optString(j)
-                            if (s.isNotBlank() && s != t.url && s !in t.sources) {
+                            if (s.isNotBlank() && s != t.url && s !in t.sources &&
+                                t.sources.size < MAX_SOURCES
+                            ) {
                                 t.sources.add(s)
                             }
                         }
@@ -379,7 +397,9 @@ class TaskStore(context: Context) {
                         val csv = o.optString("hlsSizesCsv")
                         if (csv.isNotBlank()) {
                             synchronized(t.hlsSizes) {
-                                csv.split(',').forEach {
+                                // v1.9 audit: never more entries
+                                // than the (clamped) segment count.
+                                csv.split(',').take(t.hlsTotalSegments).forEach {
                                     t.hlsSizes.add(it.trim().toLongOrNull() ?: -1)
                                 }
                             }
@@ -399,7 +419,11 @@ class TaskStore(context: Context) {
                     val h = o.optJSONObject("headers")
                     if (h != null) {
                         val keys = h.keys()
+                        var hn = 0
                         while (keys.hasNext()) {
+                            // v1.9 audit: a backup cannot stuff a
+                            // record with thousands of headers.
+                            if (hn++ >= MAX_HEADERS) break
                             val k = keys.next()
                             t.headers[k] = h.getString(k)
                         }

@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.view.Gravity
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -75,19 +76,54 @@ class SniffActivity : Activity() {
         web.settings.javaScriptEnabled = true
         web.settings.domStorageEnabled = true
         web.settings.cacheMode = WebSettings.LOAD_DEFAULT
-        web.webViewClient = WebViewClient()
+        // v1.9 audit: navigation is gated to web schemes. A page
+        // (or an ad inside it) trying to steer the WebView at
+        // intent://, file://, tel: and friends used to just fail
+        // weirdly or leave the browser; now it is stopped with a
+        // plain explanation. There is deliberately NO Javascript
+        // bridge (addJavascriptInterface) — page JS can never call
+        // into the app.
+        web.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(
+                view: WebView, request: WebResourceRequest,
+            ): Boolean {
+                val u = request.url?.toString() ?: return true
+                val scheme = u.substringBefore(':').lowercase()
+                return if (scheme == "http" || scheme == "https" || scheme == "about") {
+                    false
+                } else {
+                    Toast.makeText(
+                        this@SniffActivity,
+                        "页面想打开非网页链接（$scheme），已拦下",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                    true
+                }
+            }
+        }
         web.setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
-            val headers = mutableMapOf<String, String>()
-            headers["User-Agent"] = userAgent ?: ""
-            runCatching { CookieManager.getInstance().getCookie(url) }
-                .getOrNull()?.let { headers["Cookie"] = it }
-            web.url?.let { headers["Referer"] = it }
-            if (createTask(url, headers)) {
-                Toast.makeText(this, "已抓到真实地址，开始下载", Toast.LENGTH_LONG).show()
-                finish()
+            // v1.9 audit: the WebView also reports blob:/data:
+            // "downloads" — the engine cannot fetch those at all,
+            // so don't create a task that can only fail confusingly.
+            if (!isDownloadableUrl(url)) {
+                Toast.makeText(
+                    this,
+                    "抓到的不是能下载的链接（${url.substringBefore(':').lowercase()}），已忽略",
+                    Toast.LENGTH_LONG,
+                ).show()
             } else {
-                Toast.makeText(this, "这个链接已经在任务列表里了", Toast.LENGTH_LONG).show()
-                finish()
+                val headers = mutableMapOf<String, String>()
+                headers["User-Agent"] = userAgent ?: ""
+                runCatching { CookieManager.getInstance().getCookie(url) }
+                    .getOrNull()?.let { headers["Cookie"] = it }
+                web.url?.let { headers["Referer"] = it }
+                if (createTask(url, headers)) {
+                    Toast.makeText(this, "已抓到真实地址，开始下载", Toast.LENGTH_LONG).show()
+                    finish()
+                } else {
+                    Toast.makeText(this, "这个链接已经在任务列表里了", Toast.LENGTH_LONG).show()
+                    finish()
+                }
             }
         }
         frame.addView(web)
@@ -114,7 +150,43 @@ class SniffActivity : Activity() {
 
         root.addView(frame)
         setContentView(root)
-        if (startUrl.isNotBlank()) runCatching { web.loadUrl(startUrl) }
+        // v1.9 audit: after a rotation the WebView's back stack
+        // and page are restored instead of throwing away the page
+        // the user had tapped their way through.
+        val restored = savedInstanceState?.let {
+            runCatching { web.restoreState(it) }.getOrNull()
+        }
+        if (restored == null && startUrl.isNotBlank()) {
+            runCatching { web.loadUrl(startUrl) }
+        }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        if (::web.isInitialized) runCatching { web.saveState(outState) }
+        super.onSaveInstanceState(outState)
+    }
+
+    override fun onPause() {
+        if (::web.isInitialized) runCatching { web.onPause() }
+        super.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::web.isInitialized) runCatching { web.onResume() }
+    }
+
+    override fun onDestroy() {
+        // v1.9 audit: the WebView was NEVER destroyed before —
+        // its renderer (and any page JS) outlived the screen.
+        if (::web.isInitialized) runCatching { web.destroy() }
+        super.onDestroy()
+    }
+
+    /** Only schemes the download engine can actually fetch. */
+    private fun isDownloadableUrl(url: String): Boolean {
+        val scheme = url.substringBefore(':').lowercase()
+        return scheme == "http" || scheme == "https" || scheme == "ftp"
     }
 
     /** Create a task unless the same link is already active. */
@@ -141,6 +213,11 @@ class SniffActivity : Activity() {
             val result = runCatching { Sniffer().sniff(pageUrl) }
                 .getOrElse { SniffResult.Failure(it.message ?: "嗅探失败") }
             runOnUiThread {
+                // v1.9 audit: the user may have backed out while
+                // the sniff was running — popping a dialog on a
+                // dead activity throws BadTokenException, so a
+                // late result is dropped quietly.
+                if (isFinishing || isDestroyed) return@runOnUiThread
                 when (result) {
                     is SniffResult.DirectFile -> {
                         if (createTask(result.url)) {

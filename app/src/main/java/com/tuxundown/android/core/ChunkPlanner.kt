@@ -49,9 +49,24 @@ object ChunkPlanner {
         return minOf(tier, maxOf(perThreadCap, MIN_CHUNK)).coerceIn(MIN_CHUNK, MAX_CHUNK)
     }
 
+    /**
+     * v1.9 audit (round 5): hard ceiling on the chunk count. Real
+     * downloads stay in the low thousands (see the tiers above —
+     * even a 128 GB file at the 128 KB floor is 1M chunks), but
+     * [chunkCount] also sizes arrays from numbers read out of
+     * tasks.json / IMPORTED BACKUPS: a hostile or corrupt record
+     * claiming totalSize ≈ Long.MAX with chunkSize = 1 used to ask
+     * for a billion-entry BooleanArray (OOM) — or overflow the
+     * addition and go negative. The count is now computed in Long
+     * and clamped; a record that hits the clamp simply loses its
+     * chunk state instead of taking the app down.
+     */
+    const val MAX_CHUNKS = 4_000_000
+
     fun chunkCount(totalSize: Long, chunkSize: Long): Int {
         if (totalSize <= 0 || chunkSize <= 0) return 0
-        return ((totalSize + chunkSize - 1) / chunkSize).toInt()
+        val n = (totalSize + chunkSize - 1) / chunkSize
+        return n.coerceIn(0, MAX_CHUNKS.toLong()).toInt()
     }
 
     /** Inclusive-exclusive byte range [start, end) of chunk [index]. */
@@ -72,13 +87,18 @@ object ChunkPlanner {
     }
 
     fun decodeBitset(hex: String, count: Int): BooleanArray {
-        val out = BooleanArray(count)
+        // v1.9 audit: clamp BOTH inputs — the count sizes the
+        // output array and the hex string sizes a scratch array,
+        // and both can come from an untrusted backup file. Only
+        // the bytes the (clamped) count actually needs are parsed.
+        val n = count.coerceIn(0, MAX_CHUNKS)
+        val out = BooleanArray(n)
         if (hex.isBlank()) return out
-        val bytes = ByteArray(hex.length / 2)
+        val bytes = ByteArray(minOf(hex.length / 2, (n + 7) / 8))
         for (i in bytes.indices) {
             bytes[i] = hex.substring(i * 2, i * 2 + 2).toInt(16).toByte()
         }
-        for (i in 0 until count) {
+        for (i in 0 until n) {
             val b = bytes.getOrNull(i / 8) ?: break
             out[i] = (b.toInt() shr (i % 8)) and 1 == 1
         }

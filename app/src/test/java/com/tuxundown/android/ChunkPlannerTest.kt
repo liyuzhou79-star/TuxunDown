@@ -96,6 +96,23 @@ class ChunkPlannerTest {
     }
 
     @Test
+    fun chunkCountIsCappedAgainstHostileInput() {
+        // v1.9 audit: counts parsed from an imported backup must
+        // never size a giant array — the count clamps instead.
+        assertEquals(
+            ChunkPlanner.MAX_CHUNKS,
+            ChunkPlanner.chunkCount(Long.MAX_VALUE - 1, 1),
+        )
+        // Long overflow in (total + chunk - 1) must not explode either.
+        val n = ChunkPlanner.chunkCount(Long.MAX_VALUE, 2)
+        assertTrue(n in 0..ChunkPlanner.MAX_CHUNKS)
+        // decodeBitset clamps its count and only parses the hex
+        // bytes the clamped count needs.
+        val bits = ChunkPlanner.decodeBitset("ff".repeat(100_000), Int.MAX_VALUE)
+        assertEquals(ChunkPlanner.MAX_CHUNKS, bits.size)
+    }
+
+    @Test
     fun manyThreadsOnMidFileStillGetSeveralChunksEach() {
         // 64 MB at 32 threads: the 512 KB tier alone would give
         // only 4 chunks per thread; the guard may shrink chunks

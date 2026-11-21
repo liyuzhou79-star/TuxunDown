@@ -105,6 +105,9 @@ import kotlinx.coroutines.launch
 import java.io.File
 import kotlin.math.roundToInt
 
+/** v1.9 audit: upper bound for a backup file read during import. */
+private const val MAX_BACKUP_BYTES = 32 * 1024 * 1024
+
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -117,9 +120,9 @@ class MainActivity : ComponentActivity() {
                 requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
             }
         }
-        val sharedUrl = if (intent?.action == Intent.ACTION_SEND) {
-            intent.getStringExtra(Intent.EXTRA_TEXT)?.trim() ?: ""
-        } else ""
+        if (intent?.action == Intent.ACTION_SEND) {
+            SharedLinkState.text = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim() ?: ""
+        }
         AmoledState.enabled = DownloadCenter.amoledBlack
 
         setContent {
@@ -143,10 +146,35 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             ) {
-                DownApp(sharedUrl)
+                DownApp()
             }
         }
     }
+
+    /**
+     * v1.9 audit: the activity is singleTop (manifest), so sharing
+     * a link while the app is already open lands HERE instead of
+     * creating a second MainActivity instance with its own copy of
+     * the UI state. DownApp observes [SharedLinkState] and opens
+     * the add dialog with the link filled in.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.action == Intent.ACTION_SEND) {
+            SharedLinkState.text =
+                intent.getStringExtra(Intent.EXTRA_TEXT)?.trim() ?: ""
+        }
+    }
+}
+
+/**
+ * v1.9 audit: a link shared into the app (first launch or while
+ * already running), as snapshot state so both paths reach the UI
+ * the same way. DownApp consumes it (and clears it) on sight.
+ */
+object SharedLinkState {
+    var text by mutableStateOf("")
 }
 
 /**
@@ -185,7 +213,7 @@ fun kindOfName(name: String): String =
     com.tuxundown.android.sniff.SniffParser.kindOf("https://x/" + name) ?: "other"
 
 @androidx.compose.runtime.Composable
-fun DownApp(sharedUrl: String) {
+fun DownApp() {
     val context = LocalContext.current
     val activity = context as MainActivity
     val store = DownloadCenter.store
@@ -229,8 +257,19 @@ fun DownApp(sharedUrl: String) {
     }
 
     // ---- add-task dialog state ----
-    var showAdd by remember { mutableStateOf(sharedUrl.isNotBlank()) }
-    var urlText by remember { mutableStateOf(sharedUrl) }
+    var showAdd by remember { mutableStateOf(false) }
+    var urlText by remember { mutableStateOf("") }
+    // v1.9 audit: consume a link shared into the app (onCreate
+    // seeds the same state for the first launch, onNewIntent for
+    // shares that arrive while the app is already running).
+    val incomingLink = SharedLinkState.text
+    LaunchedEffect(incomingLink) {
+        if (incomingLink.isNotBlank()) {
+            urlText = incomingLink
+            showAdd = true
+            SharedLinkState.text = ""
+        }
+    }
     var nameText by remember { mutableStateOf("") }
     var mirrorsText by remember { mutableStateOf("") }
     var scheduleMin by remember { mutableStateOf(0) }
@@ -357,14 +396,40 @@ fun DownApp(sharedUrl: String) {
     ) { uri ->
         if (uri != null) {
             Thread {
+                // v1.9 audit: the read is BOUNDED. The old code did
+                // readBytes() on whatever file the picker returned —
+                // a "backup" that is really a multi-hundred-MB file
+                // would be loaded whole into memory (OOM) before
+                // any parsing happened. A real backup is kilobytes
+                // to a few MB; 32 MB is generous headroom.
+                var tooBig = false
                 val text = runCatching {
-                    context.contentResolver.openInputStream(uri)?.use {
-                        it.readBytes().toString(Charsets.UTF_8)
+                    context.contentResolver.openInputStream(uri)?.use { input ->
+                        val out = java.io.ByteArrayOutputStream()
+                        val buf = ByteArray(64 * 1024)
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            out.write(buf, 0, n)
+                            if (out.size() > MAX_BACKUP_BYTES) {
+                                tooBig = true
+                                break
+                            }
+                        }
+                        if (tooBig) null else out.toByteArray().toString(Charsets.UTF_8)
                     }
                 }.getOrNull()
                 activity.runOnUiThread {
                     if (text == null) {
-                        Toast.makeText(context, "导入失败：读不到文件", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(
+                            context,
+                            if (tooBig) {
+                                "导入失败：文件太大了（超过 32 MB），不像正常的备份文件"
+                            } else {
+                                "导入失败：读不到文件"
+                            },
+                            Toast.LENGTH_SHORT,
+                        ).show()
                     } else {
                         val parsed = Backup.parse(text)
                         if (parsed.tasksJson == null && parsed.settings == null) {
