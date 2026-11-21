@@ -382,6 +382,20 @@ object DownloadCenter {
             )
             e.putString("statsTodayKey", StatsMath.dayKey(now))
             e.putLong("statsTodayBytes", today + bytes)
+            // v2.7: the per-day series stores each day's TOTAL
+            // (this same number), so today is seeded whole on
+            // the first completion after upgrading — see
+            // DaySeries' honest-scope note.
+            e.putString(
+                "statsDays",
+                DaySeries.serialize(
+                    DaySeries.recordDayTotal(
+                        DaySeries.parse(pString("statsDays", "")),
+                        StatsMath.dayKey(now),
+                        today + bytes,
+                    )
+                ),
+            )
             // v2.3: per-host totals for the statistics Top 5.
             val hostEntries = HostStats.record(
                 HostStats.parse(pString("hostStats", "")),
@@ -416,12 +430,21 @@ object DownloadCenter {
     fun hostStatsTop(n: Int = 5): List<HostStats.Entry> =
         HostStats.top(HostStats.parse(pString("hostStats", "")), n)
 
+    /** v2.7: the last [n] days of download totals, oldest first,
+     *  zero-filled — the statistics screen's bar chart data. */
+    fun statsLastDays(n: Int = 7): List<DaySeries.Day> =
+        DaySeries.lastDays(
+            DaySeries.parse(pString("statsDays", "")),
+            n, System.currentTimeMillis(),
+        )
+
     fun clearStats() {
         prefs().edit()
             .remove("statsTotalBytes").remove("statsDoneCount")
             .remove("statsTodayKey").remove("statsTodayBytes")
             .remove("statsSpeedSum").remove("statsSpeedCount")
             .remove("hostStats")
+            .remove("statsDays")
             .apply()
     }
 

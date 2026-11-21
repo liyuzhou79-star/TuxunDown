@@ -25,6 +25,67 @@ object StatsMath {
 }
 
 /**
+ * Per-day download totals (v2.7) — pure, unit-tested.
+ *
+ * HONEST SCOPE: before v2.7 the app kept only TODAY's counter,
+ * so there is no historical series to "reuse" — this series
+ * starts recording with v2.7 and grows one day at a time. The
+ * one bridge: a day's value is stored as that day's TOTAL (the
+ * same number the 今日 counter keeps), so the first completion
+ * after upgrading seeds today with today's full total instead
+ * of just its own bytes.
+ *
+ * [DownloadCenter] persists the serialized form in
+ * SharedPreferences, one entry per line: dayKey \t bytes,
+ * newest last, pruned to [MAX_DAYS].
+ */
+object DaySeries {
+
+    const val MAX_DAYS = 31
+
+    data class Day(val key: String, val bytes: Long)
+
+    /** Set [key]'s total to [totalBytes] (upsert), pruned to
+     *  the newest [MAX_DAYS] days. Keys sort chronologically
+     *  because the format is yyyy-MM-dd. */
+    fun recordDayTotal(
+        entries: List<Day>, key: String, totalBytes: Long,
+    ): List<Day> {
+        if (key.isBlank()) return entries
+        val merged = entries.filter { it.key != key } +
+            Day(key, totalBytes.coerceAtLeast(0))
+        return merged.sortedBy { it.key }.takeLast(MAX_DAYS)
+    }
+
+    /** The last [n] days ending today, oldest first; days with
+     *  no record read as 0 so the chart has no holes. */
+    fun lastDays(entries: List<Day>, n: Int, nowMs: Long): List<Day> {
+        if (n <= 0) return emptyList()
+        val byKey = entries.associateBy { it.key }
+        val cal = java.util.Calendar.getInstance().apply { timeInMillis = nowMs }
+        cal.add(java.util.Calendar.DAY_OF_YEAR, -(n - 1))
+        return (0 until n).map {
+            val key = StatsMath.dayKey(cal.timeInMillis)
+            cal.add(java.util.Calendar.DAY_OF_YEAR, 1)
+            byKey[key] ?: Day(key, 0)
+        }
+    }
+
+    fun serialize(entries: List<Day>): String =
+        entries.joinToString("\n") { "${it.key}\t${it.bytes}" }
+
+    fun parse(text: String): List<Day> {
+        if (text.isBlank()) return emptyList()
+        return text.lines().mapNotNull { line ->
+            val p = line.split('\t')
+            if (p.size != 2) return@mapNotNull null
+            val bytes = p[1].toLongOrNull() ?: return@mapNotNull null
+            if (p[0].isBlank()) null else Day(p[0], bytes)
+        }
+    }
+}
+
+/**
  * Per-host download totals (v2.3): which sites the user actually
  * downloads from, ranked by bytes — shown on the statistics
  * screen as a Top 5. Counted locally at completion time (the

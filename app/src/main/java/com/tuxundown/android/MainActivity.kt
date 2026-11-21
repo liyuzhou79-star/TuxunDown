@@ -100,6 +100,7 @@ import com.tuxundown.android.core.CrashGuard
 import com.tuxundown.android.core.Errors
 import com.tuxundown.android.core.FailureAdvice
 import com.tuxundown.android.core.ChecksumVerifier
+import com.tuxundown.android.core.DaySeries
 import com.tuxundown.android.core.Diagnostics
 import com.tuxundown.android.core.DownloadCenter
 import com.tuxundown.android.core.DownloadedFiles
@@ -2470,6 +2471,30 @@ fun StatsScreen(onBack: () -> Unit, onSpeedTest: () -> Unit) {
                 }) { Text("清除统计") }
                 Text(
                     "统计只存在这台手机里，不上传、不分享；清除后从零开始重新计。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+            }
+        }
+        item(key = "st-week") {
+            SettingsGroup("最近 7 天下载量") {
+                val week = DownloadCenter.statsLastDays(7)
+                if (week.all { it.bytes <= 0 }) {
+                    Text(
+                        "还没有记录。下完文件之后，这里会一天一天长起来。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    WeekChart(
+                        days = week,
+                        modifier = Modifier.fillMaxWidth().height(110.dp),
+                    )
+                }
+                Text(
+                    "按天记录从 v2.7 才开始：今天的量是完整的，前面几天要等新版本" +
+                        "一天天记满才会长齐，不会拿旧数据糊弄。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 6.dp),
@@ -5036,6 +5061,69 @@ fun TaskCard(
  * right-aligned in a 90-second window.
  */
 @androidx.compose.runtime.Composable
+/**
+ * v2.7: last-7-days download volume bars, hand-drawn in the
+ * same visual language as [SpeedChart] (same background, grid,
+ * border and green). The last column is today.
+ */
+@androidx.compose.runtime.Composable
+fun WeekChart(days: List<DaySeries.Day>, modifier: Modifier = Modifier) {
+    val dark = isSystemInDarkTheme()
+    val barColor = WinPalette.ChartGreen
+    val gridColor = if (dark) Color(0xFF3A3A3A) else Color(0xFFDDDDDD)
+    val borderColor = if (dark) Color(0xFF4A4A4A) else Color(0xFFBDBDBD)
+    val bg = if (dark) Color(0xFF202020) else Color(0xFFFCFEFC)
+    val maxBytes = (days.maxOfOrNull { it.bytes } ?: 0).coerceAtLeast(1)
+    val topLabel = Format.size(maxBytes) + " 最高一天"
+    val labelColor = if (dark) 0xFFAAAAAA.toInt() else 0xFF767676.toInt()
+    Canvas(modifier.background(bg)) {
+        val w = size.width
+        val h = size.height
+        val labelH = 14.dp.toPx()
+        val bottomH = 12.dp.toPx()
+        val plotTop = labelH
+        val plotH = h - labelH - bottomH
+        for (i in 0..4) {
+            val y = plotTop + plotH * i / 4f
+            drawLine(gridColor, Offset(0f, y), Offset(w, y), strokeWidth = 1f)
+        }
+        drawRect(
+            borderColor,
+            topLeft = Offset(0f, plotTop),
+            size = Size(w, plotH),
+            style = Stroke(width = 1f),
+        )
+        val paint = android.graphics.Paint().apply {
+            color = labelColor
+            textSize = 10.dp.toPx()
+            isAntiAlias = true
+        }
+        drawContext.canvas.nativeCanvas.drawText(topLabel, 4.dp.toPx(), 11.dp.toPx(), paint)
+        if (days.isEmpty()) return@Canvas
+        val colW = w / days.size
+        val barW = colW * 0.55f
+        days.forEachIndexed { i, day ->
+            val frac = day.bytes.toFloat() / maxBytes.toFloat()
+            val barH = plotH * frac
+            val x = i * colW + (colW - barW) / 2f
+            if (barH > 0f) {
+                drawRect(
+                    barColor,
+                    topLeft = Offset(x, plotTop + plotH - barH),
+                    size = Size(barW, barH),
+                )
+            }
+            // "11-22" style label centred under the column;
+            // today gets 今天 instead of its date.
+            val label = if (i == days.lastIndex) "今天" else day.key.drop(5)
+            val tw = paint.measureText(label)
+            drawContext.canvas.nativeCanvas.drawText(
+                label, i * colW + (colW - tw) / 2f, h - 2.dp.toPx(), paint,
+            )
+        }
+    }
+}
+
 fun SpeedChart(history: List<Long>, modifier: Modifier = Modifier) {
     val dark = isSystemInDarkTheme()
     val lineColor = WinPalette.ChartGreen
