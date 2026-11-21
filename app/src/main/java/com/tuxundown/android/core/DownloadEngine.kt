@@ -258,6 +258,40 @@ class DownloadEngine(
     }
 
     /**
+     * v2.2 connection warm reuse: release a connection whose
+     * response body is tiny / fully consumed so the platform
+     * keep-alive pool can hand the SAME socket (TLS handshake
+     * already paid) to the next request to this host. The pool
+     * itself is the platform's (Android's HttpURLConnection keeps
+     * up to 5 idle connections per host) — there is deliberately
+     * no home-grown pool here; the only thing v2.2 changes is
+     * that the probe / validation / sample paths no longer defeat
+     * the pool with disconnect(): they drain the (1-byte) body
+     * and close the stream instead. If the body turns out larger
+     * than [drainCap] the connection is NOT reusable and is
+     * disconnected as before. Every call is best-effort.
+     */
+    private fun releaseConnection(c: HttpURLConnection, drainCap: Int = 4096) {
+        val reusable = runCatching {
+            val input = c.inputStream
+            val buf = ByteArray(1024)
+            var drained = 0
+            var eof = false
+            while (drained <= drainCap) {
+                val n = input.read(buf, 0, minOf(buf.size, drainCap + 1 - drained))
+                if (n < 0) {
+                    eof = true
+                    break
+                }
+                drained += n
+            }
+            input.close()
+            eof
+        }.getOrDefault(false)
+        if (!reusable) runCatching { c.disconnect() }
+    }
+
+    /**
      * v1.9: open on the default network — through the configured
      * proxy when one is active. openConnection(proxy) is the ONLY
      * path then; there is no direct fall-back anywhere.
@@ -388,15 +422,23 @@ class DownloadEngine(
                 val total = range.substringAfter('/', "").toLongOrNull() ?: -1
                 task.totalSize = total
                 if (total < 0) task.singleThreadOnly = true
+                // v2.2: the body is the single probed byte — drain
+                // it so the first chunk request reuses this warm
+                // connection instead of paying a new handshake.
+                releaseConnection(c)
             }
             HttpURLConnection.HTTP_OK -> {
                 task.totalSize = c.contentLengthLong
                 task.singleThreadOnly = true
                 task.note = "服务器不支持分片下载（Range），已用单线程下载，无法加速。"
+                // The body is the whole file; not drainable.
+                c.disconnect()
             }
-            else -> throw IllegalStateException("服务器返回 HTTP $code")
+            else -> {
+                c.disconnect()
+                throw IllegalStateException(Errors.httpMessage(code))
+            }
         }
-        c.disconnect()
         onSave()
     }
 
@@ -449,7 +491,14 @@ class DownloadEngine(
                 onSave()
             }
         } finally {
-            c.disconnect()
+            // v2.2: a 206 reply carries the same 1-byte body as
+            // the probe — release it warm; anything else (a 200
+            // body is the whole file) is disconnected as before.
+            if (c.responseCode == HttpURLConnection.HTTP_PARTIAL) {
+                releaseConnection(c)
+            } else {
+                c.disconnect()
+            }
         }
     }
 
@@ -588,9 +637,25 @@ class DownloadEngine(
         task.threads = initial
         repeat(initial) { spawnWorker(count) }
 
-        // Wait until all workers exit (done or paused).
+        // Wait until all workers exit (done or paused). v2.2
+        // power pass: JOIN the worker threads instead of polling
+        // the counter every 200 ms — a join parks this thread
+        // until a worker actually finishes, so a long download
+        // costs zero wakeups here. Workers the prober spawns
+        // mid-run join the same list; the loop re-scans until
+        // none are alive.
         while (activeWorkers.get() > 0) {
-            try { Thread.sleep(200) } catch (e: InterruptedException) { break }
+            val t = synchronized(workerThreads) {
+                workerThreads.lastOrNull { it.isAlive }
+            }
+            if (t != null) {
+                try { t.join() } catch (e: InterruptedException) { break }
+            } else {
+                // Counter says workers exist but none is in the
+                // list (cannot happen — spawn registers before
+                // starting); never busy-spin on it regardless.
+                try { Thread.sleep(50) } catch (e: InterruptedException) { break }
+            }
         }
         stopSampler.set(1)
         sampler.join(1500)
@@ -724,9 +789,14 @@ class DownloadEngine(
                 it.setRequestProperty("Range", "bytes=$offset-${offset + len - 1}")
             }
         }.getOrNull() ?: return null
+        // v2.2: the sample body is read to its end and the stream
+        // closed by use{} — that already returns the connection
+        // to the keep-alive pool, so only failure paths (body not
+        // fully consumed) still disconnect.
+        var consumed = false
         try {
             if (c.responseCode != HttpURLConnection.HTTP_PARTIAL) return null
-            return c.inputStream.use { input ->
+            val data = c.inputStream.use { input ->
                 val out = java.io.ByteArrayOutputStream()
                 val buf = ByteArray(8192)
                 var total = 0
@@ -738,10 +808,12 @@ class DownloadEngine(
                 }
                 out.toByteArray()
             }
+            consumed = true
+            return data
         } catch (e: Exception) {
             return null
         } finally {
-            c.disconnect()
+            if (!consumed) runCatching { c.disconnect() }
         }
     }
 
@@ -757,6 +829,10 @@ class DownloadEngine(
         return srcs[(ac.index + attempt - 1).mod(srcs.size)]
     }
 
+    /** Every worker thread ever spawned by this run, so the
+     *  waiter can join them (v2.2) instead of polling a counter. */
+    private val workerThreads = mutableListOf<Thread>()
+
     private fun spawnWorker(chunkCount: Int) {
         activeWorkers.incrementAndGet()
         val t = Thread {
@@ -767,6 +843,7 @@ class DownloadEngine(
             }
         }
         t.isDaemon = true
+        synchronized(workerThreads) { workerThreads.add(t) }
         t.start()
     }
 
@@ -930,49 +1007,63 @@ class DownloadEngine(
     /** Read a small text resource (playlist) with the usual headers. */
     private fun fetchText(url: String, capBytes: Int = 4 * 1024 * 1024): String {
         val c = openFollowingRedirects(url) { }
+        // v2.2: a body read to EOF + stream close returns the
+        // connection to the keep-alive pool (playlist fetches are
+        // immediately followed by segment fetches to the same
+        // host); a body cut off at the cap is not reusable.
+        var consumed = false
         try {
             if (c.responseCode !in 200..299) {
-                throw IllegalStateException("服务器返回 HTTP ${c.responseCode}")
+                throw IllegalStateException(Errors.httpMessage(c.responseCode))
             }
-            c.inputStream.use { input ->
+            val text = c.inputStream.use { input ->
                 val out = java.io.ByteArrayOutputStream()
                 val buf = ByteArray(32 * 1024)
                 var total = 0
                 while (total < capBytes) {
                     val n = input.read(buf, 0, minOf(buf.size, capBytes - total))
-                    if (n < 0) break
+                    if (n < 0) {
+                        consumed = true
+                        break
+                    }
                     out.write(buf, 0, n)
                     total += n
                 }
-                return String(out.toByteArray(), Charsets.UTF_8)
+                String(out.toByteArray(), Charsets.UTF_8)
             }
+            return text
         } finally {
-            c.disconnect()
+            if (!consumed) runCatching { c.disconnect() }
         }
     }
 
     /** Read a whole segment (or a key) into memory, size-capped. */
     private fun fetchBytes(url: String, capBytes: Int): ByteArray {
         val c = openFollowingRedirects(url) { }
+        var consumed = false
         try {
             if (c.responseCode !in 200..299) {
-                throw IllegalStateException("服务器返回 HTTP ${c.responseCode}")
+                throw IllegalStateException(Errors.httpMessage(c.responseCode))
             }
-            c.inputStream.use { input ->
+            val data = c.inputStream.use { input ->
                 val out = java.io.ByteArrayOutputStream()
                 val buf = ByteArray(BUFFER_SIZE)
                 var total = 0
                 while (true) {
                     val n = input.read(buf)
-                    if (n < 0) break
+                    if (n < 0) {
+                        consumed = true
+                        break
+                    }
                     total += n
                     if (total > capBytes) throw IllegalStateException("分片太大了，已停下")
                     out.write(buf, 0, n)
                 }
-                return out.toByteArray()
+                out.toByteArray()
             }
+            return data
         } finally {
-            c.disconnect()
+            if (!consumed) runCatching { c.disconnect() }
         }
     }
 
