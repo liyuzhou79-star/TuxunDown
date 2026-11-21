@@ -24,6 +24,9 @@ interface DownloadTarget {
     fun writeAt(position: Long, buf: ByteArray, offset: Int, length: Int)
     /** Sequential stream starting at byte 0 (truncates first). */
     fun openStream(): OutputStream
+    /** Current length of the destination in bytes (v1.7: FTP resume
+     *  measures the existing .part this way). */
+    fun size(): Long
     fun close()
 }
 
@@ -57,6 +60,8 @@ class PfdTarget(private val pfd: ParcelFileDescriptor) : DownloadTarget {
             }
         }
     }
+
+    override fun size(): Long = Os.fstat(fd).st_size
 
     override fun close() {
         runCatching { pfd.close() }
@@ -92,6 +97,8 @@ class FileTarget(file: File) : DownloadTarget {
             }
         }
     }
+
+    override fun size(): Long = synchronized(lock) { raf.length() }
 
     override fun close() {
         runCatching { raf.close() }

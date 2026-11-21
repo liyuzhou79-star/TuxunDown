@@ -133,6 +133,12 @@ class DownloadEngine(
         if (task.startedAt == 0L) task.startedAt = System.currentTimeMillis()
         val runStartMs = System.currentTimeMillis()
         try {
+            // v1.7: FTP links take their own path (hand-written
+            // FtpClient: PASV, SIZE/REST probe, single stream with
+            // REST resume) — HTTP probing would be meaningless.
+            if (FtpClient.isFtpUrl(task.url)) {
+                return runFtp()
+            }
             // v1.6: HLS (m3u8) tasks take their own path — playlist,
             // parallel segment downloads, in-order merge into one .ts.
             if (task.isHls || isHlsUrl(task.url)) {
@@ -1083,6 +1089,144 @@ class DownloadEngine(
         val raw = fileNameFrom(null, url)
         val base = raw.substringBeforeLast('.', raw)
         return (if (base.isBlank()) "stream" else base) + ".ts"
+    }
+
+    // ---------- FTP path (v1.7) ----------
+
+    /**
+     * Download an ftp:// file with the hand-written [FtpClient]:
+     * one data stream (FTP has no Range-style chunking), resumed
+     * with REST when the server supports it — the resume offset is
+     * the length the existing .part already has, measured through
+     * the target itself. A server file whose SIZE changed since
+     * the last run restarts the transfer instead of mixing bytes.
+     */
+    private fun runFtp(): TaskStatus {
+        val ftp = FtpClient.parseUrl(task.url)
+            ?: throw IllegalStateException("FTP 地址格式不对，看不懂这个链接")
+        if (task.fileName.isBlank()) {
+            task.fileName = fileNameFrom(null, task.url)
+        }
+        task.singleThreadOnly = true
+        val client = FtpClient()
+        // Speed sampler on the same fixed 1 s grid as the other
+        // paths (single source for card, chart and notification).
+        val stopSampler = AtomicInteger(0)
+        val sampler = Thread {
+            var lastBytes = downloadedBytes.get()
+            var lastTime = System.currentTimeMillis()
+            var nextTick = System.currentTimeMillis() + 1000
+            while (stopSampler.get() == 0 && !stopped()) {
+                val waitMs = nextTick - System.currentTimeMillis()
+                try {
+                    Thread.sleep(waitMs.coerceIn(50, 1000))
+                } catch (e: InterruptedException) { break }
+                nextTick += 1000
+                if (nextTick < System.currentTimeMillis()) {
+                    nextTick = System.currentTimeMillis() + 1000
+                }
+                if (!networkGuard()) {
+                    netBlocked = true
+                    break
+                }
+                if (!trafficGuard()) {
+                    trafficBlocked = true
+                    break
+                }
+                val now = System.currentTimeMillis()
+                val bytes = downloadedBytes.get()
+                val dt = max(1L, now - lastTime)
+                val speed = (bytes - lastBytes) * 1000 / dt
+                task.speedBps = if (task.speedBps == 0L) speed else (task.speedBps * 3 + speed) / 4
+                recordSpeed(task.speedBps)
+                task.downloaded = bytes
+                lastBytes = bytes
+                lastTime = now
+                onProgress(task)
+            }
+        }
+        sampler.isDaemon = true
+        try {
+            client.connect(ftp.host, ftp.port)
+            client.login(ftp.user, ftp.password)
+            client.binary()
+            val total = client.size(ftp.path)
+            var serverChanged = false
+            if (total >= 0) {
+                if (task.totalSize > 0 && task.totalSize != total) {
+                    serverChanged = true
+                    task.note = "服务器上的文件大小变了，旧进度作废，已重新开始下载。"
+                }
+                task.totalSize = total
+            }
+            // Traffic protection can only judge once the size is known.
+            if (!trafficGuard()) {
+                trafficBlocked = true
+                task.status = TaskStatus.PAUSED
+                task.note = "流量保护：当前是流量网络，这个文件有 ${Format.size(task.totalSize)}，" +
+                    "已自动暂停省流量。回到 WiFi 点继续，或在流量下再点一次继续也可下载。"
+                return task.status
+            }
+            val rest = client.restSupported()
+            target = targetProvider()
+            var offset = 0L
+            if (rest && !serverChanged) {
+                val existing = runCatching { target.size() }.getOrDefault(0)
+                if (existing > 0 && (total < 0 || existing < total)) {
+                    offset = existing
+                }
+            }
+            if (offset == 0L) {
+                target.truncate(0)
+            } else {
+                appendNote("FTP 断点续传：从 ${Format.size(offset)} 处接着下。")
+            }
+            if (!rest && !task.note.contains("不支持断点续传")) {
+                appendNote("这个 FTP 服务器不支持断点续传（REST），暂停后重新开始会从头下载。")
+            }
+            downloadedBytes.set(offset)
+            task.downloaded = offset
+            sampler.start()
+            var pos = offset
+            client.retrieve(ftp.path, offset) { buf, n ->
+                if (stopped()) throw InterruptedException("stopped")
+                target.writeAt(pos, buf, 0, n)
+                pos += n
+                downloadedBytes.addAndGet(n.toLong())
+                limiter?.throttle(n)
+            }
+        } catch (e: InterruptedException) {
+            // Pause (or a guard) stopped the transfer mid-stream;
+            // the status decision below reads the stop flags.
+            if (!stopped()) throw e
+        } finally {
+            stopSampler.set(1)
+            runCatching { sampler.join(1500) }
+            runCatching { client.close() }
+            if (::target.isInitialized) runCatching { target.close() }
+            task.speedBps = 0
+            task.downloaded = downloadedBytes.get()
+        }
+        return when {
+            trafficBlocked -> TaskStatus.PAUSED.also {
+                task.status = it
+                task.note = "流量保护：网络已切到流量，这个文件有 ${Format.size(task.totalSize)}，" +
+                    "已自动暂停省流量。回到 WiFi 点继续，或在流量下再点一次继续也可下载。"
+            }
+            netBlocked -> TaskStatus.PAUSED.also {
+                task.status = it
+                task.note = "网络已切到流量（已开启「仅 WiFi 下载」），已暂停；回到 WiFi 后点继续即可续传。"
+            }
+            paused -> TaskStatus.PAUSED.also { task.status = it }
+            task.totalSize > 0 && task.downloaded >= task.totalSize ->
+                TaskStatus.DONE.also { task.status = it }
+            task.totalSize <= 0 ->
+                TaskStatus.DONE.also { task.status = it }
+            else -> TaskStatus.FAILED.also {
+                task.status = it
+                if (task.error.isBlank()) task.error = "FTP 下载中断"
+            }
+        }
     }
 
     // ---------- single-stream fallback ----------

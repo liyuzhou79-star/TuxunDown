@@ -77,6 +77,7 @@ import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import com.tuxundown.android.core.DownloadCenter
 import com.tuxundown.android.core.Format
+import com.tuxundown.android.core.FtpClient
 import com.tuxundown.android.core.PublicStorage
 import com.tuxundown.android.core.TaskRecord
 import com.tuxundown.android.core.TaskStatus
@@ -419,7 +420,9 @@ fun DownApp(sharedUrl: String) {
      * task, a page with many resources is counted as skipped.
      */
     fun startBatch(raw: String) {
-        val lines = raw.lines().map { it.trim() }.filter { it.startsWith("http") }
+        // v1.7: ftp:// lines are batch-eligible too (direct tasks).
+        val lines = raw.lines().map { it.trim() }
+            .filter { it.startsWith("http") || FtpClient.isFtpUrl(it) }
         if (lines.isEmpty()) return
         showAdd = false
         urlText = ""
@@ -429,6 +432,7 @@ fun DownApp(sharedUrl: String) {
             var skipped = 0
             for (line in lines) {
                 val make: String? = when {
+                    FtpClient.isFtpUrl(line) -> line
                     LinkRouter.looksLikeFileUrl(line) -> line
                     else -> when (val r = runCatching { Sniffer().sniff(line) }.getOrNull()) {
                         is SniffResult.DirectFile -> r.url
@@ -471,6 +475,16 @@ fun DownApp(sharedUrl: String) {
             return
         }
         val mirrors = mirrorsText.lines()
+        // v1.7: FTP links are always direct file tasks — no HTTP
+        // probe, no sniffing; the engine's FTP path handles them.
+        if (FtpClient.isFtpUrl(u)) {
+            createTask(u, fileName = nameText)
+            showAdd = false
+            urlText = ""
+            nameText = ""
+            mirrorsText = ""
+            return
+        }
         if (LinkRouter.looksLikeFileUrl(u)) {
             createTask(u, fileName = nameText, mirrors = mirrors)
             showAdd = false
