@@ -104,6 +104,7 @@ import com.tuxundown.android.core.DownloadedFiles
 import com.tuxundown.android.core.Format
 import com.tuxundown.android.core.FtpClient
 import com.tuxundown.android.core.LinkExtract
+import com.tuxundown.android.core.QuietHours
 import com.tuxundown.android.core.ThunderLink
 import com.tuxundown.android.core.ProxySettings
 import com.tuxundown.android.core.PublicStorage
@@ -320,6 +321,14 @@ fun DownApp() {
     var limitKBps by remember { mutableStateOf(DownloadCenter.speedLimitKBps) }
     var vibrateOn by remember { mutableStateOf(DownloadCenter.completeVibrate) }
     var soundOn by remember { mutableStateOf(DownloadCenter.completeSound) }
+    // v2.5: notification quiet hours (switch + HH:MM window).
+    var quietOn by remember { mutableStateOf(DownloadCenter.notifyQuietEnabled) }
+    var quietStartUi by remember {
+        mutableStateOf(QuietHours.formatMin(DownloadCenter.notifyQuietStartMin))
+    }
+    var quietEndUi by remember {
+        mutableStateOf(QuietHours.formatMin(DownloadCenter.notifyQuietEndMin))
+    }
     // v2.1: completion auto actions (both default off).
     var autoInstallUi by remember { mutableStateOf(DownloadCenter.autoInstallApk) }
     var autoOpenUi by remember { mutableStateOf(DownloadCenter.autoOpenFile) }
@@ -578,6 +587,11 @@ fun DownApp() {
                             limitKBps = DownloadCenter.speedLimitKBps
                             vibrateOn = DownloadCenter.completeVibrate
                             soundOn = DownloadCenter.completeSound
+                            quietOn = DownloadCenter.notifyQuietEnabled
+                            quietStartUi =
+                                QuietHours.formatMin(DownloadCenter.notifyQuietStartMin)
+                            quietEndUi =
+                                QuietHours.formatMin(DownloadCenter.notifyQuietEndMin)
                             autoInstallUi = DownloadCenter.autoInstallApk
                             autoOpenUi = DownloadCenter.autoOpenFile
                             maxConc = DownloadCenter.maxConcurrent
@@ -1199,6 +1213,22 @@ fun DownApp() {
             onVibrate = { vibrateOn = it; DownloadCenter.completeVibrate = it },
             soundOn = soundOn,
             onSound = { soundOn = it; DownloadCenter.completeSound = it },
+            quietOn = quietOn,
+            onQuiet = { quietOn = it; DownloadCenter.notifyQuietEnabled = it },
+            quietStartText = quietStartUi,
+            onQuietStartText = { v ->
+                quietStartUi = v
+                ScheduleTime.parseHhMm(v)?.let {
+                    DownloadCenter.notifyQuietStartMin = it.first * 60 + it.second
+                }
+            },
+            quietEndText = quietEndUi,
+            onQuietEndText = { v ->
+                quietEndUi = v
+                ScheduleTime.parseHhMm(v)?.let {
+                    DownloadCenter.notifyQuietEndMin = it.first * 60 + it.second
+                }
+            },
             autoInstall = autoInstallUi,
             onAutoInstall = { autoInstallUi = it; DownloadCenter.autoInstallApk = it },
             autoOpen = autoOpenUi,
@@ -3145,6 +3175,12 @@ fun SettingsScreen(
     onVibrate: (Boolean) -> Unit,
     soundOn: Boolean,
     onSound: (Boolean) -> Unit,
+    quietOn: Boolean,
+    onQuiet: (Boolean) -> Unit,
+    quietStartText: String,
+    onQuietStartText: (String) -> Unit,
+    quietEndText: String,
+    onQuietEndText: (String) -> Unit,
     autoInstall: Boolean,
     onAutoInstall: (Boolean) -> Unit,
     autoOpen: Boolean,
@@ -3170,7 +3206,7 @@ fun SettingsScreen(
             "下载目录 文件夹 保存位置",
         "s-proxy" to "代理 proxy http socks 端口 地址 服务器 用户名 密码 认证",
         "s-look" to "外观 amoled 纯黑 深色 暗色 主题 黑色",
-        "s-notify" to "提示 震动 声音 响铃 完成 自动安装 安装 自动打开 打开",
+        "s-notify" to "提示 震动 声音 响铃 完成 自动安装 安装 自动打开 打开 静默 夜间 时段 勿扰",
         "s-power" to "后台运行 后台 保活 电池 白名单 省电 冻结",
         "s-data" to "引导与数据 引导 新手引导 帮助 常见问题 备份 导出 导入 " +
             "恢复 孤儿 清理 part 数据 诊断 自检 体检 归档",
@@ -3545,6 +3581,44 @@ fun SettingsScreen(
                 ) {
                     Text("下载完成提示音")
                     Switch(checked = soundOn, onCheckedChange = onSound)
+                }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("通知静默时段")
+                        Text(
+                            "开启后，这个时段里下载完成不震动、不响铃；" +
+                                "完成通知会照常出现在通知栏，上面有「打开 / 分享」按钮。" +
+                                "几个任务同时下完会合并成一条通知，不刷屏。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = quietOn, onCheckedChange = onQuiet)
+                }
+                if (quietOn) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        OutlinedTextField(
+                            value = quietStartText,
+                            onValueChange = onQuietStartText,
+                            label = { Text("开始（如 23:00）") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                        OutlinedTextField(
+                            value = quietEndText,
+                            onValueChange = onQuietEndText,
+                            label = { Text("结束（如 07:00）") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
                 }
                 HorizontalDivider(Modifier.padding(vertical = 10.dp))
                 Row(
