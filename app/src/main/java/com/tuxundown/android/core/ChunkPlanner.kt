@@ -11,13 +11,21 @@ package com.tuxundown.android.core
  */
 object ChunkPlanner {
 
-    const val MIN_CHUNK = 256L * 1024
-    const val MAX_CHUNK = 8L * 1024 * 1024
+    const val MIN_CHUNK = 128L * 1024
+    const val MAX_CHUNK = 4L * 1024 * 1024
 
-    /** Pick a chunk size: aim for ~16 chunks per connection, clamped. */
+    /**
+     * Pick a chunk size (v1.3 adaptive): aim for ~24 chunks per
+     * connection. More, smaller chunks than v1.2 means the work-
+     * stealing queue stays fluid (a fast connection never waits long
+     * for its next piece and a slow connection never holds a big
+     * piece hostage), while the 4 MB cap keeps per-request overhead
+     * negligible on huge files. Small files get proportionally finer
+     * chunks down to 128 KB.
+     */
     fun chunkSizeFor(totalSize: Long, threads: Int): Long {
         if (totalSize <= 0) return MIN_CHUNK
-        val target = totalSize / (threads.coerceAtLeast(1) * 16L)
+        val target = totalSize / (threads.coerceAtLeast(1) * 24L)
         return target.coerceIn(MIN_CHUNK, MAX_CHUNK)
     }
 

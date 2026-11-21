@@ -42,4 +42,14 @@ class ChunkPlannerTest {
         assertEquals(ChunkPlanner.MIN_CHUNK, ChunkPlanner.chunkSizeFor(1_000, 32))
         assertEquals(ChunkPlanner.MAX_CHUNK, ChunkPlanner.chunkSizeFor(10L * 1024 * 1024 * 1024, 1))
     }
+
+    @Test
+    fun adaptiveChunksAreFineGrainedForLargeFiles() {
+        // v1.3: the 271 MB KataGo model at 16 threads should split
+        // into several hundred chunks so work stealing stays fluid.
+        val total = 271_440_852L
+        val chunk = ChunkPlanner.chunkSizeFor(total, 16)
+        assertTrue(chunk in ChunkPlanner.MIN_CHUNK..ChunkPlanner.MAX_CHUNK)
+        assertTrue(ChunkPlanner.chunkCount(total, chunk) >= 300)
+    }
 }

@@ -17,25 +17,46 @@ import kotlin.math.max
  *   takes the next unfinished chunk (dynamic chunking / work stealing).
  *   On top of that, an idle worker may split the unfinished tail of the
  *   slowest in-flight chunk and take half of it.
- * - Auto thread probing: starts at 4 connections, then doubles
- *   8 -> 16 -> 32 every few seconds while the measured speed keeps
- *   growing by more than 10%; stops at the first plateau.
+ * - Auto thread probing: starts low, then doubles 4 -> 8 -> 16 -> 32
+ *   every 2 s while the measured speed keeps growing by more than 10%;
+ *   stops at the first plateau.
  * - Honest fallback: if the server does not support Range, the task is
  *   downloaded in a single stream and [TaskRecord.note] says so. If more
  *   threads stop helping (speed plateau at the first step), the note
  *   explains the server is likely throttling per IP.
+ *
+ * v1.3 changes:
+ * - A failed range part RESUMES from its current offset on retry
+ *   instead of restarting the part and re-downloading its bytes.
+ * - A worker whose connection stalls (no byte for 12 s while the task
+ *   as a whole is moving) is evicted: its connection is dropped and
+ *   the part is retried on a fresh connection from the same offset.
+ * - Redirects are followed manually, so http <-> https cross-protocol
+ *   hops work and session headers are re-applied on every hop.
+ * - ETag / Last-Modified captured at probe time are re-validated
+ *   before a resume; a changed server file resets the chunk state
+ *   instead of silently mixing two versions' bytes.
+ * - The WiFi-only guard is consulted DURING the transfer, not just
+ *   before it starts; losing WiFi pauses the task with a clear note.
+ * - Optional user speed limit (token bucket) and 128 KB IO buffers.
  */
 class DownloadEngine(
     private val task: TaskRecord,
     private val targetProvider: () -> DownloadTarget,
     private val onProgress: (TaskRecord) -> Unit,
     private val onSave: () -> Unit,
+    private val limiter: SpeedLimiter? = null,
+    private val networkGuard: () -> Boolean = { true },
 ) {
     /** Seekable destination in the public download folder, opened after probing. */
     private lateinit var target: DownloadTarget
     @Volatile var paused = false
         private set
     @Volatile private var running = false
+    /** Set when the WiFi-only guard stops the transfer mid-flight. */
+    @Volatile private var netBlocked = false
+
+    private fun stopped(): Boolean = paused || netBlocked
 
     private val downloadedBytes = AtomicLong(task.downloaded)
     private val nextChunk = AtomicInteger(0)
@@ -45,6 +66,9 @@ class DownloadEngine(
         @Volatile var pos: Long = start // next byte to write
         @Volatile var end: Long = end   // exclusive; may shrink when split
         val start: Long = start
+        /** Live connection, so the sampler can evict a stalled worker. */
+        @Volatile var connection: HttpURLConnection? = null
+        @Volatile var lastAdvanceMs: Long = System.currentTimeMillis()
     }
 
     private val active = mutableListOf<ActiveChunk>()
@@ -70,8 +94,18 @@ class DownloadEngine(
         if (running) return task.status
         running = true
         paused = false
+        netBlocked = false
         try {
             if (task.totalSize <= 0 || task.fileName.isBlank()) probe()
+            if (task.totalSize == 0L) {
+                // A genuinely empty file: nothing to transfer.
+                target = targetProvider()
+                try { target.truncate(0) } finally { runCatching { target.close() } }
+                task.downloaded = 0
+                task.status = TaskStatus.DONE
+                return task.status
+            }
+            validateResume()
             target = targetProvider()
             try {
                 if (task.singleThreadOnly || task.totalSize <= 0) {
@@ -92,20 +126,48 @@ class DownloadEngine(
         }
     }
 
-    private fun open(url: String): HttpURLConnection {
-        val c = URL(url).openConnection() as HttpURLConnection
-        c.connectTimeout = 15_000
-        c.readTimeout = 30_000
-        c.instanceFollowRedirects = true
-        c.setRequestProperty("User-Agent", task.headers["User-Agent"] ?: DEFAULT_UA)
-        task.headers["Cookie"]?.let { c.setRequestProperty("Cookie", it) }
-        task.headers["Referer"]?.let { c.setRequestProperty("Referer", it) }
-        return c
+    /**
+     * Open a connection and follow redirects MANUALLY (audit A5):
+     * HttpURLConnection's built-in follower refuses http <-> https
+     * hops, which real download servers use all the time. Session
+     * headers (UA / Cookie / Referer) and the caller's own headers
+     * (Range) are re-applied on every hop. Returns the connection
+     * after the final response code has been read.
+     */
+    private fun openFollowingRedirects(
+        startUrl: String,
+        apply: (HttpURLConnection) -> Unit,
+    ): HttpURLConnection {
+        var current = startUrl
+        repeat(MAX_REDIRECTS + 1) {
+            val c = URL(current).openConnection() as HttpURLConnection
+            c.connectTimeout = 15_000
+            c.readTimeout = 30_000
+            c.instanceFollowRedirects = false
+            c.setRequestProperty("User-Agent", task.headers["User-Agent"] ?: DEFAULT_UA)
+            task.headers["Cookie"]?.let { c.setRequestProperty("Cookie", it) }
+            task.headers["Referer"]?.let { c.setRequestProperty("Referer", it) }
+            apply(c)
+            val code = c.responseCode
+            if (code in 301..303 || code == 307 || code == 308) {
+                val loc = c.getHeaderField("Location")
+                c.disconnect()
+                if (loc.isNullOrBlank()) {
+                    throw IllegalStateException("服务器跳转但没给地址（HTTP $code）")
+                }
+                current = runCatching { URL(URL(current), loc).toString() }
+                    .getOrElse { throw IllegalStateException("服务器给的跳转地址无效") }
+                return@repeat
+            }
+            return c
+        }
+        throw IllegalStateException("跳转次数太多，已停下")
     }
 
     private fun probe() {
-        val c = open(task.url)
-        c.setRequestProperty("Range", "bytes=0-0")
+        val c = openFollowingRedirects(task.url) {
+            it.setRequestProperty("Range", "bytes=0-0")
+        }
         val code = c.responseCode
         val contentType = c.getHeaderField("Content-Type") ?: ""
         if (contentType.contains("html", true) || contentType.contains("xhtml", true)) {
@@ -118,12 +180,15 @@ class DownloadEngine(
         if (task.fileName.isBlank()) {
             task.fileName = fileNameFrom(cd, task.url)
         }
+        // Validators for the resume check (audit A4).
+        c.getHeaderField("ETag")?.let { task.etag = it }
+        c.getHeaderField("Last-Modified")?.let { task.lastModified = it }
         when (code) {
             HttpURLConnection.HTTP_PARTIAL -> {
                 val range = c.getHeaderField("Content-Range") ?: ""
                 val total = range.substringAfter('/', "").toLongOrNull() ?: -1
                 task.totalSize = total
-                if (total <= 0) task.singleThreadOnly = true
+                if (total < 0) task.singleThreadOnly = true
             }
             HttpURLConnection.HTTP_OK -> {
                 task.totalSize = c.contentLengthLong
@@ -134,6 +199,52 @@ class DownloadEngine(
         }
         c.disconnect()
         onSave()
+    }
+
+    /**
+     * Audit A4: before resuming a partially downloaded file, ask the
+     * server whether the file is still the same one. If a stored
+     * validator (ETag / Last-Modified) or the total size disagrees,
+     * the old partial bytes belong to a different file version —
+     * drop the chunk state and start the byte ranges over (the .part
+     * file itself is truncated by the segmented run that follows).
+     * When the server offers no validators either time, resume as-is.
+     */
+    private fun validateResume() {
+        val resuming = task.chunkDone.any { it } ||
+            (task.singleThreadOnly && task.downloaded > 0)
+        if (!resuming) return
+        if (task.etag.isBlank() && task.lastModified.isBlank()) return
+        val c = runCatching {
+            openFollowingRedirects(task.url) { it.setRequestProperty("Range", "bytes=0-0") }
+        }.getOrNull() ?: return
+        try {
+            if (c.responseCode != HttpURLConnection.HTTP_PARTIAL &&
+                c.responseCode != HttpURLConnection.HTTP_OK
+            ) return
+            val newEtag = c.getHeaderField("ETag") ?: ""
+            val newModified = c.getHeaderField("Last-Modified") ?: ""
+            val range = c.getHeaderField("Content-Range") ?: ""
+            val newTotal = range.substringAfter('/', "").toLongOrNull() ?: -1
+            val validatorChanged =
+                (task.etag.isNotBlank() && newEtag.isNotBlank() && task.etag != newEtag) ||
+                    (task.lastModified.isNotBlank() && newModified.isNotBlank() &&
+                        task.lastModified != newModified)
+            val sizeChanged = newTotal > 0 && task.totalSize > 0 && newTotal != task.totalSize
+            if (validatorChanged || sizeChanged) {
+                task.chunkDone = BooleanArray(0)
+                task.chunkSize = 0
+                task.downloaded = 0
+                downloadedBytes.set(0)
+                if (newTotal > 0) task.totalSize = newTotal
+                task.etag = newEtag
+                task.lastModified = newModified
+                task.note = "服务器上的文件已更新，旧进度作废，已重新开始下载。"
+                onSave()
+            }
+        } finally {
+            c.disconnect()
+        }
     }
 
     // ---------- segmented path ----------
@@ -154,7 +265,7 @@ class DownloadEngine(
 
         target.truncate(total)
 
-        // Speed sampler + auto thread probing controller.
+        // Speed sampler + auto thread probing controller + stall eviction.
         val stopSampler = AtomicInteger(0)
         val sampler = Thread {
             var lastBytes = downloadedBytes.get()
@@ -162,8 +273,12 @@ class DownloadEngine(
             var lastSpeed = 0L
             var plateauSteps = 0
             var ticks = 0
-            while (stopSampler.get() == 0 && !paused) {
+            while (stopSampler.get() == 0 && !stopped()) {
                 try { Thread.sleep(1000) } catch (e: InterruptedException) { break }
+                if (!networkGuard()) {
+                    netBlocked = true
+                    break
+                }
                 val now = System.currentTimeMillis()
                 val bytes = downloadedBytes.get()
                 val dt = max(1L, now - lastTime)
@@ -172,8 +287,23 @@ class DownloadEngine(
                 recordSpeed(task.speedBps)
                 task.downloaded = bytes
                 ticks++
-                // Every 3 s decide whether more threads still help.
-                if (ticks % 3 == 0) {
+                // Evict stalled connections: a part that has not
+                // advanced for 12 s while the task as a whole IS
+                // moving gets its connection dropped; the worker
+                // retries the part on a fresh connection, resuming
+                // from the part's current offset.
+                if (speed > 0) {
+                    synchronized(activeLock) {
+                        for (ac in active) {
+                            if (now - ac.lastAdvanceMs > STALL_EVICT_MS) {
+                                ac.lastAdvanceMs = now // don't spam
+                                runCatching { ac.connection?.disconnect() }
+                            }
+                        }
+                    }
+                }
+                // Every 2 s decide whether more threads still help.
+                if (ticks % 2 == 0) {
                     val cur = task.speedBps
                     if (task.threads < MAX_THREADS && nextChunk.get() < count) {
                         if (lastSpeed == 0L || cur > lastSpeed * 11 / 10) {
@@ -200,7 +330,16 @@ class DownloadEngine(
         sampler.isDaemon = true
         sampler.start()
 
-        val initial = task.threads.coerceIn(1, MAX_THREADS)
+        // Audit A9: a FRESH start re-probes from 4 threads (yesterday's
+        // optimum says nothing about today's network); a resume keeps
+        // the persisted count but starts at most at 8 and lets the
+        // prober grow it again if the network wants more.
+        val resuming = firstOpen > 0 || downloadedBytes.get() > 0
+        val initial = if (resuming) {
+            task.threads.coerceIn(1, 8)
+        } else {
+            4
+        }
         task.threads = initial
         repeat(initial) { spawnWorker(count) }
 
@@ -217,6 +356,11 @@ class DownloadEngine(
         return when {
             doneCount == count -> {
                 task.status = TaskStatus.DONE
+                task.status
+            }
+            netBlocked -> {
+                task.note = "网络已切到流量（已开启「仅 WiFi 下载」），已暂停；回到 WiFi 后点继续即可续传。"
+                task.status = TaskStatus.PAUSED
                 task.status
             }
             paused -> {
@@ -245,7 +389,7 @@ class DownloadEngine(
     }
 
     private fun workerLoop(chunkCount: Int) {
-        while (!paused) {
+        while (!stopped()) {
             var index = nextChunk.getAndIncrement()
             if (index >= chunkCount) {
                 // No fresh chunks: try to steal the tail of the slowest
@@ -288,12 +432,17 @@ class DownloadEngine(
     private fun downloadActive(ac: ActiveChunk) {
         var attempt = 0
         var ok = false
-        while (attempt < 3 && !paused && !ok) {
+        while (attempt < 3 && !stopped() && !ok) {
             attempt++
             try {
                 downloadRange(ac)
                 ok = ac.pos >= ac.end
             } catch (e: Exception) {
+                if (isStorageFull(e)) {
+                    // No point retrying into a full disk (audit A10).
+                    task.error = "手机存储空间不足，下载已停下。清出空间后点继续即可续传。"
+                    break
+                }
                 if (attempt >= 3) {
                     task.error = e.message ?: "分片下载失败"
                 }
@@ -301,6 +450,7 @@ class DownloadEngine(
             }
         }
         synchronized(activeLock) { active.remove(ac) }
+        ac.connection = null
         if (ok && ac.index >= 0) {
             synchronized(activeLock) {
                 val left = (chunkParts[ac.index] ?: 1) - 1
@@ -315,14 +465,16 @@ class DownloadEngine(
     }
 
     private fun downloadRange(ac: ActiveChunk) {
-        // A retry restarts this part from its start: un-count bytes the
-        // previous attempt already added so progress never over-reports.
-        if (ac.pos > ac.start) {
-            downloadedBytes.addAndGet(-(ac.pos - ac.start))
-            ac.pos = ac.start
+        // v1.3: the request starts at the part's CURRENT offset, so a
+        // retry (or a stall eviction) keeps every byte already written
+        // instead of re-downloading the whole part.
+        val from = ac.pos
+        val to = ac.end - 1
+        if (from > to) return
+        val c = openFollowingRedirects(task.url) {
+            it.setRequestProperty("Range", "bytes=$from-$to")
         }
-        val c = open(task.url)
-        c.setRequestProperty("Range", "bytes=${ac.start}-${ac.end - 1}")
+        ac.connection = c
         val code = c.responseCode
         if (code == HttpURLConnection.HTTP_OK) {
             // Server ignored Range mid-download: cannot segment safely.
@@ -333,10 +485,18 @@ class DownloadEngine(
             c.disconnect()
             throw IllegalStateException("分片请求返回 HTTP $code")
         }
+        // A redirect chain that lands on a different byte range than
+        // asked would corrupt the file; Content-Range must match.
+        val cr = c.getHeaderField("Content-Range") ?: ""
+        val crStart = cr.removePrefix("bytes ").substringBefore('-').trim().toLongOrNull()
+        if (crStart != null && crStart != from) {
+            c.disconnect()
+            throw IllegalStateException("服务器返回的分片位置不对，已重试")
+        }
         val input: InputStream = c.inputStream
-        val buf = ByteArray(64 * 1024)
-        var pos = ac.start
-        while (!paused) {
+        val buf = ByteArray(BUFFER_SIZE)
+        var pos = from
+        while (!stopped()) {
             val limit = ac.end // may shrink when split
             if (pos >= limit) break
             val want = minOf(buf.size.toLong(), limit - pos).toInt()
@@ -345,10 +505,13 @@ class DownloadEngine(
             target.writeAt(pos, buf, 0, n)
             pos += n
             ac.pos = pos
+            ac.lastAdvanceMs = System.currentTimeMillis()
             downloadedBytes.addAndGet(n.toLong())
+            limiter?.throttle(n)
         }
         input.close()
         c.disconnect()
+        ac.connection = null
     }
 
     // ---------- single-stream fallback ----------
@@ -361,8 +524,12 @@ class DownloadEngine(
         val sampler = Thread {
             var lastBytes = 0L
             var lastTime = System.currentTimeMillis()
-            while (stopSampler.get() == 0 && !paused) {
+            while (stopSampler.get() == 0 && !stopped()) {
                 try { Thread.sleep(1000) } catch (e: InterruptedException) { break }
+                if (!networkGuard()) {
+                    netBlocked = true
+                    break
+                }
                 val now = System.currentTimeMillis()
                 val bytes = downloadedBytes.get()
                 val dt = max(1L, now - lastTime)
@@ -378,7 +545,7 @@ class DownloadEngine(
         sampler.isDaemon = true
         sampler.start()
         try {
-            val c = open(task.url)
+            val c = openFollowingRedirects(task.url) { }
             val code = c.responseCode
             if (code != HttpURLConnection.HTTP_OK && code != HttpURLConnection.HTTP_PARTIAL) {
                 throw IllegalStateException("服务器返回 HTTP $code")
@@ -386,12 +553,13 @@ class DownloadEngine(
             if (task.totalSize <= 0) task.totalSize = c.contentLengthLong
             c.inputStream.use { input ->
                 target.openStream().use { out ->
-                    val buf = ByteArray(64 * 1024)
-                    while (!paused) {
+                    val buf = ByteArray(BUFFER_SIZE)
+                    while (!stopped()) {
                         val n = input.read(buf)
                         if (n < 0) break
                         out.write(buf, 0, n)
                         downloadedBytes.addAndGet(n.toLong())
+                        limiter?.throttle(n)
                     }
                 }
             }
@@ -403,6 +571,10 @@ class DownloadEngine(
             task.downloaded = downloadedBytes.get()
         }
         return when {
+            netBlocked -> TaskStatus.PAUSED.also {
+                task.status = it
+                task.note = "网络已切到流量（已开启「仅 WiFi 下载」），已暂停；回到 WiFi 后点继续即可续传。"
+            }
             paused -> TaskStatus.PAUSED.also { task.status = it }
             task.totalSize > 0 && task.downloaded >= task.totalSize ->
                 TaskStatus.DONE.also { task.status = it }
@@ -415,9 +587,24 @@ class DownloadEngine(
         }
     }
 
+    private fun isStorageFull(e: Throwable): Boolean {
+        var cur: Throwable? = e
+        while (cur != null) {
+            val m = cur.message ?: ""
+            if (m.contains("No space left", true) || m.contains("ENOSPC") ||
+                m.contains("存储空间不足")
+            ) return true
+            cur = cur.cause
+        }
+        return false
+    }
+
     companion object {
         const val MAX_THREADS = 32
-        const val MIN_SPLIT = 512L * 1024
+        const val MIN_SPLIT = 256L * 1024
+        const val BUFFER_SIZE = 128 * 1024
+        const val MAX_REDIRECTS = 6
+        const val STALL_EVICT_MS = 12_000L
         const val DEFAULT_UA =
             "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
 

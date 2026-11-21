@@ -47,6 +47,16 @@ class SniffActivity : Activity() {
             headers["User-Agent"] = userAgent ?: ""
             CookieManager.getInstance().getCookie(url)?.let { headers["Cookie"] = it }
             web.url?.let { headers["Referer"] = it }
+            // Same duplicate guard as the main UI (audit A2).
+            val dup = DownloadCenter.store.tasks.any {
+                it.url == url && it.status != com.tuxundown.android.core.TaskStatus.DONE &&
+                    it.status != com.tuxundown.android.core.TaskStatus.FAILED
+            }
+            if (dup) {
+                Toast.makeText(this, "这个链接已经在任务列表里了", Toast.LENGTH_LONG).show()
+                finish()
+                return@setDownloadListener
+            }
             val task = TaskRecord(url = url, headers = headers)
             DownloadCenter.store.add(task)
             DownloadCenter.enqueue(task)

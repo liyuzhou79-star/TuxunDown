@@ -151,6 +151,42 @@ fun DownApp(sharedUrl: String) {
     var sniffPage by remember { mutableStateOf("") }
     var message by remember { mutableStateOf("") }
 
+    // ---- v1.3 state: onboarding guide, clipboard prompt, search/sort,
+    // speed limit and completion-feedback settings ----
+    val appVersion = remember {
+        runCatching {
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName
+        }.getOrNull() ?: "1.3.0"
+    }
+    var showGuide by remember {
+        mutableStateOf(DownloadCenter.guideSeenVersion != appVersion)
+    }
+    var clipboardLink by remember { mutableStateOf("") }
+    var query by remember { mutableStateOf("") }
+    var sortMode by remember { mutableStateOf(0) } // 0 默认 1 大小 2 时间
+    var limitKBps by remember { mutableStateOf(DownloadCenter.speedLimitKBps) }
+    var vibrateOn by remember { mutableStateOf(DownloadCenter.completeVibrate) }
+    var soundOn by remember { mutableStateOf(DownloadCenter.completeSound) }
+
+    // Clipboard prompt: if the clipboard holds a link we have not
+    // asked about yet, offer a one-tap task when the app opens.
+    LaunchedEffect(Unit) {
+        runCatching {
+            val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                as android.content.ClipboardManager
+            val clip = cm.primaryClip
+            if (clip != null && clip.itemCount > 0) {
+                val text = clip.getItemAt(0).coerceToText(context)?.toString() ?: ""
+                val url = Regex("https?://\\S+").find(text)?.value?.trimEnd('.', ',', '，', '。')
+                if (!url.isNullOrBlank() && url != DownloadCenter.clipboardPrompted &&
+                    store.tasks.none { it.url == url }
+                ) {
+                    clipboardLink = url
+                }
+            }
+        }
+    }
+
     val dirPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
@@ -170,12 +206,23 @@ fun DownApp(sharedUrl: String) {
         }
     }
 
-    fun createTask(url: String, referer: String = "") {
+    /** Returns false when the same link is already an active task. */
+    fun createTask(url: String, referer: String = ""): Boolean {
+        // Audit A2 (UI side): the same URL twice would produce two
+        // records fighting over one file name — refuse politely.
+        val dup = store.tasks.any {
+            it.url == url && it.status != TaskStatus.DONE && it.status != TaskStatus.FAILED
+        }
+        if (dup) {
+            Toast.makeText(context, "这个链接已经在任务列表里了", Toast.LENGTH_SHORT).show()
+            return false
+        }
         val t = TaskRecord(url = url)
         if (referer.isNotBlank()) t.headers["Referer"] = referer
         store.add(t)
         DownloadCenter.enqueue(t)
         Toast.makeText(context, "已新建下载任务", Toast.LENGTH_SHORT).show()
+        return true
     }
 
     fun handleSniffResult(result: SniffResult, pageUrl: String) {
@@ -214,9 +261,62 @@ fun DownApp(sharedUrl: String) {
      * extension, or a probe whose headers say "file") starts downloading
      * right away; only real web pages go through the sniffer.
      */
+    /**
+     * v1.3 batch paste: several links, one per line. Direct files are
+     * created immediately; web pages are routed/sniffed one by one in
+     * the background — a page that resolves to a single file becomes a
+     * task, a page with many resources is counted as skipped (the
+     * user can open it separately and pick). Duplicates are skipped.
+     */
+    fun startBatch(raw: String) {
+        val lines = raw.lines().map { it.trim() }.filter { it.startsWith("http") }
+        if (lines.isEmpty()) return
+        showAdd = false
+        urlText = ""
+        Toast.makeText(context, "正在批量处理 ${lines.size} 个链接…", Toast.LENGTH_SHORT).show()
+        Thread {
+            var created = 0
+            var skipped = 0
+            for (line in lines) {
+                val make: String? = when {
+                    LinkRouter.looksLikeFileUrl(line) -> line
+                    else -> when (val r = runCatching { Sniffer().sniff(line) }.getOrNull()) {
+                        is SniffResult.DirectFile -> r.url
+                        else -> null
+                    }
+                }
+                if (make == null) {
+                    skipped++
+                } else {
+                    var ok = false
+                    val latch = java.util.concurrent.CountDownLatch(1)
+                    activity.runOnUiThread {
+                        ok = createTask(make)
+                        latch.countDown()
+                    }
+                    latch.await()
+                    if (ok) created++ else skipped++
+                }
+            }
+            activity.runOnUiThread {
+                Toast.makeText(
+                    context,
+                    "批量完成：新建 $created 个任务" +
+                        if (skipped > 0) "，跳过 $skipped 个（重复或网页资源需单独选）" else "",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+        }.start()
+    }
+
     fun startSmart(raw: String) {
         val u = raw.trim()
         if (u.isBlank() || sniffing) return
+        // Multi-line paste = batch mode (v1.3).
+        if (u.lines().count { it.isNotBlank() } > 1) {
+            startBatch(u)
+            return
+        }
         if (LinkRouter.looksLikeFileUrl(u)) {
             createTask(u)
             showAdd = false
@@ -281,7 +381,17 @@ fun DownApp(sharedUrl: String) {
     }
 
     fun deleteTask(task: TaskRecord) {
-        if (task.status == TaskStatus.RUNNING) DownloadCenter.pauseTask(task)
+        // Audit A7: a RUNNING task's engine threads keep writing for
+        // a while after pause(). Deleting the .part file immediately
+        // raced them (the engine could even "finish" a deleted
+        // entry). Now the service owns the cleanup: mark cancelled
+        // here; once the engine has fully stopped, the service
+        // deletes the file and the record.
+        if (task.status == TaskStatus.RUNNING) {
+            DownloadCenter.cancelTask(task)
+            Toast.makeText(context, "正在停止并删除这个任务…", Toast.LENGTH_SHORT).show()
+            return
+        }
         // Unfinished tasks: also remove the public .part file.
         // Finished tasks: only the record goes away, the file stays
         // in the Download folder (it belongs to the user now).
@@ -301,12 +411,26 @@ fun DownApp(sharedUrl: String) {
             .background(MaterialTheme.colorScheme.background)
             .padding(16.dp)
     ) {
-        Text("TuxunDown", style = MaterialTheme.typography.headlineMedium)
-        Text(
-            "极速多线程下载器",
-            style = MaterialTheme.typography.bodyMedium,
-            color = WinPalette.GrayText,
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            // v1.3: home header icon kept deliberately small (36dp) —
+            // the user asked twice for the icon NOT to fill its space.
+            androidx.compose.foundation.Image(
+                painter = androidx.compose.ui.res.painterResource(R.mipmap.ic_launcher),
+                contentDescription = null,
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(RoundedCornerShape(9.dp)),
+            )
+            Spacer(Modifier.size(10.dp))
+            Column {
+                Text("TuxunDown", style = MaterialTheme.typography.headlineMedium)
+                Text(
+                    "极速多线程下载器",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = WinPalette.GrayText,
+                )
+            }
+        }
         Spacer(Modifier.height(12.dp))
 
         // ---- settings card ----
@@ -366,6 +490,66 @@ fun DownApp(sharedUrl: String) {
                     color = WinPalette.GrayText,
                     modifier = Modifier.padding(top = 8.dp),
                 )
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Text("全局限速（每个任务的最高速度，改了立即生效）")
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    val options = listOf(
+                        0 to "不限", 512 to "512KB", 1024 to "1MB",
+                        3072 to "3MB", 5120 to "5MB",
+                    )
+                    for ((kb, label) in options) {
+                        if (kb == limitKBps) {
+                            Button(onClick = { }) { Text(label) }
+                        } else {
+                            OutlinedButton(onClick = {
+                                limitKBps = kb
+                                DownloadCenter.speedLimitKBps = kb
+                            }) { Text(label) }
+                        }
+                    }
+                }
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("下载完成震动")
+                    Switch(checked = vibrateOn, onCheckedChange = {
+                        vibrateOn = it
+                        DownloadCenter.completeVibrate = it
+                    })
+                }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("下载完成提示音")
+                    Switch(checked = soundOn, onCheckedChange = {
+                        soundOn = it
+                        DownloadCenter.completeSound = it
+                    })
+                }
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("新手引导")
+                        Text(
+                            "每个新版本首次打开都会自动播放一次",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = WinPalette.GrayText,
+                        )
+                    }
+                    OutlinedButton(onClick = { showGuide = true }) { Text("重新查看") }
+                }
             }
         }
         Spacer(Modifier.height(12.dp))
@@ -380,11 +564,49 @@ fun DownApp(sharedUrl: String) {
             Spacer(Modifier.height(12.dp))
         }
 
+        // ---- v1.3: task search + sort ----
+        if (store.tasks.isNotEmpty()) {
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                label = { Text("搜索任务（文件名或链接）") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Row(
+                Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("排序：", style = MaterialTheme.typography.bodySmall, color = WinPalette.GrayText)
+                val modes = listOf(0 to "默认", 1 to "大小", 2 to "时间")
+                for ((m, label) in modes) {
+                    if (m == sortMode) {
+                        Button(onClick = { }) { Text(label) }
+                    } else {
+                        OutlinedButton(onClick = { sortMode = m }) { Text(label) }
+                    }
+                }
+            }
+        }
+        val displayedTasks = store.tasks
+            .filter {
+                query.isBlank() ||
+                    it.fileName.contains(query, true) || it.url.contains(query, true)
+            }
+            .let { list ->
+                when (sortMode) {
+                    1 -> list.sortedByDescending { it.totalSize }
+                    2 -> list.sortedBy { it.createdAt }
+                    else -> list
+                }
+            }
+
         if (store.tasks.isEmpty()) {
             Text("还没有任务。点「新建下载」，粘贴文件直链或网页链接即可：直链会直接开下，网页会自动嗅探里面的资源。")
         }
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            items(store.tasks, key = { it.id }) { task ->
+            items(displayedTasks, key = { it.id }) { task ->
                 TaskCard(
                     task = task,
                     onPause = { DownloadCenter.pauseTask(task) },
@@ -410,7 +632,7 @@ fun DownApp(sharedUrl: String) {
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Text(
-                        "直链自动直接下载；网页自动嗅探里面的资源。",
+                        "直链自动直接下载；网页自动嗅探里面的资源。一行一个链接、粘多行可以批量新建。",
                         style = MaterialTheme.typography.bodySmall,
                         color = WinPalette.GrayText,
                     )
@@ -499,6 +721,147 @@ fun DownApp(sharedUrl: String) {
                 TextButton(onClick = { sniffList = emptyList() }) { Text("关闭") }
             },
         )
+    }
+
+    // ---- v1.3: clipboard link prompt ----
+    if (clipboardLink.isNotBlank()) {
+        AlertDialog(
+            onDismissRequest = {
+                DownloadCenter.clipboardPrompted = clipboardLink
+                clipboardLink = ""
+            },
+            title = { Text("剪贴板里有链接") },
+            text = {
+                Text(
+                    clipboardLink,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val u = clipboardLink
+                    DownloadCenter.clipboardPrompted = u
+                    clipboardLink = ""
+                    startSmart(u)
+                }) { Text("新建下载") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    DownloadCenter.clipboardPrompted = clipboardLink
+                    clipboardLink = ""
+                }) { Text("不用了") }
+            },
+        )
+    }
+
+    // ---- v1.3: per-version onboarding guide ----
+    if (showGuide) {
+        GuideOverlay(
+            version = appVersion,
+            onDone = {
+                DownloadCenter.guideSeenVersion = appVersion
+                showGuide = false
+            },
+        )
+    }
+}
+
+/**
+ * Full-screen onboarding guide (v1.3, user-requested): shown on the
+ * first launch of EVERY new version (the caller compares the stored
+ * version), and re-openable from settings. Five pages in the
+ * TuxunGo style: welcome / what's new / how it works / speed tips /
+ * notes. Content describes this version's real changes and is
+ * written for all users, not as a report to one person.
+ */
+@androidx.compose.runtime.Composable
+fun GuideOverlay(version: String, onDone: () -> Unit) {
+    val pages = listOf(
+        "欢迎使用 TuxunDown" to
+            "极速多线程下载器：把一个文件切成很多块、开多条连接同时下，" +
+            "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
+            "免费开源，没有广告，不用注册账号。",
+        "本版更新（v$version）" to
+            "· 下载更快：分块更细、断线重试不再重下已下的部分、卡住的连接会被自动换掉\n" +
+            "· 修了一批问题：同名文件不再被覆盖、任务记录更抗损坏、WiFi 断开会自动暂停\n" +
+            "· 新增：批量粘贴建任务、剪贴板链接提示、任务搜索排序、全局限速、完成震动/提示音",
+        "核心用法" to
+            "点「新建下载」，把链接粘进来就行：\n" +
+            "· 文件直链 → 直接开始多线程下载\n" +
+            "· 网页链接 → 自动嗅探出页面里的资源，点一个就下\n" +
+            "· 一行一个链接、粘多行 → 批量新建\n" +
+            "下好的文件都在手机公共「下载」目录里，文件管理器第一层就能找到。",
+        "提速小贴士" to
+            "· 优先用 WiFi，并尽量靠近路由器\n" +
+            "· 同一个文件浏览器下很慢、这里快很多，是正常现象：浏览器只有一条连接\n" +
+            "· 如果加线程后速度不再涨，卡片上会明说——那是服务器按总量限速，谁都绕不过去\n" +
+            "· 大文件下到一半可以放心暂停，回来点继续会接着下，不用重来",
+        "说明" to
+            "· 本软件免费开源（GPLv3），不收集、不上传你的任何数据，所有任务记录只存在你的手机里\n" +
+            "· 请只下载你有权下载的内容，并遵守目标网站的规定\n" +
+            "· 下载速度取决于你的网络和对方服务器，本软件不能突破你的宽带上限",
+    )
+    var page by remember { mutableStateOf(0) }
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onDone,
+        properties = androidx.compose.ui.window.DialogProperties(
+            usePlatformDefaultWidth = false,
+        ),
+    ) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background)
+                .padding(24.dp),
+        ) {
+            Spacer(Modifier.height(24.dp))
+            androidx.compose.foundation.Image(
+                painter = androidx.compose.ui.res.painterResource(R.mipmap.ic_launcher),
+                contentDescription = null,
+                modifier = Modifier
+                    .size(64.dp)
+                    .clip(RoundedCornerShape(14.dp)),
+            )
+            Spacer(Modifier.height(16.dp))
+            Text(
+                pages[page].first,
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(12.dp))
+            Text(
+                pages[page].second,
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            Spacer(Modifier.weight(1f))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+            ) {
+                Text(
+                    (0 until pages.size).joinToString("  ") { if (it == page) "●" else "○" },
+                    color = WinPalette.ChartGreen,
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                if (page > 0) {
+                    OutlinedButton(onClick = { page-- }) { Text("上一页") }
+                } else {
+                    TextButton(onClick = onDone) { Text("跳过") }
+                }
+                if (page < pages.size - 1) {
+                    Button(onClick = { page++ }) { Text("下一页") }
+                } else {
+                    Button(onClick = onDone) { Text("开始使用") }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+        }
     }
 }
 
@@ -837,6 +1200,10 @@ fun TaskCard(
                             "已下载：",
                             "${Format.size(task.downloaded)} / ${Format.size(task.totalSize)}",
                         )
+                        // v1.3: one-tap retry that KEEPS the progress
+                        // already downloaded (chunk bitmap survives).
+                        Spacer(Modifier.height(6.dp))
+                        OutlinedButton(onClick = onResume) { Text("重试（保留已下载进度）") }
                     }
                     TaskStatus.QUEUED -> {
                         Text(

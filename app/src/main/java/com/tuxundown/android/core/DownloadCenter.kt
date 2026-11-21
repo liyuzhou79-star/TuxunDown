@@ -31,6 +31,47 @@ object DownloadCenter {
         get() = prefs().getBoolean("detailsExpanded", true)
         set(v) { prefs().edit().putBoolean("detailsExpanded", v).apply() }
 
+    /** Global per-task speed limit in KB/s (v1.3); 0 = unlimited. */
+    var speedLimitKBps: Int
+        get() = prefs().getInt("speedLimitKBps", 0)
+        set(v) { prefs().edit().putInt("speedLimitKBps", v).apply() }
+
+    /** Completion feedback switches (v1.3). */
+    var completeVibrate: Boolean
+        get() = prefs().getBoolean("completeVibrate", true)
+        set(v) { prefs().edit().putBoolean("completeVibrate", v).apply() }
+
+    var completeSound: Boolean
+        get() = prefs().getBoolean("completeSound", false)
+        set(v) { prefs().edit().putBoolean("completeSound", v).apply() }
+
+    /** versionName the full-screen onboarding guide was last shown for (v1.3). */
+    var guideSeenVersion: String
+        get() = prefs().getString("guideSeenVersion", "") ?: ""
+        set(v) { prefs().edit().putString("guideSeenVersion", v).apply() }
+
+    /** Last clipboard link the user was prompted about (don't nag twice). */
+    var clipboardPrompted: String
+        get() = prefs().getString("clipboardPrompted", "") ?: ""
+        set(v) { prefs().edit().putString("clipboardPrompted", v).apply() }
+
+    // ---- cancellation (audit A7) ----
+    // Deleting a RUNNING task used to race the engine: the UI deleted
+    // the .part file while worker threads were still writing into it.
+    // Now the UI marks the task cancelled; the service, which owns
+    // the engine thread, deletes the file and the record only AFTER
+    // the engine has fully stopped.
+    private val cancelled = mutableSetOf<String>()
+
+    @Synchronized
+    fun cancelTask(task: TaskRecord) {
+        cancelled.add(task.id)
+        engines[task.id]?.pause()
+    }
+
+    @Synchronized
+    fun consumeCancelled(task: TaskRecord): Boolean = cancelled.remove(task.id)
+
     private fun prefs() = appContext!!.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
     @Synchronized

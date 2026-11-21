@@ -38,6 +38,9 @@ class DownloadService : Service() {
         val store = DownloadCenter.store
         while (true) {
             val task = DownloadCenter.nextQueued() ?: break
+            // The record may have been deleted from the UI in the
+            // same instant we picked it up; never download a ghost.
+            if (store.byId(task.id) == null) continue
             if (DownloadCenter.wifiOnly && !DownloadCenter.isOnWifi()) {
                 task.note = "已开启「仅 WiFi 下载」，等待 WiFi 网络。"
                 store.save()
@@ -59,11 +62,29 @@ class DownloadService : Service() {
                 },
                 onProgress = { notifyAggregate() },
                 onSave = { store.save() },
+                // v1.3: user speed limit (token bucket, read live so
+                // changing the setting mid-download takes effect) and
+                // the WiFi-only guard consulted during the transfer.
+                limiter = SpeedLimiter(rateBps = {
+                    DownloadCenter.speedLimitKBps.toLong() * 1024
+                }),
+                networkGuard = {
+                    !(DownloadCenter.wifiOnly && !DownloadCenter.isOnWifi())
+                },
             )
             DownloadCenter.registerEngine(task, engine)
             try {
                 engine.run()
-                if (task.status == TaskStatus.DONE) finalizeFinished(task)
+                if (DownloadCenter.consumeCancelled(task)) {
+                    // Audit A7: the user deleted this task while it
+                    // was running. The engine has fully stopped NOW,
+                    // so it is finally safe to remove the file and
+                    // the record.
+                    PublicStorage.deleteTarget(this, task)
+                    store.remove(task)
+                } else if (task.status == TaskStatus.DONE) {
+                    finalizeFinished(task)
+                }
             } finally {
                 DownloadCenter.unregisterEngine(task)
                 store.save()
@@ -88,12 +109,41 @@ class DownloadService : Service() {
             }
             task.note = "$where：$displayName"
             notifyUpdate("下载完成", displayName, 100)
+            completionFeedback()
         } catch (e: Exception) {
             task.note = "下载完成，但改名失败（${e.message ?: "未知错误"}），" +
                 "文件在下载目录里，名字带 .part 后缀，去掉后缀即可使用。"
             notifyAggregate()
         }
         store.save()
+    }
+
+    /** v1.3: completion vibration / sound, per the user's switches. */
+    private fun completionFeedback() {
+        if (DownloadCenter.completeVibrate) {
+            runCatching {
+                val vibrator = if (android.os.Build.VERSION.SDK_INT >= 31) {
+                    (getSystemService(android.content.Context.VIBRATOR_MANAGER_SERVICE)
+                        as android.os.VibratorManager).defaultVibrator
+                } else {
+                    @Suppress("DEPRECATION")
+                    getSystemService(android.content.Context.VIBRATOR_SERVICE)
+                        as android.os.Vibrator
+                }
+                vibrator.vibrate(
+                    android.os.VibrationEffect.createOneShot(
+                        180, android.os.VibrationEffect.DEFAULT_AMPLITUDE
+                    )
+                )
+            }
+        }
+        if (DownloadCenter.completeSound) {
+            runCatching {
+                val uri = android.media.RingtoneManager
+                    .getDefaultUri(android.media.RingtoneManager.TYPE_NOTIFICATION)
+                android.media.RingtoneManager.getRingtone(this, uri)?.play()
+            }
+        }
     }
 
     // ---------- notification: same Windows-style wording as the UI ----------

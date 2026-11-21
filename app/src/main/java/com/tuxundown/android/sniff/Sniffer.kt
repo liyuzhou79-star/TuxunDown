@@ -71,7 +71,11 @@ object LinkRouter {
             val finalUrl = c.url.toString()
             c.disconnect()
             when {
-                code == 405 || code == 501 || code == 400 -> method = "GET"
+                // Audit A14: plenty of servers refuse HEAD (405/501,
+                // some even 401/403) but happily serve GET — fall back
+                // to the 1-byte Range GET before giving up.
+                code == 405 || code == 501 || code == 400 ||
+                    ((code == 401 || code == 403) && method == "HEAD") -> method = "GET"
                 code >= 400 -> throw IllegalStateException(httpReason(code))
                 else -> return decide(type, disp, finalUrl)
             }
@@ -182,7 +186,13 @@ object SniffParser {
         for (m in PLAIN_URL.findAll(html)) {
             val raw = m.value.trimEnd('.', ',', ';')
             val resolved = resolve(baseUrl, raw) ?: continue
-            add(resolved, kindOf(resolved), resolved.contains("download", true))
+            // Audit A13: a bare script/text URL counts as a download
+            // ENTRY only when it really points at a file. v1.2 marked
+            // ANY raw URL containing "download" as an entry, so one
+            // stray analytics/CDN URL could become the "single path"
+            // that layer 2 auto-follows instead of listing choices.
+            val kind = kindOf(resolved)
+            add(resolved, kind, kind != null && resolved.contains("download", true))
         }
         // Download entries first, files before images, images last.
         return byUrl.values.sortedWith(

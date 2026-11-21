@@ -33,6 +33,12 @@ class TaskRecord(
      * staged in the app's private directory).
      */
     var targetUri: String = "",
+    /** Server validators captured at probe time (v1.3, audit A4): if
+     *  they change before a resume, the old partial bytes are stale
+     *  and the chunk state is reset instead of silently mixing two
+     *  different files. */
+    var etag: String = "",
+    var lastModified: String = "",
     // Live-only fields (not persisted):
     @Transient var downloaded: Long = 0,
     @Transient var speedBps: Long = 0,
@@ -65,9 +71,15 @@ class TaskStore(context: Context) {
     @Synchronized
     fun load() {
         tasks.clear()
-        if (!metaFile.exists()) return
+        // v1.3 (audit A11): if tasks.json is corrupt (crash mid-save
+        // under the old direct-write code), fall back to the .bak copy
+        // instead of silently losing every task.
+        val text = listOf(metaFile, File(metaFile.path + ".bak"))
+            .firstOrNull { it.exists() }
+            ?.let { runCatching { it.readText() }.getOrNull() }
+            ?: return
         runCatching {
-            val arr = JSONArray(metaFile.readText())
+            val arr = JSONArray(text)
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
                 val t = TaskRecord(
@@ -86,6 +98,8 @@ class TaskStore(context: Context) {
                     savedUri = o.optString("savedUri"),
                     savedName = o.optString("savedName"),
                     targetUri = o.optString("targetUri"),
+                    etag = o.optString("etag"),
+                    lastModified = o.optString("lastModified"),
                 )
                 val h = o.optJSONObject("headers")
                 if (h != null) {
@@ -126,12 +140,27 @@ class TaskStore(context: Context) {
             o.put("savedUri", t.savedUri)
             o.put("savedName", t.savedName)
             o.put("targetUri", t.targetUri)
+            o.put("etag", t.etag)
+            o.put("lastModified", t.lastModified)
             val h = JSONObject()
             for ((k, v) in t.headers) h.put(k, v)
             o.put("headers", h)
             arr.put(o)
         }
-        metaFile.writeText(arr.toString())
+        // v1.3 (audit A11): atomic save — write a temp file, keep the
+        // previous good file as .bak, then rename over. A crash or
+        // power loss mid-save can no longer corrupt the only copy.
+        val tmp = File(metaFile.path + ".tmp")
+        tmp.writeText(arr.toString())
+        if (metaFile.exists()) {
+            runCatching { metaFile.copyTo(File(metaFile.path + ".bak"), overwrite = true) }
+        }
+        if (!tmp.renameTo(metaFile)) {
+            // renameTo can fail across filesystems; same dir, so this
+            // is only a paranoia fallback.
+            tmp.copyTo(metaFile, overwrite = true)
+            tmp.delete()
+        }
     }
 
     fun add(t: TaskRecord): TaskRecord {

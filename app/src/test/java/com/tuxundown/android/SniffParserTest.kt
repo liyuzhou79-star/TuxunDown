@@ -88,6 +88,23 @@ class SniffParserTest {
     }
 
     @Test
+    fun bareScriptUrlWithDownloadInPathIsNotAnEntry() {
+        // Audit A13: a raw JS URL that merely contains "download"
+        // (analytics/tracker style) must not be listed at all, and
+        // must never become the auto-followed single entry. A raw
+        // URL that really points at a file still counts.
+        val page = """
+            <script>var t = "https://stats.example.com/download/tracker.js";</script>
+            <script>var u = "https://cdn.example.com/download/app.zip";</script>
+        """.trimIndent()
+        val res = SniffParser.extract(page, "https://example.com/")
+        val urls = res.map { it.url }.toSet()
+        assertTrue("https://stats.example.com/download/tracker.js" !in urls)
+        assertTrue("https://cdn.example.com/download/app.zip" in urls)
+        assertTrue(res.first { it.url.endsWith(".zip") }.looksLikeDownloadEntry)
+    }
+
+    @Test
     fun entriesSortBeforeImages() {
         val page = """
             <img src="/a.png">

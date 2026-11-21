@@ -75,7 +75,20 @@ object PublicStorage {
         val name = task.fileName.ifBlank {
             DownloadEngine.fileNameFrom(null, task.url).also { task.fileName = it }
         }
-        val part = partName(name)
+        // Audit A2: two live tasks must never share one .part file.
+        // If another task in the store already owns the plain
+        // "<name>.part", this task gets a per-task part name instead
+        // (the finished file still lands under the real name).
+        val shared = DownloadCenter.store.tasks.any {
+            it.id != task.id && it.targetUri.isNotBlank() &&
+                it.status != TaskStatus.DONE &&
+                (it.fileName == name)
+        }
+        val part = if (shared) {
+            "${name}.${task.id.take(6)}.part"
+        } else {
+            partName(name)
+        }
         val custom = DownloadCenter.downloadDirUri
         val uri: Uri = if (custom.isNotBlank()) {
             val tree = DocumentFile.fromTreeUri(context, Uri.parse(custom))
@@ -134,31 +147,60 @@ object PublicStorage {
         if (custom.isNotBlank()) {
             // SAF: renaming changes the document id on some providers,
             // so re-find the file in the tree afterwards.
-            val doc = DocumentFile.fromSingleUri(context, uri)
-            if (doc != null && doc.name == partName(name)) {
-                runCatching { doc.renameTo(name) }
-            }
             val tree = DocumentFile.fromTreeUri(context, Uri.parse(custom))
-            val found = tree?.findFile(name)
+            // Audit A1 (SAF side): never overwrite a stranger's file —
+            // pick the first free "name (n).ext" instead.
+            val finalName = freeName(name) { candidate ->
+                val existing = tree?.findFile(candidate)
+                existing != null && existing.uri != uri
+            }
+            val doc = DocumentFile.fromSingleUri(context, uri)
+            if (doc != null && doc.name != finalName) {
+                runCatching { doc.renameTo(finalName) }
+            }
+            val found = tree?.findFile(finalName)
             if (found != null) {
                 task.savedUri = found.uri.toString()
+                displayName = finalName
             } else {
                 task.savedUri = uri.toString()
                 displayName = doc?.name ?: partName(name)
             }
         } else {
-            // MediaStore: replace a same-name stranger entry, then
-            // rename ours in place (the Uri/id stays stable).
-            deleteDownloadsEntryNamed(context, name, except = uri)
+            // MediaStore, audit A1: v1.2 DELETED any same-name entry
+            // already sitting in the Download folder — including the
+            // user's own pre-existing files. Never again: if a
+            // different entry already owns the final name, ours is
+            // renamed to the first free "name (n).ext" instead (the
+            // Uri/id stays stable either way).
+            val finalName = freeName(name) { candidate ->
+                findDownloadsEntry(context, candidate) != null &&
+                    findDownloadsEntry(context, candidate) != uri
+            }
             val values = ContentValues().apply {
-                put(MediaStore.Downloads.DISPLAY_NAME, name)
-                put(MediaStore.Downloads.MIME_TYPE, mimeOf(name))
+                put(MediaStore.Downloads.DISPLAY_NAME, finalName)
+                put(MediaStore.Downloads.MIME_TYPE, mimeOf(finalName))
             }
             resolver.update(uri, values, null, null)
             task.savedUri = uri.toString()
+            displayName = finalName
         }
         task.savedName = displayName
         return displayName
+    }
+
+    /** First free variant of [name]: name, "name (1).ext", "name (2).ext"… */
+    private fun freeName(name: String, taken: (String) -> Boolean): String {
+        if (!taken(name)) return name
+        val dot = name.lastIndexOf('.')
+        val stem = if (dot > 0) name.substring(0, dot) else name
+        val ext = if (dot > 0) name.substring(dot) else ""
+        var n = 1
+        while (true) {
+            val candidate = "$stem ($n)$ext"
+            if (!taken(candidate)) return candidate
+            n++
+        }
     }
 
     /** Delete the task's public file (.part or finished). Best effort. */
@@ -196,23 +238,6 @@ object PublicStorage {
             }
         }
         return null
-    }
-
-    private fun deleteDownloadsEntryNamed(context: Context, displayName: String, except: Uri) {
-        val resolver = context.contentResolver
-        val cursor = resolver.query(
-            downloadsCollection(),
-            arrayOf(MediaStore.Downloads._ID),
-            "${MediaStore.Downloads.DISPLAY_NAME} = ? AND ${MediaStore.Downloads.RELATIVE_PATH} = ?",
-            arrayOf(displayName, Environment.DIRECTORY_DOWNLOADS + "/"),
-            null,
-        )
-        cursor?.use {
-            while (it.moveToNext()) {
-                val item = Uri.withAppendedPath(downloadsCollection(), it.getLong(0).toString())
-                if (item != except) runCatching { resolver.delete(item, null, null) }
-            }
-        }
     }
 
     private fun insertDownloadsEntry(context: Context, displayName: String): Uri {
