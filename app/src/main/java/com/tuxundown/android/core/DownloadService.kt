@@ -182,6 +182,25 @@ class DownloadService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // v2.6 recovery entries (audit round 12 — see the matrix
+        // in CHECKPOINT). A null intent means START_STICKY is
+        // bringing back a service the system killed mid-work:
+        // QUEUED tasks resume through the drain on their own, but
+        // tasks that were RUNNING reload parked as PAUSED (the
+        // standing load rule) and used to stall there forever —
+        // re-queue exactly those. The boot action is the same
+        // recovery behind the user's (default-off) 开机恢复
+        // switch. CrashGuard safe mode (a crash streak) skips
+        // both: after repeated crashes the user decides what
+        // runs next, not an automatic path.
+        if (intent == null && !CrashGuard.safeMode) {
+            DownloadCenter.recoverInterrupted()
+        }
+        if (intent?.action == ACTION_BOOT_RESUME &&
+            DownloadCenter.bootResume && !CrashGuard.safeMode
+        ) {
+            DownloadCenter.recoverInterrupted()
+        }
         // v1.8: notification action buttons land here. Pause goes
         // through DownloadCenter like a card tap; cancel mirrors
         // the card's delete (a RUNNING task is cancelled through
@@ -1013,6 +1032,9 @@ class DownloadService : Service() {
         // v1.8: notification action buttons.
         const val ACTION_PAUSE = "com.tuxundown.android.action.PAUSE_TASK"
         const val ACTION_CANCEL = "com.tuxundown.android.action.CANCEL_TASK"
+        // v2.6: explicit start from BootReceiver (setting-gated there
+        // and re-checked in onStartCommand).
+        const val ACTION_BOOT_RESUME = "com.tuxundown.android.action.BOOT_RESUME"
         const val EXTRA_TASK_ID = "taskId"
     }
 }

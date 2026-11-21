@@ -14,6 +14,10 @@
     <!-- v1.6: only for the scan-to-add screen; the camera is opened
          solely while that screen is in front of the user. -->
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- v2.6: only for the (default-off)「开机后自动恢复未完成任务」
+         switch; with the switch off the receiver returns instantly
+         and nothing runs at boot beyond that check. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <application
@@ -52,6 +56,17 @@
             android:name=".core.DownloadService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <!-- v2.6: boot entry for the 开机恢复 switch (default off).
+             exported=false: only the system may deliver the boot
+             broadcast to it. -->
+        <receiver
+            android:name=".core.BootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
         <!-- v2.1: home-screen widget (in-flight task count + total
              progress). Updates are pushed by the download service;
              the provider only answers the launcher's broadcasts,

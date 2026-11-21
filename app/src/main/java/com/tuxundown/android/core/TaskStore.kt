@@ -107,6 +107,15 @@ class TaskRecord(
     // Live-only fields (speedHistory IS persisted since v1.4 so a
     // finished task keeps its curve; the rest stay transient):
     @Transient @Volatile var downloaded: Long = 0,
+    /** v2.6: set by deserialize when the PERSISTED status was
+     *  RUNNING — i.e. this task was mid-transfer when the process
+     *  died or the phone rebooted, and load() parked it as PAUSED
+     *  by the standing rule. It is the one marker that separates
+     *  "the system stopped this" from "the user paused this"
+     *  (see Recovery). Transient: the marker only has meaning in
+     *  the process that just loaded the store, and the next save
+     *  persists the PAUSED status, retiring it. */
+    @Transient var wasRunning: Boolean = false,
     /** v1.5: parked by the service after a network-outage failure;
      *  the queue skips it until connectivity returns (see NetRetry). */
     @Transient var netDeferred: Boolean = false,
@@ -497,7 +506,13 @@ class TaskStore(context: Context) {
                         t.chunkDone = ChunkPlanner.decodeBitset(o.optString("chunkDone"), count)
                         t.downloaded = ChunkPlanner.downloadedOf(t.chunkDone, t.totalSize, t.chunkSize)
                     }
-                    if (t.status == TaskStatus.RUNNING) t.status = TaskStatus.PAUSED
+                    if (t.status == TaskStatus.RUNNING) {
+                        // v2.6: park it (the standing rule), but
+                        // remember WHO stopped it — the system did,
+                        // mid-transfer. Recovery keys off this.
+                        t.status = TaskStatus.PAUSED
+                        t.wasRunning = true
+                    }
                     out.add(t)
                 }
             }

@@ -1,0 +1,51 @@
+package com.tuxundown.android.core
+
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import androidx.core.content.ContextCompat
+
+/**
+ * v2.6: boot-completed entry for the (default-OFF)「开机后自动
+ * 恢复未完成任务」setting.
+ *
+ * The receiver itself does the minimum: read the switch, and —
+ * only when it is ON — start the download service with a
+ * dedicated action. The actual recovery (which tasks re-queue,
+ * the WiFi-only / traffic guards) lives in the service and
+ * DownloadCenter, exactly where a normal start enforces them;
+ * a boot start gets no special privileges and no shortcut past
+ * any guard. When the switch is off the receiver returns at
+ * once and nothing in the app runs at boot beyond this check.
+ *
+ * Everything is runCatching: a boot receiver must never be able
+ * to crash, and a failed kick simply means the tasks wait for
+ * the user's next open, like they always did.
+ */
+class BootReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent?) {
+        runCatching {
+            val action = intent?.action ?: return
+            if (action != Intent.ACTION_BOOT_COMPLETED &&
+                action != ACTION_QUICKBOOT
+            ) {
+                return
+            }
+            DownloadCenter.init(context)
+            if (!DownloadCenter.bootResume) return
+            if (!Recovery.anyQueued(DownloadCenter.store.tasks) &&
+                Recovery.interrupted(DownloadCenter.store.tasks).isEmpty()
+            ) {
+                return
+            }
+            val svc = Intent(context, DownloadService::class.java)
+                .setAction(DownloadService.ACTION_BOOT_RESUME)
+            ContextCompat.startForegroundService(context, svc)
+        }
+    }
+
+    companion object {
+        /** HTC-era alias some ROMs still send instead of BOOT_COMPLETED. */
+        const val ACTION_QUICKBOOT = "android.intent.action.QUICKBOOT_POWERON"
+    }
+}

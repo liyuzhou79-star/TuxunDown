@@ -166,6 +166,20 @@ object DownloadCenter {
         get() = pBool("amoledBlack", false)
         set(v) { prefs().edit().putBoolean("amoledBlack", v).apply() }
 
+    /**
+     * v2.6: after a reboot, automatically pick the unfinished
+     * queue back up (interrupted transfers re-queue, queued tasks
+     * start) instead of waiting for the user to open the app.
+     * Default OFF — an app starting downloads by itself after a
+     * reboot is the user's call, not ours. The guards all still
+     * apply: 仅 WiFi keeps a task waiting for WiFi, the traffic
+     * guard still blocks unconfirmed mobile downloads (see
+     * DownloadService / BootReceiver).
+     */
+    var bootResume: Boolean
+        get() = pBool("bootResume", false)
+        set(v) { prefs().edit().putBoolean("bootResume", v).apply() }
+
     /** v2.4: auto-archive completed records older than this many
      *  days into the 已归档 filter (0 = off). Records only — the
      *  downloaded files are never touched. */
@@ -267,6 +281,7 @@ object DownloadCenter {
         o.put("notifyQuietEndMin", notifyQuietEndMin)
         o.put("autoInstallApk", autoInstallApk)
         o.put("autoOpenFile", autoOpenFile)
+        o.put("bootResume", bootResume)
         o.put("archiveAfterDays", archiveAfterDays)
         o.put("detailsExpanded", detailsExpanded)
         o.put("sniffHistory", org.json.JSONArray(sniffHistory))
@@ -309,6 +324,7 @@ object DownloadCenter {
         }
         if (o.has("autoInstallApk")) autoInstallApk = o.optBoolean("autoInstallApk", autoInstallApk)
         if (o.has("autoOpenFile")) autoOpenFile = o.optBoolean("autoOpenFile", autoOpenFile)
+        if (o.has("bootResume")) bootResume = o.optBoolean("bootResume", bootResume)
         if (o.has("archiveAfterDays")) {
             archiveAfterDays = o.optInt("archiveAfterDays", archiveAfterDays)
         }
@@ -615,6 +631,31 @@ object DownloadCenter {
     private fun refreshWidget() {
         val ctx = appContext ?: return
         com.tuxundown.android.widget.WidgetUpdater.refresh(ctx)
+    }
+
+    /**
+     * v2.6: re-queue the tasks the SYSTEM interrupted (see
+     * Recovery) — the persisted RUNNING records load() parked as
+     * PAUSED with wasRunning set. Called from the boot path (only
+     * when the user's 开机恢复 switch is on) and from the
+     * service's START_STICKY restart, where resuming is plain
+     * continuity: the service was already running these tasks
+     * when the process died. A task the user paused is never
+     * touched. The re-queued tasks go through the normal drain,
+     * so 仅 WiFi / traffic / schedule rules all still apply.
+     * Returns how many were re-queued.
+     */
+    fun recoverInterrupted(): Int {
+        val hit = Recovery.interrupted(store.tasks)
+        if (hit.isEmpty()) return 0
+        for (t in hit) {
+            t.wasRunning = false
+            t.status = TaskStatus.QUEUED
+            t.error = ""
+            t.note = "上次下载被系统中断（重启或进程被杀），已自动重新排队继续。"
+        }
+        store.saveNow()
+        return hit.size
     }
 
     fun nextQueued(): TaskRecord? =
