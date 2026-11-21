@@ -105,6 +105,66 @@ class SniffParserTest {
     }
 
     @Test
+    fun githubReleaseAssetsAreFoundIncludingExtensionless() {
+        // v1.6 pattern: GitHub release asset links live under
+        // /releases/download/<tag>/… — most carry an extension, but
+        // extensionless binaries must still be listed as entries.
+        val page = """
+            <a href="/liyuzhou79-star/TuxunDown/releases/download/v1.2.0/TuxunDown-v1.2.0.apk">TuxunDown-v1.2.0.apk</a>
+            <a href="/liyuzhou79-star/TuxunDown/releases/download/v1.2.0/tool-linux">tool-linux</a>
+            <a href="/liyuzhou79-star/TuxunDown/releases">All releases</a>
+            <a href="/liyuzhou79-star/TuxunDown">Repo home</a>
+        """.trimIndent()
+        val res = SniffParser.extract(
+            page, "https://github.com/liyuzhou79-star/TuxunDown/releases/tag/v1.2.0"
+        )
+        val urls = res.map { it.url }.toSet()
+        assertTrue(
+            "https://github.com/liyuzhou79-star/TuxunDown/releases/download/v1.2.0/TuxunDown-v1.2.0.apk" in urls
+        )
+        val bare = res.firstOrNull {
+            it.url == "https://github.com/liyuzhou79-star/TuxunDown/releases/download/v1.2.0/tool-linux"
+        }
+        assertTrue(bare != null && bare.looksLikeDownloadEntry)
+        // The releases index and the repo home are NOT downloads.
+        assertTrue(res.none { it.url.endsWith("/releases") || it.url.endsWith("/TuxunDown") })
+    }
+
+    @Test
+    fun sourceForgeFileLinksAreFound() {
+        // v1.6 pattern: SourceForge file links sit under
+        // /projects/<p>/files/… and the fetch hop ends in /download.
+        val page = """
+            <a href="https://sourceforge.net/projects/sevenzip/files/7-zip/24.09/7z2409-x64.exe/download">7z2409-x64.exe</a>
+            <a href="https://sourceforge.net/projects/sevenzip/files/7-zip/24.09/7z2409-linux-x64.tar.xz/download">tar.xz</a>
+            <a href="https://sourceforge.net/projects/sevenzip/">Project home</a>
+        """.trimIndent()
+        val res = SniffParser.extract(page, "https://sourceforge.net/projects/sevenzip/files/")
+        assertEquals(2, res.size)
+        assertTrue(res.all { it.looksLikeDownloadEntry })
+        assertTrue(res.any { it.kind == "other" && it.name.contains("7z2409-x64") })
+    }
+
+    @Test
+    fun archiveOrgFileLinksAreFound() {
+        // v1.6 pattern: archive.org item files live under
+        // /download/<id>/…; the details page itself must not match.
+        val page = """
+            <a href="https://archive.org/download/ms-dos_frogger/Frogger%20(1983)(Sierra%20On-Line).zip">Frogger.zip</a>
+            <a href="https://archive.org/download/ms-dos_frogger/frogger_screenshot.gif">screenshot</a>
+            <a href="https://archive.org/details/ms-dos_frogger">Details</a>
+        """.trimIndent()
+        val res = SniffParser.extract(page, "https://archive.org/details/ms-dos_frogger")
+        val urls = res.map { it.url }.toSet()
+        assertTrue(urls.any { it.contains("/download/ms-dos_frogger/") && it.endsWith(".zip") })
+        assertTrue(res.none { it.url.contains("/details/") })
+        assertTrue(
+            res.first { it.url.contains("/download/") && it.url.endsWith(".zip") }
+                .looksLikeDownloadEntry
+        )
+    }
+
+    @Test
     fun entriesSortBeforeImages() {
         val page = """
             <img src="/a.png">

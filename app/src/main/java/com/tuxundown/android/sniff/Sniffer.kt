@@ -13,6 +13,13 @@ data class SniffedResource(
     val kind: String, // apk / archive / video / audio / image / document / other
     /** Anchor text suggested this is THE download entry of the page. */
     val looksLikeDownloadEntry: Boolean = false,
+    /**
+     * File size in bytes when the v1.6 size probe managed to measure
+     * it; -1 = unknown. The parser never knows sizes — only
+     * [SizeProbe] fills this in, and only with a number the server
+     * itself reported. Unknown is displayed as 大小未知， never guessed.
+     */
+    val size: Long = -1,
 )
 
 sealed class SniffResult {
@@ -159,16 +166,52 @@ object SniffParser {
             url.contains("download", true) || url.contains("/dl/", true) ||
             url.contains("down.php", true) || url.contains("downfile", true)
 
+    /**
+     * v1.6 site patterns: well-known public file hosts whose REAL
+     * download links often carry no file extension (a SourceForge
+     * "/download" hop, an extensionless GitHub release asset, an
+     * archive.org file entry). A URL matching one of these is a
+     * downloadable entry even when [kindOf] finds no extension.
+     * Deliberately narrow — a generic page on the same host (docs,
+     * about, the project home) must NOT match.
+     */
+    private val DIRECT_PATTERNS = listOf(
+        // GitHub release asset links (extensionless binaries exist).
+        Regex("""/releases/download/"""),
+        // SourceForge: file links live under /projects/<p>/files/…
+        // and the actual fetch hop ends in /download.
+        Regex("""sourceforge\.net/projects/[\w.-]+/files/.+"""),
+        Regex("""(downloads\.)?sourceforge\.net/.*/download([?#].*)?$"""),
+        // archive.org: everything under /download/<id>/… is a file
+        // of that item (the details page itself is /details/<id>).
+        Regex("""archive\.org/download/"""),
+    )
+
+    /** Kind when [url] matches a known direct-file site pattern. */
+    fun patternKind(url: String): String? {
+        if (DIRECT_PATTERNS.none { it.containsMatchIn(url) }) return null
+        // A SourceForge-style "…/file.zip/download" hop hides the
+        // real extension in the segment before the trailing /download.
+        val stripped = url.substringBefore('?').substringBefore('#')
+            .removeSuffix("/download")
+        return kindOf(stripped) ?: "other"
+    }
+
     fun extract(html: String, baseUrl: String): List<SniffedResource> {
         val byUrl = linkedMapOf<String, SniffedResource>()
         fun add(url: String, kind: String?, entry: Boolean) {
-            if (kind == null && !entry) return
+            // v1.6: extensionless links on known file hosts (GitHub
+            // release assets, SourceForge hops, archive.org files)
+            // count as downloadable entries via the site patterns.
+            val patterned = if (kind == null) patternKind(url) else null
+            if (kind == null && patterned == null && !entry) return
             val prev = byUrl[url]
             byUrl[url] = SniffedResource(
                 url = url,
                 name = DownloadEngine.fileNameFrom(null, url),
-                kind = kind ?: (prev?.kind ?: "other"),
-                looksLikeDownloadEntry = entry || (prev?.looksLikeDownloadEntry == true),
+                kind = kind ?: patterned ?: (prev?.kind ?: "other"),
+                looksLikeDownloadEntry = entry || patterned != null ||
+                    (prev?.looksLikeDownloadEntry == true),
             )
         }
         // Anchors first: their text tells us which link is the download entry.
@@ -358,8 +401,117 @@ class Sniffer(private val userAgent: String = DownloadEngine.DEFAULT_UA) {
         return SniffResult.Failure("追了 5 层中间页还没到文件，请用内置浏览器手动打开")
     }
 
+    /**
+     * v1.6 (sniff pack item 1): measure the sizes of an already
+     * sniffed resource list. Kept OUT of [sniff] so the result list
+     * still appears instantly; the UI calls this as a second phase
+     * and re-renders with sizes + size sorting once it lands.
+     */
+    fun probeSizes(resources: List<SniffedResource>): List<SniffedResource> =
+        SizeProbe.probeAll(resources, userAgent)
+
     companion object {
         const val MAX_PAGE_BYTES = 4 * 1024 * 1024
         const val MAX_LIST = 600
+    }
+}
+
+/** Sort orders for the sniff result list (pure, unit-tested). */
+object SniffSort {
+    /** Biggest first; unknown sizes (-1) always sink to the end. */
+    fun bySizeDesc(list: List<SniffedResource>): List<SniffedResource> =
+        list.sortedWith(
+            compareByDescending<SniffedResource> { it.size >= 0 }
+                .thenByDescending { it.size }
+                .thenBy { it.name.lowercase() }
+        )
+}
+
+/**
+ * v1.6 size probe: ask each resource's server how big the file is,
+ * WITHOUT downloading it — a HEAD request first, and for servers
+ * that refuse HEAD a 1-byte Range GET whose Content-Range carries
+ * the total. Hard limits so a 600-resource page cannot turn into a
+ * traffic storm: at most [MAX_PROBED] resources, [THREADS] in
+ * flight, ~4 s per request. A resource whose size cannot be
+ * measured keeps size = -1 （未知） — never an estimate.
+ */
+object SizeProbe {
+    const val MAX_PROBED = 50
+    const val THREADS = 8
+    const val TIMEOUT_MS = 4_000
+
+    /** Total length out of a "bytes 0-0/12345" Content-Range, if any. */
+    fun totalFromContentRange(contentRange: String?): Long {
+        if (contentRange.isNullOrBlank()) return -1
+        val total = contentRange.substringAfter('/', "").trim()
+        if (total == "*") return -1
+        return total.toLongOrNull() ?: -1
+    }
+
+    /** Prefer the Range total (exact); fall back to a HEAD length. */
+    fun pickSize(headLength: Long, rangeTotal: Long): Long = when {
+        rangeTotal > 0 -> rangeTotal
+        headLength > 0 -> headLength
+        else -> -1
+    }
+
+    fun probeAll(
+        resources: List<SniffedResource>,
+        userAgent: String = DownloadEngine.DEFAULT_UA,
+    ): List<SniffedResource> {
+        if (resources.isEmpty()) return resources
+        val targets = resources.take(MAX_PROBED)
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(THREADS)
+        try {
+            val futures = targets.map { res ->
+                pool.submit(java.util.concurrent.Callable {
+                    res.copy(size = probeOne(res.url, userAgent))
+                })
+            }
+            val probed = futures.map { f ->
+                runCatching {
+                    f.get(TIMEOUT_MS * 3L, java.util.concurrent.TimeUnit.MILLISECONDS)
+                }.getOrNull()
+            }
+            val byUrl = probed.filterNotNull().associateBy { it.url }
+            return resources.map { byUrl[it.url] ?: it }
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    private fun probeOne(url: String, userAgent: String): Long {
+        // HEAD first: cheapest, and most file servers answer it.
+        runCatching {
+            val c = URL(url).openConnection() as HttpURLConnection
+            c.connectTimeout = TIMEOUT_MS
+            c.readTimeout = TIMEOUT_MS
+            c.instanceFollowRedirects = true
+            c.requestMethod = "HEAD"
+            c.setRequestProperty("User-Agent", userAgent)
+            val code = c.responseCode
+            val len = c.contentLengthLong
+            c.disconnect()
+            if (code in 200..299 && len > 0) return len
+        }
+        // Range GET of a single byte: Content-Range reports the total
+        // even on servers that refuse HEAD. The body is never read.
+        runCatching {
+            val c = URL(url).openConnection() as HttpURLConnection
+            c.connectTimeout = TIMEOUT_MS
+            c.readTimeout = TIMEOUT_MS
+            c.instanceFollowRedirects = true
+            c.requestMethod = "GET"
+            c.setRequestProperty("User-Agent", userAgent)
+            c.setRequestProperty("Range", "bytes=0-0")
+            val code = c.responseCode
+            val rangeTotal = totalFromContentRange(c.getHeaderField("Content-Range"))
+            val len = c.contentLengthLong
+            c.disconnect()
+            val picked = pickSize(if (code == 200) len else -1, rangeTotal)
+            if (picked > 0) return picked
+        }
+        return -1
     }
 }

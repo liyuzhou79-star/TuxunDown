@@ -742,7 +742,14 @@ class DownloadEngine(
                 if (plain != null) return plain.groupValues[1].trim()
             }
             val path = runCatching { URL(url).path }.getOrDefault(url)
-            val name = path.substringAfterLast('/').substringBefore('?')
+            var name = path.substringAfterLast('/').substringBefore('?')
+            // v1.6: a SourceForge-style "…/file.zip/download" hop —
+            // the last segment is the literal word "download" and the
+            // real file name is the segment before it.
+            if (name.equals("download", true)) {
+                val prev = path.substringBeforeLast('/').substringAfterLast('/')
+                if (prev.contains('.')) name = prev
+            }
             val decoded = runCatching { java.net.URLDecoder.decode(name, "UTF-8") }.getOrDefault(name)
             return decoded.ifBlank { "download.bin" }
         }
