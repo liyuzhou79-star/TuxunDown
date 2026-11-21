@@ -542,6 +542,22 @@ object DownloadCenter {
         )
     }
 
+    /** v2.8: remembered rate-limit ceiling for this URL's host
+     *  (0 = none) — the engine caps its thread count there. */
+    fun hostThreadsCap(url: String): Int =
+        HostMemory.capOf(hostEntries(), HostMemory.hostOf(url), System.currentTimeMillis())
+
+    /** v2.8: remember that this URL's host rejected parallel
+     *  load at [threadsAtLimit] connections (see RateLimit). */
+    fun recordHostRateLimit(url: String, threadsAtLimit: Int) {
+        saveHostEntries(
+            HostMemory.recordRateLimit(
+                hostEntries(), HostMemory.hostOf(url), threadsAtLimit,
+                System.currentTimeMillis(),
+            )
+        )
+    }
+
     @Synchronized
     fun init(context: Context) {
         if (appContext != null) return

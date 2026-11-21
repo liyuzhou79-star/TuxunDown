@@ -19,6 +19,15 @@ import java.net.URL
  * - only settled counts from COMPLETED segmented downloads are ever
  *   recorded, clamped to the engine's legal range.
  *
+ * v2.8 adds the RATE-LIMIT CEILING (Entry.cap): when a host
+ * rejects parallel load with a rate-limit signature (see
+ * RateLimit for what counts — a lone 403 does NOT), half the
+ * rejected load level is remembered as a ceiling and the next
+ * run stays at or below it. Fresh rejection evidence can only
+ * tighten it; completions that settle at the ceiling relax it
+ * one step at a time. It shares the entry (and its TTL) with
+ * the optimum above.
+ *
  * Pure (no Android, no Context) — unit-tested. [DownloadCenter] only
  * persists the serialized form in SharedPreferences.
  */
@@ -28,11 +37,23 @@ object HostMemory {
     const val MAX_ENTRIES = 50
     const val FAILS_TO_FORGET = 2
 
+    /** v2.8: the lowest ceiling a rate-limit memory may impose —
+     *  below this a download barely segments at all. */
+    const val MIN_CAP = 4
+
+    /** v2.8: how much a completion at the ceiling raises it by. */
+    const val CAP_RELAX_STEP = 4
+
     data class Entry(
         val host: String,
         val threads: Int,
         val fails: Int,
         val updatedMs: Long,
+        /** v2.8: remembered rate-limit ceiling (0 = none). Set
+         *  when the host rejected parallel load (see RateLimit);
+         *  the next run's probing/scaling stays at or below it
+         *  until completions earn it back up. */
+        val cap: Int = 0,
     )
 
     fun hostOf(url: String): String =
@@ -55,8 +76,60 @@ object HostMemory {
     ): List<Entry> {
         if (host.isBlank()) return entries
         val t = threads.coerceIn(2, DownloadEngine.MAX_THREADS)
+        // v2.8: a rate-limit ceiling survives successes — and a
+        // completion that settled AT the ceiling earns a cautious
+        // step back up (+CAP_RELAX_STEP; reaching the engine max
+        // retires the ceiling entirely). Settling BELOW the
+        // ceiling proves nothing about it, so it stays as it was.
+        var cap = entries.firstOrNull { it.host == host }?.cap ?: 0
+        if (cap > 0 && t >= cap) {
+            cap = if (cap + CAP_RELAX_STEP >= DownloadEngine.MAX_THREADS) {
+                0
+            } else {
+                cap + CAP_RELAX_STEP
+            }
+        }
         val rest = entries.filter { it.host != host }
-        return (listOf(Entry(host, t, 0, nowMs)) + rest).take(MAX_ENTRIES)
+        return (listOf(Entry(host, t, 0, nowMs, cap)) + rest).take(MAX_ENTRIES)
+    }
+
+    /** v2.8: the remembered rate-limit ceiling for [host], or 0. */
+    fun capOf(entries: List<Entry>, host: String, nowMs: Long): Int {
+        if (host.isBlank()) return 0
+        val e = entries.firstOrNull { it.host == host } ?: return 0
+        if (nowMs - e.updatedMs > TTL_MS) return 0
+        return e.cap
+    }
+
+    /**
+     * v2.8: this host rejected load at [threadsAtLimit]
+     * connections (see RateLimit's verdict) — remember a ceiling
+     * of half that, never below [MIN_CAP]. Fresh evidence can
+     * only TIGHTEN an existing ceiling; loosening is earned by
+     * completions, one step at a time (see recordSuccess). The
+     * remembered optimum and failure streak are preserved; a
+     * host with no entry yet gets a cap-only one (threads 0 =
+     * "no optimum known", which lookup already reports as 0).
+     */
+    fun recordRateLimit(
+        entries: List<Entry>,
+        host: String,
+        threadsAtLimit: Int,
+        nowMs: Long,
+    ): List<Entry> {
+        if (host.isBlank()) return entries
+        val computed = (threadsAtLimit / 2)
+            .coerceIn(MIN_CAP, DownloadEngine.MAX_THREADS)
+        val old = entries.firstOrNull { it.host == host }
+        val cap = if (old != null && old.cap > 0) minOf(old.cap, computed) else computed
+        val entry = Entry(
+            host = host,
+            threads = old?.threads ?: 0,
+            fails = old?.fails ?: 0,
+            updatedMs = nowMs,
+            cap = cap,
+        )
+        return (listOf(entry) + entries.filter { it.host != host }).take(MAX_ENTRIES)
     }
 
     /**
@@ -75,19 +148,25 @@ object HostMemory {
         }
     }
 
-    /** One entry per line: host \t threads \t fails \t updatedMs. */
+    /** One entry per line: host \t threads \t fails \t updatedMs
+     *  \t cap. v2.8 appended the cap field; [parse] still accepts
+     *  the pre-v2.8 four-field lines (cap = 0), so an upgrade
+     *  never loses the thread memory it already had. */
     fun serialize(entries: List<Entry>): String =
-        entries.joinToString("\n") { "${it.host}\t${it.threads}\t${it.fails}\t${it.updatedMs}" }
+        entries.joinToString("\n") {
+            "${it.host}\t${it.threads}\t${it.fails}\t${it.updatedMs}\t${it.cap}"
+        }
 
     fun parse(text: String): List<Entry> {
         if (text.isBlank()) return emptyList()
         return text.lines().mapNotNull { line ->
             val p = line.split('\t')
-            if (p.size != 4) return@mapNotNull null
+            if (p.size != 4 && p.size != 5) return@mapNotNull null
             val threads = p[1].toIntOrNull() ?: return@mapNotNull null
             val fails = p[2].toIntOrNull() ?: return@mapNotNull null
             val updated = p[3].toLongOrNull() ?: return@mapNotNull null
-            if (p[0].isBlank()) null else Entry(p[0], threads, fails, updated)
+            val cap = if (p.size == 5) p[4].toIntOrNull() ?: return@mapNotNull null else 0
+            if (p[0].isBlank()) null else Entry(p[0], threads, fails, updated, cap)
         }
     }
 }

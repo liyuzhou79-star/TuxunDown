@@ -574,6 +574,13 @@ class DownloadService : Service() {
                     DownloadCenter.recordHostThreads(task.url, threads)
                 },
                 onHostFailed = { DownloadCenter.recordHostFailure(task.url) },
+                // v2.8: rate-limit memory — a remembered ceiling
+                // caps this run; a run that fails with a
+                // rate-limit signature teaches a new one.
+                initialThreadsCap = DownloadCenter.hostThreadsCap(task.url),
+                onRateLimited = { atLimit ->
+                    DownloadCenter.recordHostRateLimit(task.url, atLimit)
+                },
             )
             DownloadCenter.registerEngine(task, engine)
             try {

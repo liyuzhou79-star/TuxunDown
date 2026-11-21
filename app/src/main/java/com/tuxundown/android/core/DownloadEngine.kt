@@ -75,6 +75,16 @@ class DownloadEngine(
     /** v1.5: called once when a segmented download FAILS, so the
      *  caller can age out the remembered count for this host. */
     private val onHostFailed: () -> Unit = {},
+    /** v2.8: remembered rate-limit ceiling for this host (0 =
+     *  none, see HostMemory). Bounds the fresh-start hint AND
+     *  the scaler's max for the whole run, so a host that
+     *  throttled parallel load last time is not hammered again. */
+    private val initialThreadsCap: Int = 0,
+    /** v2.8: called once when a segmented download FAILS with a
+     *  rate-limit signature (see RateLimit), with the connection
+     *  count the host was rejecting load at, so the caller can
+     *  remember a ceiling for next time. */
+    private val onRateLimited: (Int) -> Unit = {},
     /** v1.6 dual channel: an alternate connection opener (e.g.
      *  bound to the cellular network). When present, new
      *  connections alternate between the default network and this
@@ -113,6 +123,11 @@ class DownloadEngine(
 
     /** v1.6 multi-source: primary + validated mirrors for this run. */
     @Volatile private var activeSources: List<String> = listOf(task.url)
+
+    /** v2.8: this run's rate-limit evidence (primary source
+     *  only), judged by RateLimit if the run fails. */
+    private val rejections =
+        java.util.Collections.synchronizedList(mutableListOf<RateLimit.Rejection>())
 
     private val downloadedBytes = AtomicLong(task.downloaded)
     private val nextChunk = AtomicInteger(0)
@@ -265,6 +280,13 @@ class DownloadEngine(
                     runCatching { onThreadsSettled(task.threads) }
                 } else if (result == TaskStatus.FAILED) {
                     runCatching { onHostFailed() }
+                    // v2.8: if the failure carries a rate-limit
+                    // signature, hand the caller the load level
+                    // so it can remember a ceiling for this host
+                    // (the evidence rules live in RateLimit — a
+                    // lone 403 never convicts).
+                    val atLimit = RateLimit.assess(rejections)
+                    if (atLimit > 0) runCatching { onRateLimited(atLimit) }
                 }
                 return result
             } finally {
@@ -676,16 +698,33 @@ class DownloadEngine(
         // the persisted count but starts at most at 8 and lets the
         // prober grow it again if the network wants more.
         val resuming = firstOpen > 0 || downloadedBytes.get() > 0
+        // v2.8: the remembered rate-limit ceiling for this host
+        // (0 = none). It bounds EVERYTHING below — the hint
+        // start, a resume's restart count and the scaler's max —
+        // because a ceiling the ladder could climb past would be
+        // no ceiling at all. Only values in HostMemory's own
+        // legal band are honoured (MIN_CAP..MAX_THREADS), so a
+        // corrupt value can never squeeze the scaler's range
+        // shut.
+        val cap = if (initialThreadsCap in HostMemory.MIN_CAP..MAX_THREADS) {
+            initialThreadsCap
+        } else {
+            0
+        }
         // v1.5: a FRESH start with a remembered optimum for this host
         // begins at that count and skips probing altogether — the
         // first ~6 s of ramp-up are pure waste on a known server.
-        val hint = if (!resuming && initialThreadsHint in 2..MAX_THREADS) {
+        val hintRaw = if (!resuming && initialThreadsHint in 2..MAX_THREADS) {
             initialThreadsHint
         } else {
             0
         }
+        val hint = if (cap > 0 && hintRaw > 0) minOf(hintRaw, cap) else hintRaw
         val initial = when {
-            resuming -> task.threads.coerceIn(1, 8)
+            resuming -> {
+                val r = task.threads.coerceIn(1, 8)
+                if (cap > 0) minOf(r, cap) else r
+            }
             hint > 0 -> hint
             else -> 4
         }
@@ -693,10 +732,18 @@ class DownloadEngine(
         // skips the ladder (steady state from the first tick); any
         // other start ladders first — a resume included, since the
         // network may have changed since the count was persisted.
-        val sc = ThreadScaler(initial, probing = hint == 0)
+        // v2.8: the scaler's max IS the cap when one is remembered.
+        val sc = ThreadScaler(
+            initial,
+            probing = hint == 0,
+            maxThreads = if (cap > 0) cap else MAX_THREADS,
+        )
         scaler = sc
         if (hint > 0 && task.note.isBlank()) {
             task.note = "这个服务器上次的最佳线程数是 $hint，已直接用它下载，跳过试探。"
+        }
+        if (cap > 0 && cap < MAX_THREADS) {
+            appendNote("这个服务器之前在多线程下载时限流过，这次最多用 $cap 条连接，免得又被拒绝。")
         }
         task.threads = sc.target
         repeat(sc.target) { spawnWorker(count) }
@@ -1047,6 +1094,19 @@ class DownloadEngine(
         }
         ac.connection = c
         val code = c.responseCode
+        // v2.8: rate-limit evidence — PRIMARY source only (the
+        // ceiling is remembered per host of the task URL; a
+        // mirror is a different host with its own behaviour).
+        // task.threads mirrors the scaler's live target, i.e.
+        // how many connections were running when this one was
+        // refused.
+        if (sourceUrl == task.url &&
+            (code == 429 || code == HttpURLConnection.HTTP_FORBIDDEN)
+        ) {
+            rejections.add(
+                RateLimit.Rejection(code, System.currentTimeMillis(), task.threads)
+            )
+        }
         if (code == HttpURLConnection.HTTP_OK) {
             // Server ignored Range mid-download: cannot segment safely.
             c.disconnect()

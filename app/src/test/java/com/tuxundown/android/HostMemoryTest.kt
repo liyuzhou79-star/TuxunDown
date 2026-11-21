@@ -49,6 +49,73 @@ class HostMemoryTest {
         assertEquals(DownloadEngine.MAX_THREADS, HostMemory.lookup(entries, "a.com", now))
     }
 
+    // ---- v2.8: rate-limit ceiling ----
+
+    @Test
+    fun rateLimitRecordsHalfTheRejectedLoadWithAFloor() {
+        var entries = HostMemory.recordRateLimit(emptyList(), "a.com", 32, now)
+        assertEquals(16, HostMemory.capOf(entries, "a.com", now))
+        // Rejected at 6 -> half is 3, but the floor is MIN_CAP.
+        entries = HostMemory.recordRateLimit(emptyList(), "b.com", 6, now)
+        assertEquals(HostMemory.MIN_CAP, HostMemory.capOf(entries, "b.com", now))
+        // A cap-only entry teaches no optimum.
+        assertEquals(0, HostMemory.lookup(entries, "b.com", now))
+    }
+
+    @Test
+    fun freshEvidenceOnlyTightensTheCap() {
+        var entries = HostMemory.recordRateLimit(emptyList(), "a.com", 32, now) // cap 16
+        entries = HostMemory.recordRateLimit(entries, "a.com", 16, now) // -> 8
+        assertEquals(8, HostMemory.capOf(entries, "a.com", now))
+        // Rejected at a HIGHER level later must not loosen it.
+        entries = HostMemory.recordRateLimit(entries, "a.com", 32, now)
+        assertEquals(8, HostMemory.capOf(entries, "a.com", now))
+    }
+
+    @Test
+    fun completionsAtTheCapRelaxItStepByStep() {
+        var entries = HostMemory.recordRateLimit(emptyList(), "a.com", 32, now) // cap 16
+        // Settling BELOW the cap proves nothing: no relaxation.
+        entries = HostMemory.recordSuccess(entries, "a.com", 8, now)
+        assertEquals(16, HostMemory.capOf(entries, "a.com", now))
+        // Settling AT the cap earns +4.
+        entries = HostMemory.recordSuccess(entries, "a.com", 16, now)
+        assertEquals(20, HostMemory.capOf(entries, "a.com", now))
+        entries = HostMemory.recordSuccess(entries, "a.com", 20, now)
+        assertEquals(24, HostMemory.capOf(entries, "a.com", now))
+        entries = HostMemory.recordSuccess(entries, "a.com", 24, now)
+        assertEquals(28, HostMemory.capOf(entries, "a.com", now))
+        // The next step would reach the engine max: the cap retires.
+        entries = HostMemory.recordSuccess(entries, "a.com", 28, now)
+        assertEquals(0, HostMemory.capOf(entries, "a.com", now))
+    }
+
+    @Test
+    fun capSurvivesSuccessAndFailureBookkeeping() {
+        var entries = HostMemory.recordSuccess(emptyList(), "a.com", 24, now)
+        entries = HostMemory.recordRateLimit(entries, "a.com", 24, now) // cap 12
+        assertEquals(12, HostMemory.capOf(entries, "a.com", now))
+        // The optimum survives the rate-limit record...
+        assertEquals(24, HostMemory.lookup(entries, "a.com", now))
+        // ...and the cap survives an ordinary failure strike.
+        entries = HostMemory.recordFailure(entries, "a.com", now)
+        assertEquals(12, HostMemory.capOf(entries, "a.com", now))
+        // The cap expires with the entry.
+        assertEquals(0, HostMemory.capOf(entries, "a.com", now + HostMemory.TTL_MS + 1))
+    }
+
+    @Test
+    fun capRoundTripsAndLegacyLinesParse() {
+        var entries = HostMemory.recordSuccess(emptyList(), "a.com", 24, now)
+        entries = HostMemory.recordRateLimit(entries, "a.com", 24, now)
+        val back = HostMemory.parse(HostMemory.serialize(entries))
+        assertEquals(12, HostMemory.capOf(back, "a.com", now))
+        // A pre-v2.8 four-field line parses with cap 0.
+        val legacy = HostMemory.parse("old.com\t16\t1\t$now")
+        assertEquals(16, HostMemory.lookup(legacy, "old.com", now))
+        assertEquals(0, HostMemory.capOf(legacy, "old.com", now))
+    }
+
     @Test
     fun serializeParseRoundTripAndGarbageTolerance() {
         var entries = HostMemory.recordSuccess(emptyList(), "a.com", 16, now)
