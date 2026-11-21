@@ -98,6 +98,7 @@ import com.tuxundown.android.core.BulkControl
 import com.tuxundown.android.core.Checksum
 import com.tuxundown.android.core.CrashGuard
 import com.tuxundown.android.core.Errors
+import com.tuxundown.android.core.FailureAdvice
 import com.tuxundown.android.core.ChecksumVerifier
 import com.tuxundown.android.core.Diagnostics
 import com.tuxundown.android.core.DownloadCenter
@@ -1164,6 +1165,19 @@ fun DownApp() {
                 task.taskLimitKBps = kbps
                 store.save()
             },
+            onOpenInBrowser = {
+                // v2.7 (failure advice): open this task's page in
+                // the sniff browser — logging in there and tapping
+                // the download carries the session Cookie into a
+                // fresh task, which is the fix for a 403.
+                runCatching {
+                    context.startActivity(
+                        Intent(context, SniffActivity::class.java)
+                            .putExtra(SniffActivity.EXTRA_URL, task.url)
+                    )
+                }
+            },
+            onOpenFiles = { screen = "files" },
         )
     }
 
@@ -4530,6 +4544,8 @@ fun TaskCard(
     onChecksum: () -> Unit,
     onHeaders: () -> Unit,
     onTaskLimit: (Int) -> Unit,
+    onOpenInBrowser: () -> Unit,
+    onOpenFiles: () -> Unit,
 ) {
     var expanded by remember(task.id) {
         mutableStateOf(DownloadCenter.detailsExpanded)
@@ -4829,6 +4845,35 @@ fun TaskCard(
                         // already downloaded (chunk bitmap survives).
                         Spacer(Modifier.height(6.dp))
                         OutlinedButton(onClick = onResume) { Text("重试（保留已下载进度）") }
+                        // v2.7: diagnosis advice for this failure
+                        // category (pure FailureAdvice) — one
+                        // concrete next step, and a button only
+                        // when the app can take the user straight
+                        // to the operation it names.
+                        val advice = FailureAdvice.forTask(task)
+                        if (advice != null) {
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                "建议：${advice.text}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            if (advice.action != FailureAdvice.Action.NONE) {
+                                Spacer(Modifier.height(4.dp))
+                                OutlinedButton(onClick = {
+                                    when (advice.action) {
+                                        FailureAdvice.Action.RETRY -> onResume()
+                                        FailureAdvice.Action.OPEN_BROWSER ->
+                                            onOpenInBrowser()
+                                        FailureAdvice.Action.MANAGE_SOURCES ->
+                                            onSources()
+                                        FailureAdvice.Action.OPEN_FILES ->
+                                            onOpenFiles()
+                                        FailureAdvice.Action.NONE -> Unit
+                                    }
+                                }) { Text(advice.actionLabel) }
+                            }
+                        }
                     }
                     TaskStatus.QUEUED -> {
                         Text(
