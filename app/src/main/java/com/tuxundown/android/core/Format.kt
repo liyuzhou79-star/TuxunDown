@@ -52,6 +52,34 @@ object Format {
     fun percent(progress: Float): Int =
         (progress.coerceIn(0f, 1f) * 100).toInt()
 
+    /** "14:30" wall-clock label for a scheduled start (v1.4). */
+    fun clockTime(epochMs: Long): String {
+        val cal = java.util.Calendar.getInstance().apply { timeInMillis = epochMs }
+        return "%02d:%02d".format(
+            cal.get(java.util.Calendar.HOUR_OF_DAY),
+            cal.get(java.util.Calendar.MINUTE),
+        )
+    }
+
+    /** Elapsed transfer time for the stats card: "45 秒" / "3 分 12 秒" / "1 小时 2 分". */
+    fun duration(ms: Long): String {
+        if (ms < 0) return "—"
+        val s = ms / 1000
+        return when {
+            s < 60 -> "$s 秒"
+            s < 3600 -> {
+                val m = s / 60
+                val r = s % 60
+                if (r == 0L) "$m 分" else "$m 分 $r 秒"
+            }
+            else -> {
+                val h = s / 3600
+                val m = (s % 3600) / 60
+                if (m == 0L) "$h 小时" else "$h 小时 $m 分"
+            }
+        }
+    }
+
     /**
      * Nice chart ceiling for a speed graph: the smallest
      * power-of-two multiple of 1 KB/s that is >= maxBps * 1.1,

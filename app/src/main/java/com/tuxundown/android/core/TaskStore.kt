@@ -39,7 +39,23 @@ class TaskRecord(
      *  different files. */
     var etag: String = "",
     var lastModified: String = "",
-    // Live-only fields (not persisted):
+    // ---- v1.4 additions ----
+    /** Scheduled start time (epoch ms); 0 = start immediately. */
+    var scheduledAt: Long = 0,
+    /** First time the engine actually started transferring (epoch ms). */
+    var startedAt: Long = 0,
+    /** When the task finished (epoch ms), 0 while unfinished. */
+    var finishedAt: Long = 0,
+    /** Accumulated transfer time across runs, for the average speed. */
+    var elapsedMs: Long = 0,
+    /** Chunk-level retry attempts the engine had to make. */
+    var retryCount: Int = 0,
+    /** Whole-task automatic retries already spent (reset on manual resume). */
+    var autoRetriesUsed: Int = 0,
+    /** The user explicitly accepted downloading this task on mobile data. */
+    var mobileConfirmed: Boolean = false,
+    // Live-only fields (speedHistory IS persisted since v1.4 so a
+    // finished task keeps its curve; the rest stay transient):
     @Transient var downloaded: Long = 0,
     @Transient var speedBps: Long = 0,
     @Transient var peakBps: Long = 0,
@@ -51,6 +67,10 @@ class TaskRecord(
     val etaSeconds: Long
         get() = if (totalSize > 0 && speedBps > 0 && downloaded < totalSize)
             (totalSize - downloaded) / speedBps else -1
+
+    /** Average transfer speed over the accumulated running time. */
+    val avgBps: Long
+        get() = if (elapsedMs > 0 && downloaded > 0) downloaded * 1000 / elapsedMs else 0
 }
 
 /**
@@ -59,6 +79,10 @@ class TaskRecord(
  * in the public Download folder as ".part" files (see PublicStorage).
  * [fileOf] is only the legacy private scratch path from <= v1.1,
  * kept so old partials can be migrated and cleaned up.
+ *
+ * The (de)serialization lives in the companion as pure functions so
+ * the settings-page import/export (v1.4) reuses exactly the same
+ * format as the on-disk store — and so it is unit-testable on the JVM.
  */
 class TaskStore(context: Context) {
     private val dir = File(context.filesDir, "downloads").apply { mkdirs() }
@@ -71,87 +95,29 @@ class TaskStore(context: Context) {
     @Synchronized
     fun load() {
         tasks.clear()
-        // v1.3 (audit A11): if tasks.json is corrupt (crash mid-save
-        // under the old direct-write code), fall back to the .bak copy
-        // instead of silently losing every task.
-        val text = listOf(metaFile, File(metaFile.path + ".bak"))
-            .firstOrNull { it.exists() }
-            ?.let { runCatching { it.readText() }.getOrNull() }
-            ?: return
-        runCatching {
-            val arr = JSONArray(text)
-            for (i in 0 until arr.length()) {
-                val o = arr.getJSONObject(i)
-                val t = TaskRecord(
-                    id = o.getString("id"),
-                    url = o.getString("url"),
-                    fileName = o.optString("fileName"),
-                    totalSize = o.optLong("totalSize", -1),
-                    chunkSize = o.optLong("chunkSize", 0),
-                    singleThreadOnly = o.optBoolean("singleThreadOnly"),
-                    threads = o.optInt("threads", 4),
-                    status = runCatching { TaskStatus.valueOf(o.optString("status")) }
-                        .getOrDefault(TaskStatus.PAUSED),
-                    note = o.optString("note"),
-                    error = o.optString("error"),
-                    createdAt = o.optLong("createdAt", 0),
-                    savedUri = o.optString("savedUri"),
-                    savedName = o.optString("savedName"),
-                    targetUri = o.optString("targetUri"),
-                    etag = o.optString("etag"),
-                    lastModified = o.optString("lastModified"),
-                )
-                val h = o.optJSONObject("headers")
-                if (h != null) {
-                    val keys = h.keys()
-                    while (keys.hasNext()) {
-                        val k = keys.next()
-                        t.headers[k] = h.getString(k)
-                    }
-                }
-                if (t.chunkSize > 0 && t.totalSize > 0) {
-                    val count = ChunkPlanner.chunkCount(t.totalSize, t.chunkSize)
-                    t.chunkDone = ChunkPlanner.decodeBitset(o.optString("chunkDone"), count)
-                    t.downloaded = ChunkPlanner.downloadedOf(t.chunkDone, t.totalSize, t.chunkSize)
-                }
-                if (t.status == TaskStatus.RUNNING) t.status = TaskStatus.PAUSED
-                tasks.add(t)
-            }
+        // v1.3 (audit A11): if tasks.json is corrupt, fall back to
+        // the .bak copy instead of silently losing every task.
+        // v1.4: a file that EXISTS but does not parse as a JSON array
+        // also falls through to .bak (v1.3 only fell back when the
+        // main file was missing/unreadable); a valid "[]" is a
+        // legitimately empty list and is accepted as-is.
+        for (f in listOf(metaFile, File(metaFile.path + ".bak"))) {
+            if (!f.exists()) continue
+            val text = runCatching { f.readText() }.getOrNull() ?: continue
+            if (runCatching { JSONArray(text) }.isFailure) continue
+            tasks.addAll(deserialize(text))
+            return
         }
     }
 
     @Synchronized
     fun save() {
-        val arr = JSONArray()
-        for (t in tasks) {
-            val o = JSONObject()
-            o.put("id", t.id)
-            o.put("url", t.url)
-            o.put("fileName", t.fileName)
-            o.put("totalSize", t.totalSize)
-            o.put("chunkSize", t.chunkSize)
-            o.put("chunkDone", ChunkPlanner.encodeBitset(t.chunkDone))
-            o.put("singleThreadOnly", t.singleThreadOnly)
-            o.put("threads", t.threads)
-            o.put("status", t.status.name)
-            o.put("note", t.note)
-            o.put("error", t.error)
-            o.put("createdAt", t.createdAt)
-            o.put("savedUri", t.savedUri)
-            o.put("savedName", t.savedName)
-            o.put("targetUri", t.targetUri)
-            o.put("etag", t.etag)
-            o.put("lastModified", t.lastModified)
-            val h = JSONObject()
-            for ((k, v) in t.headers) h.put(k, v)
-            o.put("headers", h)
-            arr.put(o)
-        }
+        val text = serialize(tasks)
         // v1.3 (audit A11): atomic save — write a temp file, keep the
         // previous good file as .bak, then rename over. A crash or
         // power loss mid-save can no longer corrupt the only copy.
         val tmp = File(metaFile.path + ".tmp")
-        tmp.writeText(arr.toString())
+        tmp.writeText(text)
         if (metaFile.exists()) {
             runCatching { metaFile.copyTo(File(metaFile.path + ".bak"), overwrite = true) }
         }
@@ -161,6 +127,33 @@ class TaskStore(context: Context) {
             tmp.copyTo(metaFile, overwrite = true)
             tmp.delete()
         }
+    }
+
+    /** v1.4: export the whole task list as JSON text (no file bytes). */
+    fun exportJson(): String = serialize(tasks)
+
+    /**
+     * v1.4: import tasks from an exported JSON text. Records whose id
+     * already exists, or whose URL is already an active task, are
+     * skipped. Returns how many were actually added.
+     */
+    @Synchronized
+    fun importJson(text: String): Int {
+        val incoming = deserialize(text)
+        var added = 0
+        for (t in incoming) {
+            if (tasks.any { it.id == t.id }) continue
+            if (t.status != TaskStatus.DONE && tasks.any {
+                    it.url == t.url && it.status != TaskStatus.DONE && it.status != TaskStatus.FAILED
+                }
+            ) continue
+            // Imported unfinished tasks must not pretend to be running.
+            if (t.status == TaskStatus.QUEUED) t.status = TaskStatus.PAUSED
+            tasks.add(t)
+            added++
+        }
+        if (added > 0) save()
+        return added
     }
 
     fun add(t: TaskRecord): TaskRecord {
@@ -176,4 +169,108 @@ class TaskStore(context: Context) {
     }
 
     fun byId(id: String): TaskRecord? = tasks.firstOrNull { it.id == id }
+
+    companion object {
+        /** Pure serialization — same format on disk and for export. */
+        fun serialize(list: List<TaskRecord>): String {
+            val arr = JSONArray()
+            for (t in list) {
+                val o = JSONObject()
+                o.put("id", t.id)
+                o.put("url", t.url)
+                o.put("fileName", t.fileName)
+                o.put("totalSize", t.totalSize)
+                o.put("chunkSize", t.chunkSize)
+                o.put("chunkDone", ChunkPlanner.encodeBitset(t.chunkDone))
+                o.put("singleThreadOnly", t.singleThreadOnly)
+                o.put("threads", t.threads)
+                o.put("status", t.status.name)
+                o.put("note", t.note)
+                o.put("error", t.error)
+                o.put("createdAt", t.createdAt)
+                o.put("savedUri", t.savedUri)
+                o.put("savedName", t.savedName)
+                o.put("targetUri", t.targetUri)
+                o.put("etag", t.etag)
+                o.put("lastModified", t.lastModified)
+                o.put("scheduledAt", t.scheduledAt)
+                o.put("startedAt", t.startedAt)
+                o.put("finishedAt", t.finishedAt)
+                o.put("elapsedMs", t.elapsedMs)
+                o.put("retryCount", t.retryCount)
+                o.put("autoRetriesUsed", t.autoRetriesUsed)
+                o.put("mobileConfirmed", t.mobileConfirmed)
+                o.put("peakBps", t.peakBps)
+                val hist = JSONArray()
+                synchronized(t.speedHistory) { for (v in t.speedHistory) hist.put(v) }
+                o.put("speedHistory", hist)
+                val h = JSONObject()
+                for ((k, v) in t.headers) h.put(k, v)
+                o.put("headers", h)
+                arr.put(o)
+            }
+            return arr.toString()
+        }
+
+        /** Pure parsing; a corrupt text yields an empty list, never a crash. */
+        fun deserialize(text: String): MutableList<TaskRecord> {
+            val out = mutableListOf<TaskRecord>()
+            runCatching {
+                val arr = JSONArray(text)
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    val t = TaskRecord(
+                        id = o.getString("id"),
+                        url = o.getString("url"),
+                        fileName = o.optString("fileName"),
+                        totalSize = o.optLong("totalSize", -1),
+                        chunkSize = o.optLong("chunkSize", 0),
+                        singleThreadOnly = o.optBoolean("singleThreadOnly"),
+                        threads = o.optInt("threads", 4),
+                        status = runCatching { TaskStatus.valueOf(o.optString("status")) }
+                            .getOrDefault(TaskStatus.PAUSED),
+                        note = o.optString("note"),
+                        error = o.optString("error"),
+                        createdAt = o.optLong("createdAt", 0),
+                        savedUri = o.optString("savedUri"),
+                        savedName = o.optString("savedName"),
+                        targetUri = o.optString("targetUri"),
+                        etag = o.optString("etag"),
+                        lastModified = o.optString("lastModified"),
+                        scheduledAt = o.optLong("scheduledAt", 0),
+                        startedAt = o.optLong("startedAt", 0),
+                        finishedAt = o.optLong("finishedAt", 0),
+                        elapsedMs = o.optLong("elapsedMs", 0),
+                        retryCount = o.optInt("retryCount", 0),
+                        autoRetriesUsed = o.optInt("autoRetriesUsed", 0),
+                        mobileConfirmed = o.optBoolean("mobileConfirmed", false),
+                    )
+                    t.peakBps = o.optLong("peakBps", 0)
+                    val h = o.optJSONObject("headers")
+                    if (h != null) {
+                        val keys = h.keys()
+                        while (keys.hasNext()) {
+                            val k = keys.next()
+                            t.headers[k] = h.getString(k)
+                        }
+                    }
+                    val hist = o.optJSONArray("speedHistory")
+                    if (hist != null) {
+                        synchronized(t.speedHistory) {
+                            for (j in 0 until hist.length()) t.speedHistory.add(hist.optLong(j, 0))
+                            while (t.speedHistory.size > 90) t.speedHistory.removeAt(0)
+                        }
+                    }
+                    if (t.chunkSize > 0 && t.totalSize > 0) {
+                        val count = ChunkPlanner.chunkCount(t.totalSize, t.chunkSize)
+                        t.chunkDone = ChunkPlanner.decodeBitset(o.optString("chunkDone"), count)
+                        t.downloaded = ChunkPlanner.downloadedOf(t.chunkDone, t.totalSize, t.chunkSize)
+                    }
+                    if (t.status == TaskStatus.RUNNING) t.status = TaskStatus.PAUSED
+                    out.add(t)
+                }
+            }
+            return out
+        }
+    }
 }

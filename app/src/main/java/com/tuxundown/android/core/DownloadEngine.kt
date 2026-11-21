@@ -47,6 +47,10 @@ class DownloadEngine(
     private val onSave: () -> Unit,
     private val limiter: SpeedLimiter? = null,
     private val networkGuard: () -> Boolean = { true },
+    /** v1.4 traffic protection: consulted after the probe (when the
+     *  size is known) and once a second during the transfer; returning
+     *  false pauses the task instead of burning mobile data. */
+    private val trafficGuard: () -> Boolean = { true },
 ) {
     /** Seekable destination in the public download folder, opened after probing. */
     private lateinit var target: DownloadTarget
@@ -55,8 +59,10 @@ class DownloadEngine(
     @Volatile private var running = false
     /** Set when the WiFi-only guard stops the transfer mid-flight. */
     @Volatile private var netBlocked = false
+    /** Set when the traffic-protection guard stops the transfer. */
+    @Volatile private var trafficBlocked = false
 
-    private fun stopped(): Boolean = paused || netBlocked
+    private fun stopped(): Boolean = paused || netBlocked || trafficBlocked
 
     private val downloadedBytes = AtomicLong(task.downloaded)
     private val nextChunk = AtomicInteger(0)
@@ -95,8 +101,20 @@ class DownloadEngine(
         running = true
         paused = false
         netBlocked = false
+        trafficBlocked = false
+        // v1.4 stats: first-start stamp + accumulated transfer time.
+        if (task.startedAt == 0L) task.startedAt = System.currentTimeMillis()
+        val runStartMs = System.currentTimeMillis()
         try {
             if (task.totalSize <= 0 || task.fileName.isBlank()) probe()
+            // Traffic protection can only judge once the size is known.
+            if (!trafficGuard()) {
+                trafficBlocked = true
+                task.status = TaskStatus.PAUSED
+                task.note = "流量保护：当前是流量网络，这个文件有 ${Format.size(task.totalSize)}，" +
+                    "已自动暂停省流量。回到 WiFi 点继续，或在流量下再点一次继续也可下载。"
+                return task.status
+            }
             if (task.totalSize == 0L) {
                 // A genuinely empty file: nothing to transfer.
                 target = targetProvider()
@@ -120,6 +138,10 @@ class DownloadEngine(
             task.status = if (paused) TaskStatus.PAUSED else TaskStatus.FAILED
             return task.status
         } finally {
+            task.elapsedMs += System.currentTimeMillis() - runStartMs
+            if (task.status == TaskStatus.DONE && task.finishedAt == 0L) {
+                task.finishedAt = System.currentTimeMillis()
+            }
             running = false
             onSave()
             onProgress(task)
@@ -279,6 +301,10 @@ class DownloadEngine(
                     netBlocked = true
                     break
                 }
+                if (!trafficGuard()) {
+                    trafficBlocked = true
+                    break
+                }
                 val now = System.currentTimeMillis()
                 val bytes = downloadedBytes.get()
                 val dt = max(1L, now - lastTime)
@@ -358,6 +384,12 @@ class DownloadEngine(
                 task.status = TaskStatus.DONE
                 task.status
             }
+            trafficBlocked -> {
+                task.note = "流量保护：网络已切到流量，这个文件有 ${Format.size(task.totalSize)}，" +
+                    "已自动暂停省流量。回到 WiFi 点继续，或在流量下再点一次继续也可下载。"
+                task.status = TaskStatus.PAUSED
+                task.status
+            }
             netBlocked -> {
                 task.note = "网络已切到流量（已开启「仅 WiFi 下载」），已暂停；回到 WiFi 后点继续即可续传。"
                 task.status = TaskStatus.PAUSED
@@ -434,6 +466,7 @@ class DownloadEngine(
         var ok = false
         while (attempt < 3 && !stopped() && !ok) {
             attempt++
+            if (attempt > 1) task.retryCount++ // v1.4 stats: chunk-level retries
             try {
                 downloadRange(ac)
                 ok = ac.pos >= ac.end
@@ -530,6 +563,10 @@ class DownloadEngine(
                     netBlocked = true
                     break
                 }
+                if (!trafficGuard()) {
+                    trafficBlocked = true
+                    break
+                }
                 val now = System.currentTimeMillis()
                 val bytes = downloadedBytes.get()
                 val dt = max(1L, now - lastTime)
@@ -571,6 +608,11 @@ class DownloadEngine(
             task.downloaded = downloadedBytes.get()
         }
         return when {
+            trafficBlocked -> TaskStatus.PAUSED.also {
+                task.status = it
+                task.note = "流量保护：网络已切到流量，这个文件有 ${Format.size(task.totalSize)}，" +
+                    "已自动暂停省流量。回到 WiFi 点继续，或在流量下再点一次继续也可下载。"
+            }
             netBlocked -> TaskStatus.PAUSED.also {
                 task.status = it
                 task.note = "网络已切到流量（已开启「仅 WiFi 下载」），已暂停；回到 WiFi 后点继续即可续传。"

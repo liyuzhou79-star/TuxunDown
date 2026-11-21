@@ -55,6 +55,37 @@ object DownloadCenter {
         get() = prefs().getString("clipboardPrompted", "") ?: ""
         set(v) { prefs().edit().putString("clipboardPrompted", v).apply() }
 
+    /** v1.4: how many tasks may download at the same time (1–5). */
+    var maxConcurrent: Int
+        get() = prefs().getInt("maxConcurrent", 1).coerceIn(1, 5)
+        set(v) { prefs().edit().putInt("maxConcurrent", v.coerceIn(1, 5)).apply() }
+
+    /** v1.4: whole-task automatic retries after a failure (0 = off). */
+    var autoRetryCount: Int
+        get() = prefs().getInt("autoRetryCount", 0).coerceIn(0, 5)
+        set(v) { prefs().edit().putInt("autoRetryCount", v.coerceIn(0, 5)).apply() }
+
+    /** v1.4: mobile-data protection threshold in MB (0 = off). */
+    var trafficThresholdMB: Int
+        get() = prefs().getInt("trafficThresholdMB", 0).coerceAtLeast(0)
+        set(v) { prefs().edit().putInt("trafficThresholdMB", v.coerceAtLeast(0)).apply() }
+
+    /** v1.4: pages sniffed recently (newest first, max 10), for one-tap re-entry. */
+    var sniffHistory: List<String>
+        get() = (prefs().getString("sniffHistory", "") ?: "")
+            .lines().map { it.trim() }.filter { it.isNotBlank() }
+        set(v) {
+            prefs().edit().putString(
+                "sniffHistory",
+                v.distinct().take(10).joinToString("\n"),
+            ).apply()
+        }
+
+    fun rememberSniffedPage(url: String) {
+        if (url.isBlank()) return
+        sniffHistory = listOf(url) + sniffHistory.filter { it != url }
+    }
+
     // ---- cancellation (audit A7) ----
     // Deleting a RUNNING task used to race the engine: the UI deleted
     // the .part file while worker threads were still writing into it.
@@ -90,6 +121,20 @@ object DownloadCenter {
 
     /** Queue a task and kick the foreground service. Returns false if blocked. */
     fun enqueue(task: TaskRecord): Boolean {
+        task.autoRetriesUsed = 0
+        // v1.4: pressing 继续 on a paused task while on mobile data,
+        // when the traffic guard would block it, IS the user's
+        // explicit confirmation for this one task.
+        if (task.status == TaskStatus.PAUSED && !task.mobileConfirmed &&
+            TrafficGuard.shouldBlock(
+                onWifi = isOnWifi(),
+                totalSize = task.totalSize,
+                thresholdMB = trafficThresholdMB,
+                confirmed = false,
+            )
+        ) {
+            task.mobileConfirmed = true
+        }
         if (wifiOnly && !isOnWifi()) {
             task.note = "已开启「仅 WiFi 下载」，当前不在 WiFi 网络，任务已排队等待。"
             task.status = TaskStatus.QUEUED
@@ -102,6 +147,13 @@ object DownloadCenter {
         val ctx = appContext!!
         ContextCompat.startForegroundService(ctx, Intent(ctx, DownloadService::class.java))
         return true
+    }
+
+    /** v1.4 插队： move a queued task to the front of the queue. */
+    fun moveToFrontOfQueue(task: TaskRecord): Boolean {
+        val changed = QueueOrder.moveToFrontOfQueue(store.tasks, task)
+        if (changed) store.save()
+        return changed
     }
 
     @Synchronized
@@ -123,7 +175,7 @@ object DownloadCenter {
     }
 
     fun nextQueued(): TaskRecord? =
-        store.tasks.firstOrNull { it.status == TaskStatus.QUEUED }
+        QueueOrder.nextEligible(store.tasks, System.currentTimeMillis())
 
     fun hasActiveWork(): Boolean =
         store.tasks.any { it.status == TaskStatus.QUEUED || it.status == TaskStatus.RUNNING }

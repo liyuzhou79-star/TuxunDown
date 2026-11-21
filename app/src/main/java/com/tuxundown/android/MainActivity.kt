@@ -17,17 +17,21 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -37,6 +41,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -127,6 +132,20 @@ object WinPalette {
     val GrayText = Color(0xFF767676)
 }
 
+/** File-type badge colors (v1.4 item 8), readable in both themes. */
+fun kindColor(kind: String): Color = when (kind) {
+    "apk" -> Color(0xFF2E9E4F)
+    "archive" -> Color(0xFFB26A00)
+    "video" -> Color(0xFF7B4DBA)
+    "audio" -> Color(0xFFC2437A)
+    "image" -> Color(0xFF1F8A8C)
+    "document" -> Color(0xFF3367B5)
+    else -> Color(0xFF6B7280)
+}
+
+fun kindOfName(name: String): String =
+    com.tuxundown.android.sniff.SniffParser.kindOf("https://x/" + name) ?: "other"
+
 @androidx.compose.runtime.Composable
 fun DownApp(sharedUrl: String) {
     val context = LocalContext.current
@@ -135,38 +154,63 @@ fun DownApp(sharedUrl: String) {
     var tick by remember { mutableStateOf(0) }
     LaunchedEffect(Unit) {
         while (true) {
-            delay(700)
+            delay(1000)
             tick++
         }
     }
     @Suppress("UNUSED_EXPRESSION") tick // re-read tasks on every tick
 
+    // ---- navigation (v1.4: home / settings are separate screens) ----
+    var screen by remember { mutableStateOf("home") }
+
+    // ---- settings state (mirrors DownloadCenter prefs) ----
     var wifiOnly by remember { mutableStateOf(DownloadCenter.wifiOnly) }
     var dirName by remember { mutableStateOf(DownloadCenter.downloadDirName) }
+    var limitKBps by remember { mutableStateOf(DownloadCenter.speedLimitKBps) }
+    var vibrateOn by remember { mutableStateOf(DownloadCenter.completeVibrate) }
+    var soundOn by remember { mutableStateOf(DownloadCenter.completeSound) }
+    var maxConc by remember { mutableStateOf(DownloadCenter.maxConcurrent) }
+    var autoRetry by remember { mutableStateOf(DownloadCenter.autoRetryCount) }
+    var trafficMB by remember { mutableStateOf(DownloadCenter.trafficThresholdMB) }
+
+    // ---- add-task dialog state ----
     var showAdd by remember { mutableStateOf(sharedUrl.isNotBlank()) }
     var urlText by remember { mutableStateOf(sharedUrl) }
+    var nameText by remember { mutableStateOf("") }
+    var scheduleMin by remember { mutableStateOf(0) }
+    var pendingScheduleAt by remember { mutableStateOf(0L) }
     var sniffing by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf("") }
+
+    // ---- sniff result dialog state (v1.4: multi-select + filter + sort) ----
     var sniffList by remember { mutableStateOf<List<SniffedResource>>(emptyList()) }
     var sniffTotal by remember { mutableStateOf(0) }
     var sniffPage by remember { mutableStateOf("") }
-    var message by remember { mutableStateOf("") }
+    var sniffChecked by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var sniffKind by remember { mutableStateOf("") } // "" = all kinds
+    var sniffSort by remember { mutableStateOf(0) } // 0 默认 1 名称 2 类型
 
-    // ---- v1.3 state: onboarding guide, clipboard prompt, search/sort,
-    // speed limit and completion-feedback settings ----
+    // ---- home list state (v1.4: tabs, search, sort, multi-select) ----
+    var tab by remember { mutableStateOf(0) } // 0 全部 1 下载中 2 已完成 3 失败
+    var query by remember { mutableStateOf("") }
+    var sortMode by remember { mutableStateOf(0) } // 0 默认 1 大小 2 时间
+    var selecting by remember { mutableStateOf(false) }
+    var selectedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+
+    // ---- rename dialog (v1.4 item 18) ----
+    var renameTask by remember { mutableStateOf<TaskRecord?>(null) }
+    var renameText by remember { mutableStateOf("") }
+
+    // ---- v1.3 state: onboarding guide, clipboard prompt ----
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "1.3.0"
+        }.getOrNull() ?: "1.4.0"
     }
     var showGuide by remember {
         mutableStateOf(DownloadCenter.guideSeenVersion != appVersion)
     }
     var clipboardLink by remember { mutableStateOf("") }
-    var query by remember { mutableStateOf("") }
-    var sortMode by remember { mutableStateOf(0) } // 0 默认 1 大小 2 时间
-    var limitKBps by remember { mutableStateOf(DownloadCenter.speedLimitKBps) }
-    var vibrateOn by remember { mutableStateOf(DownloadCenter.completeVibrate) }
-    var soundOn by remember { mutableStateOf(DownloadCenter.completeSound) }
 
     // Clipboard prompt: if the clipboard holds a link we have not
     // asked about yet, offer a one-tap task when the app opens.
@@ -206,8 +250,56 @@ fun DownApp(sharedUrl: String) {
         }
     }
 
+    // ---- v1.4 item 19: task-list import / export (JSON, no file bytes) ----
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            val json = store.exportJson()
+            Thread {
+                val ok = runCatching {
+                    context.contentResolver.openOutputStream(uri)?.use {
+                        it.write(json.toByteArray(Charsets.UTF_8))
+                    } ?: error("open failed")
+                }.isSuccess
+                activity.runOnUiThread {
+                    Toast.makeText(
+                        context,
+                        if (ok) "任务列表已导出" else "导出失败",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            }.start()
+        }
+    }
+    val importLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            Thread {
+                val text = runCatching {
+                    context.contentResolver.openInputStream(uri)?.use {
+                        it.readBytes().toString(Charsets.UTF_8)
+                    }
+                }.getOrNull()
+                activity.runOnUiThread {
+                    if (text == null) {
+                        Toast.makeText(context, "导入失败：读不到文件", Toast.LENGTH_SHORT).show()
+                    } else {
+                        val n = store.importJson(text)
+                        Toast.makeText(
+                            context,
+                            if (n > 0) "已导入 $n 个任务（重复的跳过了）" else "没有可导入的新任务",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
+                }
+            }.start()
+        }
+    }
+
     /** Returns false when the same link is already an active task. */
-    fun createTask(url: String, referer: String = ""): Boolean {
+    fun createTask(url: String, referer: String = "", fileName: String = ""): Boolean {
         // Audit A2 (UI side): the same URL twice would produce two
         // records fighting over one file name — refuse politely.
         val dup = store.tasks.any {
@@ -219,9 +311,18 @@ fun DownApp(sharedUrl: String) {
         }
         val t = TaskRecord(url = url)
         if (referer.isNotBlank()) t.headers["Referer"] = referer
+        if (fileName.isNotBlank()) t.fileName = fileName.trim()
+        if (pendingScheduleAt > System.currentTimeMillis()) {
+            t.scheduledAt = pendingScheduleAt
+            t.note = "预约下载：将在 ${Format.clockTime(pendingScheduleAt)} 开始。"
+        }
         store.add(t)
         DownloadCenter.enqueue(t)
-        Toast.makeText(context, "已新建下载任务", Toast.LENGTH_SHORT).show()
+        Toast.makeText(
+            context,
+            if (t.scheduledAt > 0) "已预约，${Format.clockTime(t.scheduledAt)} 自动开始" else "已新建下载任务",
+            Toast.LENGTH_SHORT,
+        ).show()
         return true
     }
 
@@ -233,9 +334,15 @@ fun DownApp(sharedUrl: String) {
                 urlText = ""
             }
             is SniffResult.ResourceList -> {
+                DownloadCenter.rememberSniffedPage(result.pageUrl)
                 sniffList = result.resources
                 sniffTotal = result.totalCount
                 sniffPage = result.pageUrl
+                sniffChecked = result.resources
+                    .filter { it.looksLikeDownloadEntry }
+                    .map { it.url }.toSet()
+                sniffKind = ""
+                sniffSort = 0
                 showAdd = false
             }
             is SniffResult.Failure -> message = result.reason
@@ -256,17 +363,10 @@ fun DownApp(sharedUrl: String) {
     }
 
     /**
-     * Smart entry: route by what the link actually IS, not by which
-     * button the user happened to tap. A direct file link (known file
-     * extension, or a probe whose headers say "file") starts downloading
-     * right away; only real web pages go through the sniffer.
-     */
-    /**
      * v1.3 batch paste: several links, one per line. Direct files are
      * created immediately; web pages are routed/sniffed one by one in
      * the background — a page that resolves to a single file becomes a
-     * task, a page with many resources is counted as skipped (the
-     * user can open it separately and pick). Duplicates are skipped.
+     * task, a page with many resources is counted as skipped.
      */
     fun startBatch(raw: String) {
         val lines = raw.lines().map { it.trim() }.filter { it.startsWith("http") }
@@ -312,15 +412,19 @@ fun DownApp(sharedUrl: String) {
     fun startSmart(raw: String) {
         val u = raw.trim()
         if (u.isBlank() || sniffing) return
+        pendingScheduleAt = if (scheduleMin > 0) {
+            System.currentTimeMillis() + scheduleMin * 60_000L
+        } else 0L
         // Multi-line paste = batch mode (v1.3).
         if (u.lines().count { it.isNotBlank() } > 1) {
             startBatch(u)
             return
         }
         if (LinkRouter.looksLikeFileUrl(u)) {
-            createTask(u)
+            createTask(u, fileName = nameText)
             showAdd = false
             urlText = ""
+            nameText = ""
             return
         }
         sniffing = true
@@ -330,12 +434,11 @@ fun DownApp(sharedUrl: String) {
             activity.runOnUiThread {
                 if (route == LinkRouter.Route.DIRECT_FILE) {
                     sniffing = false
-                    createTask(u)
+                    createTask(u, fileName = nameText)
                     showAdd = false
                     urlText = ""
+                    nameText = ""
                 } else {
-                    // Web page (or probe inconclusive — the sniffer
-                    // header-gates too and will say so if it is a file).
                     startSniff(u)
                 }
             }
@@ -364,6 +467,32 @@ fun DownApp(sharedUrl: String) {
             .onFailure { Toast.makeText(context, "没有能打开这个文件的应用", Toast.LENGTH_SHORT).show() }
     }
 
+    /** v1.4 item 9: one-tap install for a finished APK. */
+    fun installApk(task: TaskRecord) {
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        if (task.savedUri.isNotBlank()) {
+            intent.setDataAndType(
+                Uri.parse(task.savedUri),
+                "application/vnd.android.package-archive",
+            )
+        } else {
+            val f: File = store.fileOf(task)
+            if (!f.exists()) {
+                Toast.makeText(context, "文件不存在", Toast.LENGTH_SHORT).show()
+                return
+            }
+            val uri = FileProvider.getUriForFile(context, "com.tuxundown.android.files", f)
+            intent.setDataAndType(uri, "application/vnd.android.package-archive")
+        }
+        runCatching { context.startActivity(intent) }
+            .onFailure {
+                Toast.makeText(context, "调起安装失败，可以去下载目录手动点这个文件安装", Toast.LENGTH_LONG).show()
+            }
+    }
+
     fun shareFile(task: TaskRecord) {
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "*/*"
@@ -382,19 +511,16 @@ fun DownApp(sharedUrl: String) {
 
     fun deleteTask(task: TaskRecord) {
         // Audit A7: a RUNNING task's engine threads keep writing for
-        // a while after pause(). Deleting the .part file immediately
-        // raced them (the engine could even "finish" a deleted
-        // entry). Now the service owns the cleanup: mark cancelled
-        // here; once the engine has fully stopped, the service
-        // deletes the file and the record.
+        // a while after pause(). The service owns the cleanup now:
+        // mark cancelled here; the service deletes the file and the
+        // record once the engine has fully stopped.
         if (task.status == TaskStatus.RUNNING) {
             DownloadCenter.cancelTask(task)
             Toast.makeText(context, "正在停止并删除这个任务…", Toast.LENGTH_SHORT).show()
             return
         }
         // Unfinished tasks: also remove the public .part file.
-        // Finished tasks: only the record goes away, the file stays
-        // in the Download folder (it belongs to the user now).
+        // Finished tasks: only the record goes away, the file stays.
         if (task.status != TaskStatus.DONE) {
             PublicStorage.deleteTarget(context, task)
         }
@@ -405,225 +531,314 @@ fun DownApp(sharedUrl: String) {
         it.status == TaskStatus.RUNNING || it.status == TaskStatus.QUEUED
     }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .padding(16.dp)
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            // v1.3: home header icon kept deliberately small (36dp) —
-            // the user asked twice for the icon NOT to fill its space.
-            // NOTE: never painterResource(R.mipmap.ic_launcher) here —
-            // on API 26+ that resolves to the adaptive-icon XML and
-            // painterResource throws IllegalArgumentException
-            // ("Only VectorDrawables and rasterized asset types are
-            // supported"), crashing the first frame. R.drawable.app_icon
-            // is a plain raster copy kept for in-app use (v1.3.0 hotfix).
-            androidx.compose.foundation.Image(
-                painter = androidx.compose.ui.res.painterResource(R.drawable.app_icon),
-                contentDescription = null,
-                modifier = Modifier
-                    .size(36.dp)
-                    .clip(RoundedCornerShape(9.dp)),
-            )
-            Spacer(Modifier.size(10.dp))
-            Column {
-                Text("TuxunDown", style = MaterialTheme.typography.headlineMedium)
-                Text(
-                    "极速多线程下载器",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = WinPalette.GrayText,
-                )
+    val displayedTasks = store.tasks
+        .filter {
+            when (tab) {
+                1 -> it.status == TaskStatus.RUNNING || it.status == TaskStatus.QUEUED ||
+                    it.status == TaskStatus.PAUSED
+                2 -> it.status == TaskStatus.DONE
+                3 -> it.status == TaskStatus.FAILED
+                else -> true
             }
         }
-        Spacer(Modifier.height(12.dp))
+        .filter {
+            query.isBlank() ||
+                it.fileName.contains(query, true) || it.url.contains(query, true)
+        }
+        .let { list ->
+            when (sortMode) {
+                1 -> list.sortedByDescending { it.totalSize }
+                2 -> list.sortedBy { it.createdAt }
+                else -> list
+            }
+        }
 
-        // ---- settings card ----
-        Card(
-            Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surface
-            ),
+    if (screen == "settings") {
+        SettingsScreen(
+            version = appVersion,
+            wifiOnly = wifiOnly,
+            onWifiOnly = { wifiOnly = it; DownloadCenter.wifiOnly = it },
+            dirName = dirName,
+            onPickDir = { dirPicker.launch(null) },
+            onResetDir = {
+                DownloadCenter.downloadDirUri = ""
+                DownloadCenter.downloadDirName = ""
+                dirName = ""
+            },
+            limitKBps = limitKBps,
+            onLimit = { limitKBps = it; DownloadCenter.speedLimitKBps = it },
+            maxConc = maxConc,
+            onMaxConc = { maxConc = it; DownloadCenter.maxConcurrent = it },
+            autoRetry = autoRetry,
+            onAutoRetry = { autoRetry = it; DownloadCenter.autoRetryCount = it },
+            trafficMB = trafficMB,
+            onTraffic = { trafficMB = it; DownloadCenter.trafficThresholdMB = it },
+            vibrateOn = vibrateOn,
+            onVibrate = { vibrateOn = it; DownloadCenter.completeVibrate = it },
+            soundOn = soundOn,
+            onSound = { soundOn = it; DownloadCenter.completeSound = it },
+            onShowGuide = { showGuide = true },
+            onExport = { exportLauncher.launch("tuxundown-tasks.json") },
+            onImport = { importLauncher.launch(arrayOf("application/json", "text/plain")) },
+            onBack = { screen = "home" },
+        )
+    } else {
+        // ================= HOME — ONE scrolling LazyColumn (v1.4 fix) =================
+        // Root cause of "主页不能向下滑动": the home used to be a plain
+        // non-scrollable Column; the header/settings/button/search were
+        // laid out at their full height and the LazyColumn only got the
+        // leftover strip at the bottom, so most of the page could never
+        // be scrolled to. Now EVERYTHING (header, summary, tabs, search
+        // and the task cards) lives in a single LazyColumn — the whole
+        // page scrolls as one, and the task list virtualizes as before.
+        LazyColumn(
+            Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background),
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Column(Modifier.padding(14.dp)) {
+            item(key = "header") {
                 Row(
                     Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    // Home header icon kept deliberately small (36dp).
+                    // NOTE: never painterResource(R.mipmap.ic_launcher)
+                    // here — on API 26+ that resolves to the adaptive-icon
+                    // XML and crashes the first frame (v1.3.0 hotfix).
+                    androidx.compose.foundation.Image(
+                        painter = androidx.compose.ui.res.painterResource(R.drawable.app_icon),
+                        contentDescription = null,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(RoundedCornerShape(9.dp)),
+                    )
+                    Spacer(Modifier.size(10.dp))
                     Column(Modifier.weight(1f)) {
-                        Text("仅 WiFi 下载")
+                        Text("TuxunDown", style = MaterialTheme.typography.headlineMedium)
                         Text(
-                            "开启后流量网络下任务只排队不下载",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = WinPalette.GrayText,
+                            "极速多线程下载器",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    Switch(checked = wifiOnly, onCheckedChange = {
-                        wifiOnly = it
-                        DownloadCenter.wifiOnly = it
-                    })
+                    OutlinedButton(onClick = { screen = "settings" }) { Text("设置") }
                 }
-                HorizontalDivider(Modifier.padding(vertical = 10.dp))
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("下载目录")
-                        Text(
-                            if (dirName.isBlank()) "公共「下载」目录（手机下载文件夹第一层）"
-                            else "自定义：$dirName",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = WinPalette.GrayText,
-                        )
-                    }
-                    OutlinedButton(onClick = { dirPicker.launch(null) }) { Text("更改") }
-                    if (dirName.isNotBlank()) {
-                        OutlinedButton(onClick = {
-                            DownloadCenter.downloadDirUri = ""
-                            DownloadCenter.downloadDirName = ""
-                            dirName = ""
-                        }) { Text("默认") }
-                    }
+            }
+
+            item(key = "newbtn") {
+                Button(onClick = { showAdd = true }, modifier = Modifier.fillMaxWidth()) {
+                    Text("＋ 新建下载")
                 }
-                Text(
-                    "文件直接保存在公共「下载」目录里，文件管理器第一层就能看到；" +
-                        "没下完的 .part 文件也在那里。想换地方，点「更改」选任意文件夹授权一次即可。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = WinPalette.GrayText,
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-                HorizontalDivider(Modifier.padding(vertical = 10.dp))
-                Text("全局限速（每个任务的最高速度，改了立即生效）")
+            }
+
+            if (activeTasks.size >= 2) {
+                item(key = "summary") { SummaryCard(activeTasks) }
+            }
+
+            // ---- tabs (v1.4 item 2) ----
+            item(key = "tabs") {
                 Row(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    val options = listOf(
-                        0 to "不限", 512 to "512KB", 1024 to "1MB",
-                        3072 to "3MB", 5120 to "5MB",
-                    )
-                    for ((kb, label) in options) {
-                        if (kb == limitKBps) {
+                    val tabs = listOf(0 to "全部", 1 to "下载中", 2 to "已完成", 3 to "失败")
+                    for ((m, label) in tabs) {
+                        if (m == tab) {
                             Button(onClick = { }) { Text(label) }
                         } else {
-                            OutlinedButton(onClick = {
-                                limitKBps = kb
-                                DownloadCenter.speedLimitKBps = kb
-                            }) { Text(label) }
+                            OutlinedButton(onClick = { tab = m }) { Text(label) }
                         }
                     }
                 }
-                HorizontalDivider(Modifier.padding(vertical = 10.dp))
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("下载完成震动")
-                    Switch(checked = vibrateOn, onCheckedChange = {
-                        vibrateOn = it
-                        DownloadCenter.completeVibrate = it
-                    })
-                }
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("下载完成提示音")
-                    Switch(checked = soundOn, onCheckedChange = {
-                        soundOn = it
-                        DownloadCenter.completeSound = it
-                    })
-                }
-                HorizontalDivider(Modifier.padding(vertical = 10.dp))
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("新手引导")
-                        Text(
-                            "每个新版本首次打开都会自动播放一次",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = WinPalette.GrayText,
+            }
+
+            // ---- search + sort ----
+            if (store.tasks.isNotEmpty()) {
+                item(key = "search") {
+                    Column {
+                        OutlinedTextField(
+                            value = query,
+                            onValueChange = { query = it },
+                            label = { Text("搜索任务（文件名或链接）") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
                         )
-                    }
-                    OutlinedButton(onClick = { showGuide = true }) { Text("重新查看") }
-                }
-            }
-        }
-        Spacer(Modifier.height(12.dp))
-        Button(onClick = { showAdd = true }, modifier = Modifier.fillMaxWidth()) {
-            Text("＋ 新建下载")
-        }
-        Spacer(Modifier.height(12.dp))
-
-        // ---- multi-task summary (Windows multi-file transfer style) ----
-        if (activeTasks.size >= 2) {
-            SummaryCard(activeTasks)
-            Spacer(Modifier.height(12.dp))
-        }
-
-        // ---- v1.3: task search + sort ----
-        if (store.tasks.isNotEmpty()) {
-            OutlinedTextField(
-                value = query,
-                onValueChange = { query = it },
-                label = { Text("搜索任务（文件名或链接）") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Row(
-                Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("排序：", style = MaterialTheme.typography.bodySmall, color = WinPalette.GrayText)
-                val modes = listOf(0 to "默认", 1 to "大小", 2 to "时间")
-                for ((m, label) in modes) {
-                    if (m == sortMode) {
-                        Button(onClick = { }) { Text(label) }
-                    } else {
-                        OutlinedButton(onClick = { sortMode = m }) { Text(label) }
+                        Row(
+                            Modifier.fillMaxWidth().padding(top = 6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                "排序：",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            val modes = listOf(0 to "默认", 1 to "大小", 2 to "时间")
+                            for ((m, label) in modes) {
+                                if (m == sortMode) {
+                                    Button(onClick = { }) { Text(label) }
+                                } else {
+                                    OutlinedButton(onClick = { sortMode = m }) { Text(label) }
+                                }
+                            }
+                        }
                     }
                 }
             }
-        }
-        val displayedTasks = store.tasks
-            .filter {
-                query.isBlank() ||
-                    it.fileName.contains(query, true) || it.url.contains(query, true)
-            }
-            .let { list ->
-                when (sortMode) {
-                    1 -> list.sortedByDescending { it.totalSize }
-                    2 -> list.sortedBy { it.createdAt }
-                    else -> list
+
+            // ---- multi-select action bar (v1.4 item 3) ----
+            if (selecting) {
+                item(key = "selbar") {
+                    Card(
+                        Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surface
+                        ),
+                    ) {
+                        Column(Modifier.padding(10.dp)) {
+                            Text(
+                                "已选 ${selectedIds.size} 个任务（长按任务卡可多选）",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Row(
+                                Modifier.fillMaxWidth().padding(top = 6.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                OutlinedButton(onClick = {
+                                    selectedIds = displayedTasks.map { it.id }.toSet()
+                                }) { Text("全选") }
+                                OutlinedButton(onClick = {
+                                    store.tasks.filter { it.id in selectedIds }.forEach {
+                                        if (it.status == TaskStatus.RUNNING ||
+                                            it.status == TaskStatus.QUEUED
+                                        ) DownloadCenter.pauseTask(it)
+                                    }
+                                }) { Text("暂停") }
+                                OutlinedButton(onClick = {
+                                    store.tasks.filter { it.id in selectedIds }.forEach {
+                                        if (it.status == TaskStatus.PAUSED ||
+                                            it.status == TaskStatus.FAILED
+                                        ) DownloadCenter.enqueue(it)
+                                    }
+                                }) { Text("继续/重试") }
+                            }
+                            Row(
+                                Modifier.fillMaxWidth().padding(top = 6.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                OutlinedButton(onClick = {
+                                    store.tasks.filter {
+                                        it.id in selectedIds && it.status == TaskStatus.QUEUED
+                                    }.forEach { DownloadCenter.moveToFrontOfQueue(it) }
+                                    Toast.makeText(context, "已把选中的排队任务提到最前", Toast.LENGTH_SHORT).show()
+                                }) { Text("插队") }
+                                OutlinedButton(onClick = {
+                                    val victims = store.tasks.filter { it.id in selectedIds }
+                                    victims.forEach { deleteTask(it) }
+                                    selectedIds = emptySet()
+                                    selecting = false
+                                }) { Text("删除") }
+                                TextButton(onClick = {
+                                    selectedIds = emptySet()
+                                    selecting = false
+                                }) { Text("退出多选") }
+                            }
+                        }
+                    }
                 }
             }
 
-        if (store.tasks.isEmpty()) {
-            Text("还没有任务。点「新建下载」，粘贴文件直链或网页链接即可：直链会直接开下，网页会自动嗅探里面的资源。")
-        }
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            // ---- empty state (v1.4 item 14) ----
+            if (store.tasks.isEmpty()) {
+                item(key = "empty") {
+                    Card(
+                        Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surface
+                        ),
+                    ) {
+                        Column(
+                            Modifier.padding(18.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            androidx.compose.foundation.Image(
+                                painter = androidx.compose.ui.res.painterResource(R.drawable.app_icon),
+                                contentDescription = null,
+                                modifier = Modifier
+                                    .size(56.dp)
+                                    .clip(RoundedCornerShape(12.dp)),
+                            )
+                            Spacer(Modifier.height(10.dp))
+                            Text(
+                                "还没有下载任务",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                "把文件直链粘进来就会直接多线程开下；把网页链接粘进来，" +
+                                    "会自动嗅探出页面里的安装包、压缩包、视频等资源，点一个就下。",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Spacer(Modifier.height(12.dp))
+                            Button(
+                                onClick = { showAdd = true },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text("粘贴链接，新建下载") }
+                            Spacer(Modifier.height(8.dp))
+                            OutlinedButton(
+                                onClick = { showAdd = true },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text("粘贴网页，嗅探里面的资源") }
+                        }
+                    }
+                }
+            } else if (displayedTasks.isEmpty()) {
+                item(key = "nomatch") {
+                    Text("这个分类下没有任务。")
+                }
+            }
+
             items(displayedTasks, key = { it.id }) { task ->
                 TaskCard(
                     task = task,
+                    selecting = selecting,
+                    selected = task.id in selectedIds,
+                    onToggleSelect = {
+                        selecting = true
+                        selectedIds = if (task.id in selectedIds) {
+                            selectedIds - task.id
+                        } else {
+                            selectedIds + task.id
+                        }
+                    },
                     onPause = { DownloadCenter.pauseTask(task) },
                     onResume = { DownloadCenter.enqueue(task) },
                     onOpen = { openFile(task) },
+                    onInstall = { installApk(task) },
                     onShare = { shareFile(task) },
                     onDelete = { deleteTask(task) },
+                    onJumpQueue = {
+                        if (DownloadCenter.moveToFrontOfQueue(task)) {
+                            Toast.makeText(context, "已插队到队列最前", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(context, "它已经是队列里第一个了", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    onRename = {
+                        renameTask = task
+                        renameText = task.fileName
+                    },
                 )
             }
         }
     }
+
+    // ================= dialogs =================
 
     if (showAdd) {
         AlertDialog(
@@ -637,10 +852,33 @@ fun DownApp(sharedUrl: String) {
                         label = { Text("文件直链或网页链接，粘进来就行") },
                         modifier = Modifier.fillMaxWidth(),
                     )
+                    OutlinedTextField(
+                        value = nameText,
+                        onValueChange = { nameText = it },
+                        label = { Text("保存文件名（可不填，留空自动识别）") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "预约开始：",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        val opts = listOf(0 to "立即", 30 to "30分钟后", 60 to "1小时后", 180 to "3小时后")
+                        for ((m, label) in opts) {
+                            if (m == scheduleMin) {
+                                Button(onClick = { }) { Text(label) }
+                            } else {
+                                OutlinedButton(onClick = { scheduleMin = m }) { Text(label) }
+                            }
+                        }
+                    }
                     Text(
                         "直链自动直接下载；网页自动嗅探里面的资源。一行一个链接、粘多行可以批量新建。",
                         style = MaterialTheme.typography.bodySmall,
-                        color = WinPalette.GrayText,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     if (message.isNotBlank()) {
                         Spacer(Modifier.height(8.dp))
@@ -653,6 +891,29 @@ fun DownApp(sharedUrl: String) {
                     if (sniffing) {
                         Spacer(Modifier.height(8.dp))
                         Text("正在识别链接…")
+                    }
+                    // ---- sniff history (v1.4 item 16) ----
+                    val history = DownloadCenter.sniffHistory
+                    if (history.isNotEmpty() && urlText.isBlank()) {
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            "最近嗅过的网页（点一个重新嗅探）：",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        for (h in history.take(5)) {
+                            Text(
+                                h,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { urlText = h }
+                                    .padding(vertical = 4.dp),
+                            )
+                        }
                     }
                     Spacer(Modifier.height(4.dp))
                     TextButton(
@@ -679,57 +940,179 @@ fun DownApp(sharedUrl: String) {
     }
 
     if (sniffList.isNotEmpty()) {
+        val kindsPresent = sniffList.map { it.kind }.distinct()
+        val shownSniff = sniffList
+            .filter { sniffKind.isBlank() || it.kind == sniffKind }
+            .let { list ->
+                when (sniffSort) {
+                    1 -> list.sortedBy { it.name.lowercase() }
+                    2 -> list.sortedBy { it.kind }
+                    else -> list
+                }
+            }
         AlertDialog(
             onDismissRequest = { sniffList = emptyList() },
             title = {
                 Text(
                     if (sniffTotal > sniffList.size)
                         "页面里的资源（共 $sniffTotal 个，先显示 ${sniffList.size} 个）"
-                    else "页面里的资源（点一个下载）"
+                    else "页面里的资源（勾选后下载）"
                 )
             },
             text = {
-                LazyColumn {
-                    items(sniffList, key = { it.url }) { res ->
-                        Column(
-                            Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    createTask(res.url, sniffPage)
-                                    sniffList = emptyList()
-                                }
-                                .padding(vertical = 10.dp)
-                        ) {
-                            Text(
-                                res.name,
-                                style = MaterialTheme.typography.bodyLarge,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            Text(
-                                "${res.kind}${if (res.looksLikeDownloadEntry) " · 疑似下载入口" else ""}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = WinPalette.GrayText,
-                            )
-                            Text(
-                                res.url,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = WinPalette.GrayText,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                Column {
+                    // ---- filter + sort (v1.4 item 15) ----
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        if (sniffKind.isBlank()) {
+                            Button(onClick = { }) { Text("全部") }
+                        } else {
+                            OutlinedButton(onClick = { sniffKind = "" }) { Text("全部") }
                         }
-                        HorizontalDivider()
+                        for (k in kindsPresent) {
+                            if (k == sniffKind) {
+                                Button(onClick = { }) { Text(kindLabel(k)) }
+                            } else {
+                                OutlinedButton(onClick = { sniffKind = k }) { Text(kindLabel(k)) }
+                            }
+                        }
+                    }
+                    Row(
+                        Modifier.padding(top = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "排序：",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        val modes = listOf(0 to "默认", 1 to "名称", 2 to "类型")
+                        for ((m, label) in modes) {
+                            if (m == sniffSort) {
+                                Button(onClick = { }) { Text(label) }
+                            } else {
+                                OutlinedButton(onClick = { sniffSort = m }) { Text(label) }
+                            }
+                        }
+                        Spacer(Modifier.weight(1f))
+                        TextButton(onClick = {
+                            val all = shownSniff.map { it.url }.toSet()
+                            sniffChecked = if (all.all { it in sniffChecked }) {
+                                sniffChecked - all
+                            } else {
+                                sniffChecked + all
+                            }
+                        }) { Text("全选/取消") }
+                    }
+                    LazyColumn(Modifier.heightIn(max = 360.dp)) {
+                        items(shownSniff, key = { it.url }) { res ->
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        sniffChecked = if (res.url in sniffChecked) {
+                                            sniffChecked - res.url
+                                        } else {
+                                            sniffChecked + res.url
+                                        }
+                                    }
+                                    .padding(vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Checkbox(
+                                    checked = res.url in sniffChecked,
+                                    onCheckedChange = { checked ->
+                                        sniffChecked = if (checked) {
+                                            sniffChecked + res.url
+                                        } else {
+                                            sniffChecked - res.url
+                                        }
+                                    },
+                                )
+                                FileTypeBadge(kind = res.kind, name = res.name)
+                                Spacer(Modifier.size(8.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        res.name,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    Text(
+                                        "${kindLabel(res.kind)}${if (res.looksLikeDownloadEntry) " · 疑似下载入口" else ""}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    Text(
+                                        res.url,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
+                            HorizontalDivider()
+                        }
                     }
                 }
             },
             confirmButton = {
+                TextButton(
+                    onClick = {
+                        val chosen = sniffList.filter { it.url in sniffChecked }
+                        sniffList = emptyList()
+                        var created = 0
+                        for (res in chosen) {
+                            if (createTask(res.url, sniffPage)) created++
+                        }
+                        if (chosen.isEmpty()) {
+                            Toast.makeText(context, "先勾选要下载的资源", Toast.LENGTH_SHORT).show()
+                        } else if (created > 0) {
+                            Toast.makeText(context, "已新建 $created 个下载任务", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                ) { Text("下载所选（${sniffChecked.size}）") }
+            },
+            dismissButton = {
                 TextButton(onClick = { sniffList = emptyList() }) { Text("关闭") }
             },
         )
     }
 
-    // ---- v1.3: clipboard link prompt ----
+    // ---- rename dialog (v1.4 item 18) ----
+    if (renameTask != null) {
+        AlertDialog(
+            onDismissRequest = { renameTask = null },
+            title = { Text("修改保存文件名") },
+            text = {
+                OutlinedTextField(
+                    value = renameText,
+                    onValueChange = { renameText = it },
+                    label = { Text("文件名（带扩展名）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val t = renameTask
+                    val newName = renameText.trim()
+                    if (t != null && newName.isNotBlank()) {
+                        t.fileName = newName
+                        store.save()
+                        Toast.makeText(context, "已改名为：$newName", Toast.LENGTH_SHORT).show()
+                    }
+                    renameTask = null
+                }) { Text("保存") }
+            },
+            dismissButton = {
+                TextButton(onClick = { renameTask = null }) { Text("取消") }
+            },
+        )
+    }
+
+    // ---- clipboard link prompt (v1.3) ----
     if (clipboardLink.isNotBlank()) {
         AlertDialog(
             onDismissRequest = {
@@ -749,6 +1132,7 @@ fun DownApp(sharedUrl: String) {
                     val u = clipboardLink
                     DownloadCenter.clipboardPrompted = u
                     clipboardLink = ""
+                    urlText = u
                     startSmart(u)
                 }) { Text("新建下载") }
             },
@@ -761,7 +1145,7 @@ fun DownApp(sharedUrl: String) {
         )
     }
 
-    // ---- v1.3: per-version onboarding guide ----
+    // ---- per-version onboarding guide ----
     if (showGuide) {
         GuideOverlay(
             version = appVersion,
@@ -773,13 +1157,286 @@ fun DownApp(sharedUrl: String) {
     }
 }
 
+fun kindLabel(kind: String): String = when (kind) {
+    "apk" -> "安装包"
+    "archive" -> "压缩包"
+    "video" -> "视频"
+    "audio" -> "音频"
+    "image" -> "图片"
+    "document" -> "文档"
+    else -> "其他"
+}
+
+/** Small colored file-type badge (v1.4 item 8). */
+@androidx.compose.runtime.Composable
+fun FileTypeBadge(kind: String, name: String) {
+    val ext = name.substringAfterLast('.', "").uppercase()
+    val label = when {
+        ext.isNotBlank() && ext.length <= 4 && !ext.contains('/') -> ext
+        kind == "apk" -> "APK"
+        kind == "archive" -> "ZIP"
+        kind == "video" -> "视频"
+        kind == "audio" -> "音频"
+        kind == "image" -> "图片"
+        kind == "document" -> "文档"
+        else -> "文件"
+    }
+    Box(
+        Modifier
+            .size(width = 40.dp, height = 40.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(kindColor(kind)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            label,
+            color = Color.White,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+        )
+    }
+}
+
 /**
- * Full-screen onboarding guide (v1.3, user-requested): shown on the
- * first launch of EVERY new version (the caller compares the stored
- * version), and re-openable from settings. Five pages in the
- * TuxunGo style: welcome / what's new / how it works / speed tips /
- * notes. Content describes this version's real changes and is
- * written for all users, not as a report to one person.
+ * Settings screen (v1.4 item 20): grouped sections on their own
+ * scrolling page — 下载 / 提示 / 引导与数据 / 关于 — instead of one
+ * giant card squeezed onto the home page.
+ */
+@androidx.compose.runtime.Composable
+fun SettingsScreen(
+    version: String,
+    wifiOnly: Boolean,
+    onWifiOnly: (Boolean) -> Unit,
+    dirName: String,
+    onPickDir: () -> Unit,
+    onResetDir: () -> Unit,
+    limitKBps: Int,
+    onLimit: (Int) -> Unit,
+    maxConc: Int,
+    onMaxConc: (Int) -> Unit,
+    autoRetry: Int,
+    onAutoRetry: (Int) -> Unit,
+    trafficMB: Int,
+    onTraffic: (Int) -> Unit,
+    vibrateOn: Boolean,
+    onVibrate: (Boolean) -> Unit,
+    soundOn: Boolean,
+    onSound: (Boolean) -> Unit,
+    onShowGuide: () -> Unit,
+    onExport: () -> Unit,
+    onImport: () -> Unit,
+    onBack: () -> Unit,
+) {
+    val context = LocalContext.current
+    LazyColumn(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item(key = "s-head") {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onBack) { Text("← 返回") }
+                Text(
+                    "设置",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
+        item(key = "s-download") {
+            SettingsGroup("下载") {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("仅 WiFi 下载")
+                        Text(
+                            "开启后流量网络下任务只排队不下载",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = wifiOnly, onCheckedChange = onWifiOnly)
+                }
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Text("同时下载任务数")
+                ChipRow(
+                    options = (1..5).map { it to "${it} 个" },
+                    selected = maxConc,
+                    onPick = onMaxConc,
+                )
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Text("全局限速（每个任务的最高速度，改了立即生效）")
+                ChipRow(
+                    options = listOf(
+                        0 to "不限", 512 to "512KB", 1024 to "1MB",
+                        3072 to "3MB", 5120 to "5MB",
+                    ),
+                    selected = limitKBps,
+                    onPick = onLimit,
+                )
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Text("流量保护（流量网络下，文件超过这个大小先暂停问你）")
+                ChipRow(
+                    options = listOf(0 to "关", 50 to "50MB", 200 to "200MB", 1024 to "1GB"),
+                    selected = trafficMB,
+                    onPick = onTraffic,
+                )
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Text("下载失败自动重试（等一会儿再试，间隔越来越长）")
+                ChipRow(
+                    options = listOf(0 to "关", 1 to "1 次", 3 to "3 次", 5 to "5 次"),
+                    selected = autoRetry,
+                    onPick = onAutoRetry,
+                )
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("下载目录")
+                        Text(
+                            if (dirName.isBlank()) "公共「下载」目录（手机下载文件夹第一层）"
+                            else "自定义：$dirName",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    OutlinedButton(onClick = onPickDir) { Text("更改") }
+                    if (dirName.isNotBlank()) {
+                        OutlinedButton(onClick = onResetDir) { Text("默认") }
+                    }
+                }
+                Text(
+                    "文件直接保存在公共「下载」目录里，文件管理器第一层就能看到；" +
+                        "没下完的 .part 文件也在那里。想换地方，点「更改」选任意文件夹授权一次即可。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+        }
+        item(key = "s-notify") {
+            SettingsGroup("提示") {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("下载完成震动")
+                    Switch(checked = vibrateOn, onCheckedChange = onVibrate)
+                }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("下载完成提示音")
+                    Switch(checked = soundOn, onCheckedChange = onSound)
+                }
+            }
+        }
+        item(key = "s-data") {
+            SettingsGroup("引导与数据") {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("新手引导")
+                        Text(
+                            "每个新版本首次打开都会自动播放一次",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    OutlinedButton(onClick = onShowGuide) { Text("重新查看") }
+                }
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = onExport) { Text("导出任务列表") }
+                    OutlinedButton(onClick = onImport) { Text("导入任务列表") }
+                }
+                Text(
+                    "导出的是任务记录（JSON，不含文件本体），换手机或重装后导入即可恢复列表和续传进度。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+            }
+        }
+        item(key = "s-about") {
+            SettingsGroup("关于") {
+                Text("TuxunDown v$version")
+                Text(
+                    "极速多线程下载器 · 免费开源（GPLv3）· 无广告 · 不收集、不上传任何数据，" +
+                        "所有任务记录只存在你的手机里。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(onClick = {
+                    runCatching {
+                        context.startActivity(
+                            Intent(
+                                Intent.ACTION_VIEW,
+                                Uri.parse("https://github.com/liyuzhou79-star/TuxunDown/releases"),
+                            )
+                        )
+                    }
+                }) { Text("检查更新（打开 GitHub 发布页）") }
+            }
+        }
+    }
+}
+
+@androidx.compose.runtime.Composable
+fun SettingsGroup(title: String, content: @androidx.compose.runtime.Composable () -> Unit) {
+    Card(
+        Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    ) {
+        Column(Modifier.padding(14.dp)) {
+            Text(
+                title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.height(8.dp))
+            content()
+        }
+    }
+}
+
+@androidx.compose.runtime.Composable
+fun ChipRow(options: List<Pair<Int, String>>, selected: Int, onPick: (Int) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(top = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        for ((v, label) in options) {
+            if (v == selected) {
+                Button(onClick = { }) { Text(label) }
+            } else {
+                OutlinedButton(onClick = { onPick(v) }) { Text(label) }
+            }
+        }
+    }
+}
+
+/**
+ * Full-screen onboarding guide: shown on the first launch of EVERY
+ * new version (the caller compares the stored version), and
+ * re-openable from settings. Content describes this version's real
+ * changes and is written for all users.
  */
 @androidx.compose.runtime.Composable
 fun GuideOverlay(version: String, onDone: () -> Unit) {
@@ -789,13 +1446,14 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 下载更快：分块更细、断线重试不再重下已下的部分、卡住的连接会被自动换掉\n" +
-            "· 修了一批问题：同名文件不再被覆盖、任务记录更抗损坏、WiFi 断开会自动暂停\n" +
-            "· 新增：批量粘贴建任务、剪贴板链接提示、任务搜索排序、全局限速、完成震动/提示音",
+            "· 主页改版：整个页面可以顺滑滚动，任务再多也能滑到底\n" +
+            "· 新增标签页（全部／下载中／已完成／失败）、长按多选批量管理、排队任务插队\n" +
+            "· 可以预约下载、设置同时下载个数、失败自动重试、流量保护\n" +
+            "· 任务详情有完整统计；下完的文件保留速度曲线，随时回看",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
-            "· 文件直链 → 直接开始多线程下载\n" +
-            "· 网页链接 → 自动嗅探出页面里的资源，点一个就下\n" +
+            "· 文件直链 → 直接开始多线程下载，还能预先改好保存文件名\n" +
+            "· 网页链接 → 自动嗅探出页面里的资源，勾选后批量下载\n" +
             "· 一行一个链接、粘多行 → 批量新建\n" +
             "下好的文件都在手机公共「下载」目录里，文件管理器第一层就能找到。",
         "提速小贴士" to
@@ -914,7 +1572,7 @@ fun SummaryCard(active: List<TaskRecord>) {
             Text(
                 "总速度：${Format.speed(totalSpeed)} · ${Format.size(totalDone)} / ${Format.size(totalSize)}",
                 style = MaterialTheme.typography.bodySmall,
-                color = WinPalette.GrayText,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
@@ -1042,21 +1700,28 @@ fun InfoRow(label: String, value: String) {
         Text(
             label,
             style = MaterialTheme.typography.bodyMedium,
-            color = WinPalette.GrayText,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.size(width = 76.dp, height = 20.dp),
         )
         Text(value, style = MaterialTheme.typography.bodyMedium)
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @androidx.compose.runtime.Composable
 fun TaskCard(
     task: TaskRecord,
+    selecting: Boolean,
+    selected: Boolean,
+    onToggleSelect: () -> Unit,
     onPause: () -> Unit,
     onResume: () -> Unit,
     onOpen: () -> Unit,
+    onInstall: () -> Unit,
     onShare: () -> Unit,
     onDelete: () -> Unit,
+    onJumpQueue: () -> Unit,
+    onRename: () -> Unit,
 ) {
     var expanded by remember(task.id) {
         mutableStateOf(DownloadCenter.detailsExpanded)
@@ -1069,19 +1734,31 @@ fun TaskCard(
         TaskStatus.DONE -> BarState.DONE
         TaskStatus.QUEUED -> BarState.IDLE
     }
+    val displayName = task.fileName.ifBlank { task.url }
+    val kind = kindOfName(task.savedName.ifBlank { task.fileName })
     Card(
-        Modifier.fillMaxWidth(),
+        Modifier
+            .fillMaxWidth()
+            .combinedClickable(
+                onClick = { if (selecting) onToggleSelect() },
+                onLongClick = { onToggleSelect() },
+            ),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
     ) {
         Column(Modifier.padding(14.dp)) {
-            // ---- header: name + percent, Windows-style buttons top-right ----
+            // ---- header: type badge + name + percent, buttons top-right ----
             Row(
                 Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.Top,
             ) {
+                if (selecting) {
+                    Checkbox(checked = selected, onCheckedChange = { onToggleSelect() })
+                }
+                FileTypeBadge(kind = kind, name = displayName)
+                Spacer(Modifier.size(10.dp))
                 Column(Modifier.weight(1f)) {
                     Text(
-                        task.fileName.ifBlank { task.url },
+                        displayName,
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
@@ -1090,7 +1767,10 @@ fun TaskCard(
                     val headline = when (task.status) {
                         TaskStatus.RUNNING -> "已完成 $pct%"
                         TaskStatus.PAUSED -> "已暂停 · 已完成 $pct%"
-                        TaskStatus.QUEUED -> "排队中，等待开始"
+                        TaskStatus.QUEUED ->
+                            if (task.scheduledAt > System.currentTimeMillis())
+                                "预约 ${Format.clockTime(task.scheduledAt)} 开始"
+                            else "排队中，等待开始"
                         TaskStatus.DONE -> "已完成"
                         TaskStatus.FAILED -> "下载失败"
                     }
@@ -1100,7 +1780,7 @@ fun TaskCard(
                         color = when (task.status) {
                             TaskStatus.FAILED -> WinPalette.Red
                             TaskStatus.DONE -> WinPalette.ChartGreen
-                            else -> WinPalette.GrayText
+                            else -> MaterialTheme.colorScheme.onSurfaceVariant
                         },
                     )
                 }
@@ -1141,7 +1821,10 @@ fun TaskCard(
                             if (eta.isNotBlank()) " · 还剩 $eta" else ""
                     }
                     TaskStatus.PAUSED -> "已下载 ${Format.size(task.downloaded)} / ${Format.size(task.totalSize)}"
-                    TaskStatus.QUEUED -> "等待前面的任务完成"
+                    TaskStatus.QUEUED ->
+                        if (task.scheduledAt > System.currentTimeMillis())
+                            "预约在 ${Format.clockTime(task.scheduledAt)} 自动开始"
+                        else "等待前面的任务完成"
                     TaskStatus.DONE -> Format.size(task.totalSize)
                     TaskStatus.FAILED -> task.error.ifBlank { "下载失败" }
                 }
@@ -1149,22 +1832,32 @@ fun TaskCard(
                     line,
                     style = MaterialTheme.typography.bodyMedium,
                     color = if (task.status == TaskStatus.FAILED) WinPalette.Red
-                    else WinPalette.GrayText,
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             } else {
-                // ---- expanded ("详细信息"): chart + all info rows ----
-                if (task.speedHistory.isNotEmpty() &&
-                    (task.status == TaskStatus.RUNNING || task.status == TaskStatus.PAUSED)
-                ) {
+                // ---- expanded ("详细信息"): chart + stats + all rows ----
+                val historySnapshot = synchronized(task.speedHistory) { task.speedHistory.toList() }
+                val showChart = historySnapshot.size >= 2 &&
+                    (task.status == TaskStatus.RUNNING || task.status == TaskStatus.PAUSED ||
+                        task.status == TaskStatus.DONE)
+                if (showChart) {
                     Spacer(Modifier.height(10.dp))
-                    Text(
-                        Format.speed(task.speedBps),
-                        color = WinPalette.ChartGreen,
-                        fontSize = 22.sp,
-                        fontWeight = FontWeight.Bold,
-                    )
+                    if (task.status == TaskStatus.RUNNING) {
+                        Text(
+                            Format.speed(task.speedBps),
+                            color = WinPalette.ChartGreen,
+                            fontSize = 22.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    } else if (task.status == TaskStatus.DONE) {
+                        Text(
+                            "下载速度曲线（已保留，可回看）",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                     SpeedChart(
-                        history = synchronized(task.speedHistory) { task.speedHistory.toList() },
+                        history = historySnapshot,
                         modifier = Modifier.fillMaxWidth().height(110.dp),
                     )
                 }
@@ -1172,6 +1865,7 @@ fun TaskCard(
                 when (task.status) {
                     TaskStatus.RUNNING -> {
                         InfoRow("速度：", Format.speed(task.speedBps))
+                        if (task.avgBps > 0) InfoRow("平均速度：", Format.speed(task.avgBps))
                         if (task.peakBps > 0) InfoRow("峰值速度：", Format.speed(task.peakBps))
                         val eta = Format.eta(task.etaSeconds)
                         InfoRow("剩余时间：", eta.ifBlank { "计算中…" })
@@ -1188,10 +1882,14 @@ fun TaskCard(
                             "已下载：",
                             "${Format.size(task.downloaded)} / ${Format.size(task.totalSize)}",
                         )
+                        if (task.avgBps > 0) InfoRow("平均速度：", Format.speed(task.avgBps))
                         if (task.peakBps > 0) InfoRow("峰值速度：", Format.speed(task.peakBps))
                     }
                     TaskStatus.DONE -> {
                         InfoRow("大小：", Format.size(task.totalSize))
+                        if (task.avgBps > 0) InfoRow("平均速度：", Format.speed(task.avgBps))
+                        if (task.peakBps > 0) InfoRow("峰值速度：", Format.speed(task.peakBps))
+                        if (task.elapsedMs > 0) InfoRow("总用时：", Format.duration(task.elapsedMs))
                         if (task.savedName.isNotBlank()) {
                             InfoRow("保存位置：", PublicStorage.locationLabel(LocalContext.current))
                             InfoRow("文件名：", task.savedName)
@@ -1216,10 +1914,14 @@ fun TaskCard(
                     }
                     TaskStatus.QUEUED -> {
                         Text(
-                            "等待前面的任务完成",
+                            if (task.scheduledAt > System.currentTimeMillis())
+                                "预约在 ${Format.clockTime(task.scheduledAt)} 自动开始"
+                            else "等待前面的任务完成",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = WinPalette.GrayText,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                        Spacer(Modifier.height(6.dp))
+                        OutlinedButton(onClick = onJumpQueue) { Text("插队到最前") }
                     }
                 }
                 if (task.chunkSize > 0 && task.totalSize > 0 && task.status != TaskStatus.DONE) {
@@ -1229,20 +1931,43 @@ fun TaskCard(
                         "已完成 ${task.chunkDone.count { it }}/$total 块 · ${task.threads} 线程",
                     )
                 }
+                if (task.retryCount > 0) {
+                    InfoRow("重试次数：", "${task.retryCount} 次（分片级）")
+                }
                 if (task.note.isNotBlank()) {
                     Spacer(Modifier.height(4.dp))
                     Text(
                         task.note,
                         style = MaterialTheme.typography.bodySmall,
-                        color = WinPalette.GrayText,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 if (task.status == TaskStatus.DONE) {
+                    // ---- quick actions (v1.4 item 9) ----
                     Spacer(Modifier.height(6.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = onOpen) { Text("打开") }
-                        OutlinedButton(onClick = onShare) { Text("分享") }
+                        val ext = displayName.substringAfterLast('.', "").lowercase()
+                        if (ext == "apk") {
+                            Button(onClick = onInstall) { Text("安装") }
+                            OutlinedButton(onClick = onOpen) { Text("打开") }
+                        } else if (kind == "video" || kind == "audio") {
+                            Button(onClick = onOpen) { Text("播放") }
+                            OutlinedButton(onClick = onShare) { Text("分享") }
+                        } else {
+                            OutlinedButton(onClick = onOpen) { Text("打开") }
+                            OutlinedButton(onClick = onShare) { Text("分享") }
+                        }
+                        if (ext == "apk") {
+                            OutlinedButton(onClick = onShare) { Text("分享") }
+                        }
                     }
+                }
+                // Rename is only safe before any byte/target exists.
+                if (task.status != TaskStatus.DONE && task.status != TaskStatus.RUNNING &&
+                    task.targetUri.isBlank() && task.downloaded == 0L
+                ) {
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedButton(onClick = onRename) { Text("改保存文件名") }
                 }
             }
 
