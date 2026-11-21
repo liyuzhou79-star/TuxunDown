@@ -4991,6 +4991,19 @@ fun TaskCard(
                         OutlinedButton(onClick = onJumpQueue) { Text("插队到最前") }
                     }
                 }
+                // v2.8: queue pre-check warning (see
+                // LinkPrecheck). Wording matters: this is a
+                // heads-up, NOT a failure — the task will still
+                // start on its turn and re-probe for real.
+                if (task.status == TaskStatus.QUEUED && task.precheckDead) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "预检提示：这个链接可能已失效（服务器说文件不存在）。" +
+                            "轮到它下载时还会再试一次，确认下不了才会判失败。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = WinPalette.Red,
+                    )
+                }
                 if (task.chunkSize > 0 && task.totalSize > 0 && task.status != TaskStatus.DONE) {
                     val total = (task.totalSize + task.chunkSize - 1) / task.chunkSize
                     InfoRow(

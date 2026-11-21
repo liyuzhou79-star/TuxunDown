@@ -58,6 +58,12 @@ class DownloadService : Service() {
     /** v1.5: per-task network-outage recovery attempts spent. */
     private val netAttempts = java.util.concurrent.ConcurrentHashMap<String, Int>()
 
+    /** v2.8: queue link pre-check thread (see LinkPrecheck).
+     *  Runs only while the service lives; the loop is all
+     *  runCatching — a pre-check must never disturb a download. */
+    @Volatile private var precheckRunning = false
+    private var precheckThread: Thread? = null
+
     /** v1.5: fires when connectivity returns; un-parks deferred tasks. */
     private var netCallback: ConnectivityManager.NetworkCallback? = null
 
@@ -98,9 +104,13 @@ class DownloadService : Service() {
             )
         }
         registerNetworkCallback()
+        startPrecheck()
     }
 
     override fun onDestroy() {
+        precheckRunning = false
+        precheckThread?.interrupt()
+        precheckThread = null
         runCatching {
             val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
             netCallback?.let { cm.unregisterNetworkCallback(it) }
@@ -108,6 +118,86 @@ class DownloadService : Service() {
         netCallback = null
         releaseCellular()
         super.onDestroy()
+    }
+
+    // ---- v2.8: queue link pre-check (see LinkPrecheck) ----
+
+    private fun startPrecheck() {
+        if (precheckThread?.isAlive == true) return
+        precheckRunning = true
+        precheckThread = Thread { precheckLoop() }.apply {
+            isDaemon = true
+            name = "link-precheck"
+            start()
+        }
+    }
+
+    /**
+     * One pass every [PRECHECK_INTERVAL_MS]: take the front of
+     * the queue that is due a check, give each ONE light request,
+     * and stamp the record. Only a 404/410 raises the card's
+     * warning flag; any other outcome (alive, refused, server
+     * error, no network) just refreshes the cache stamp — the
+     * flag is a warning, and the task's real start re-probes
+     * for itself regardless.
+     */
+    private fun precheckLoop() {
+        while (precheckRunning) {
+            runCatching {
+                if (!CrashGuard.safeMode) {
+                    val candidates = LinkPrecheck.pickCandidates(
+                        DownloadCenter.store.tasks, System.currentTimeMillis(),
+                    )
+                    var changed = false
+                    for (t in candidates) {
+                        if (!precheckRunning) break
+                        val dead = runCatching { probeLinkDead(t) }
+                            .getOrDefault(false)
+                        if (t.precheckDead != dead) changed = true
+                        t.precheckDead = dead
+                        t.precheckAtMs = System.currentTimeMillis()
+                    }
+                    if (changed) DownloadCenter.store.save()
+                }
+            }
+            try {
+                Thread.sleep(PRECHECK_INTERVAL_MS)
+            } catch (e: InterruptedException) {
+                break
+            }
+        }
+    }
+
+    /** One link, one light request: HEAD, with the 1-byte Range
+     *  GET fallback for servers that refuse HEAD (the LinkRouter
+     *  lesson). Rides the configured proxy and carries the task's
+     *  own session headers, exactly like the real probe will. */
+    private fun probeLinkDead(task: TaskRecord): Boolean {
+        var code = headRequestCode(task, "HEAD")
+        if (code == 405 || code == 501) {
+            code = headRequestCode(task, "GET")
+        }
+        return LinkPrecheck.isDeadCode(code)
+    }
+
+    private fun headRequestCode(task: TaskRecord, method: String): Int {
+        val c = ProxyState.open(java.net.URL(task.url))
+        try {
+            c.connectTimeout = 8_000
+            c.readTimeout = 8_000
+            c.instanceFollowRedirects = true
+            c.requestMethod = method
+            c.setRequestProperty(
+                "User-Agent",
+                UserAgents.resolve(task.headers["User-Agent"], DownloadCenter.userAgent),
+            )
+            task.headers["Cookie"]?.let { c.setRequestProperty("Cookie", it) }
+            task.headers["Referer"]?.let { c.setRequestProperty("Referer", it) }
+            if (method == "GET") c.setRequestProperty("Range", "bytes=0-0")
+            return c.responseCode
+        } finally {
+            runCatching { c.disconnect() }
+        }
     }
 
     /**
@@ -371,6 +461,10 @@ class DownloadService : Service() {
             // below); PAUSED here is the user's intent — honour it.
             if (task.status == TaskStatus.PAUSED) return
             task.status = TaskStatus.RUNNING
+            // v2.8: the real run supersedes any pre-check warning —
+            // the engine's own probe is about to give the true
+            // answer, so the stale flag must not outlive the start.
+            task.precheckDead = false
             // v1.6 dual channel honesty: the card says whether the
             // second network really came up — never fake it.
             if (dualRequested && !task.note.contains("双通道")) {
@@ -1044,5 +1138,7 @@ class DownloadService : Service() {
         // and re-checked in onStartCommand).
         const val ACTION_BOOT_RESUME = "com.tuxundown.android.action.BOOT_RESUME"
         const val EXTRA_TASK_ID = "taskId"
+        /** v2.8: pre-check pass interval (see LinkPrecheck). */
+        private const val PRECHECK_INTERVAL_MS = 30_000L
     }
 }

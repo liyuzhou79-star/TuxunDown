@@ -600,6 +600,9 @@ object DownloadCenter {
     fun enqueue(task: TaskRecord): Boolean {
         task.autoRetriesUsed = 0
         task.netDeferred = false // v1.5: user action always wins over the outage park
+        // v2.8: a manual （重新）排队 also retires a stale pre-check
+        // warning — the user has decided to try this link again.
+        task.precheckDead = false
         // v1.4: pressing 继续 on a paused task while on mobile data,
         // when the traffic guard would block it, IS the user's
         // explicit confirmation for this one task.

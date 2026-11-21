@@ -128,6 +128,15 @@ class TaskRecord(
     /** v1.5: parked by the service after a network-outage failure;
      *  the queue skips it until connectivity returns (see NetRetry). */
     @Transient var netDeferred: Boolean = false,
+    /** v2.8: queue pre-check (see LinkPrecheck) — the service's
+     *  background HEAD check found this QUEUED task's link
+     *  already dead (404/410). A warning on the card, never a
+     *  verdict: the task still starts on its turn and the
+     *  engine's real probe decides. Transient on purpose: the
+     *  check is cheap and re-runs after a restart. */
+    @Transient var precheckDead: Boolean = false,
+    /** v2.8: when the pre-check last looked (its cache stamp). */
+    @Transient var precheckAtMs: Long = 0,
     @Transient var speedBps: Long = 0,
     @Transient var peakBps: Long = 0,
     @Transient val speedHistory: MutableList<Long> = mutableListOf(),
