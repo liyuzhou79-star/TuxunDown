@@ -96,6 +96,7 @@ import androidx.documentfile.provider.DocumentFile
 import com.tuxundown.android.core.Backup
 import com.tuxundown.android.core.Checksum
 import com.tuxundown.android.core.CrashGuard
+import com.tuxundown.android.core.Errors
 import com.tuxundown.android.core.ChecksumVerifier
 import com.tuxundown.android.core.DownloadCenter
 import com.tuxundown.android.core.DownloadedFiles
@@ -694,7 +695,7 @@ fun DownApp() {
         message = ""
         Thread {
             val result = runCatching { Sniffer().sniff(u) }
-                .getOrElse { SniffResult.Failure(it.message ?: "嗅探失败") }
+                .getOrElse { SniffResult.Failure(Errors.human(it)) }
             activity.runOnUiThread {
                 sniffing = false
                 handleSniffResult(result, u)

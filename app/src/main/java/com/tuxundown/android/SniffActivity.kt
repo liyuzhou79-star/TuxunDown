@@ -19,6 +19,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import com.tuxundown.android.core.DownloadCenter
+import com.tuxundown.android.core.Errors
 import com.tuxundown.android.core.TaskRecord
 import com.tuxundown.android.core.TaskStatus
 import com.tuxundown.android.sniff.SniffResult
@@ -258,7 +259,7 @@ class SniffActivity : Activity() {
         Toast.makeText(this, "正在嗅探当前页…", Toast.LENGTH_SHORT).show()
         Thread {
             val result = runCatching { Sniffer().sniff(pageUrl) }
-                .getOrElse { SniffResult.Failure(it.message ?: "嗅探失败") }
+                .getOrElse { SniffResult.Failure(Errors.human(it)) }
             runOnUiThread {
                 // v1.9 audit: the user may have backed out while
                 // the sniff was running — popping a dialog on a

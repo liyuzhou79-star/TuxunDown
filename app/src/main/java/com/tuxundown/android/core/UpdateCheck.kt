@@ -127,10 +127,8 @@ object UpdateCheck {
             conn.setRequestProperty("User-Agent", "TuxunDown")
             val code = conn.responseCode
             if (code !in 200..299) {
-                return Result.Failed(
-                    "没查到更新：GitHub 返回了 HTTP $code。" +
-                        "可能是网络不通或查询太频繁，稍后再试一次。"
-                )
+                // v2.2 audit round 8: shared HTTP wording.
+                return Result.Failed("没查到更新：${Errors.httpMessage(code)}")
             }
             val body = conn.inputStream.use { input ->
                 val out = java.io.ByteArrayOutputStream()
@@ -155,10 +153,7 @@ object UpdateCheck {
                     "没查到更新：${ProxySettings.unreachableMessage(ProxyState.settings, e)}"
                 )
             } else {
-                Result.Failed(
-                    "没查到更新：网络好像不通（${e.message ?: "连接失败"}），" +
-                        "连上网后再试一次。"
-                )
+                Result.Failed("没查到更新：${Errors.human(e)}")
             }
         } finally {
             runCatching { conn?.disconnect() }

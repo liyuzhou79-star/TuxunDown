@@ -243,7 +243,10 @@ class DownloadEngine(
                 runCatching { target.close() }
             }
         } catch (e: Exception) {
-            task.error = e.message ?: e.javaClass.simpleName
+            // v2.2 audit round 8: never show a raw class name or an
+            // English library message on the card — Errors.human
+            // keeps our own plain sentences and maps the rest.
+            task.error = Errors.human(e)
             task.status = if (paused) TaskStatus.PAUSED else TaskStatus.FAILED
             return task.status
         } finally {
@@ -386,7 +389,7 @@ class DownloadEngine(
                 val loc = c.getHeaderField("Location")
                 c.disconnect()
                 if (loc.isNullOrBlank()) {
-                    throw IllegalStateException("服务器跳转但没给地址（HTTP $code）")
+                    throw IllegalStateException("服务器跳转但没给新地址，已停下")
                 }
                 current = runCatching { URL(URL(current), loc).toString() }
                     .getOrElse { throw IllegalStateException("服务器给的跳转地址无效") }
@@ -929,7 +932,7 @@ class DownloadEngine(
                     break
                 }
                 if (attempt >= 3) {
-                    task.error = e.message ?: "分片下载失败"
+                    task.error = Errors.human(e)
                 }
                 try { Thread.sleep(500L * attempt) } catch (_: InterruptedException) { }
             }
@@ -971,7 +974,7 @@ class DownloadEngine(
         }
         if (code != HttpURLConnection.HTTP_PARTIAL) {
             c.disconnect()
-            throw IllegalStateException("分片请求返回 HTTP $code")
+            throw IllegalStateException(Errors.httpMessage(code))
         }
         // A redirect chain that lands on a different byte range than
         // asked would corrupt the file; Content-Range must match.
@@ -1544,7 +1547,7 @@ class DownloadEngine(
             val c = openFollowingRedirects(task.url) { }
             val code = c.responseCode
             if (code != HttpURLConnection.HTTP_OK && code != HttpURLConnection.HTTP_PARTIAL) {
-                throw IllegalStateException("服务器返回 HTTP $code")
+                throw IllegalStateException(Errors.httpMessage(code))
             }
             if (task.totalSize <= 0) task.totalSize = c.contentLengthLong
             c.inputStream.use { input ->

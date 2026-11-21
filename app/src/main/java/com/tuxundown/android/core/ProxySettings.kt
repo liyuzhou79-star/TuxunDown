@@ -75,11 +75,14 @@ data class ProxySettings(
             return null
         }
 
-        /** The one and only wording for "the proxy is down". */
+        /** The one and only wording for "the proxy is down".
+         *  v2.2 audit round 8: the cause is appended through
+         *  [Errors.human] — never the raw (often English,
+         *  sometimes class-name-only) library message. */
         fun unreachableMessage(s: ProxySettings, cause: Throwable): String =
             "代理服务器连不上（${s.typeLabel()} ${s.label()}），已停下，没有改走直连。" +
                 "请检查代理地址和端口，或在设置里先关掉代理。" +
-                (cause.message?.let { "（$it）" } ?: "")
+                "（原因：${Errors.human(cause)}）"
     }
 }
 

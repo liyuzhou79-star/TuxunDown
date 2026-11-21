@@ -1,6 +1,7 @@
 package com.tuxundown.android.sniff
 
 import com.tuxundown.android.core.DownloadEngine
+import com.tuxundown.android.core.Errors
 import com.tuxundown.android.core.ProxySettings
 import com.tuxundown.android.core.ProxyState
 import java.io.ByteArrayOutputStream
@@ -93,13 +94,9 @@ object LinkRouter {
         throw IllegalStateException("服务器没有回应链接类型，请改用内置浏览器打开")
     }
 
-    fun httpReason(code: Int): String = when (code) {
-        401, 403 -> "服务器拒绝访问（HTTP $code），可能需要登录或从浏览器里抓链接，可以试试内置浏览器打开后手动点下载"
-        404 -> "链接不存在了（HTTP 404）"
-        429 -> "服务器限流了（HTTP 429），过一会儿再试"
-        in 500..599 -> "服务器出错（HTTP $code），过一会儿再试"
-        else -> "服务器返回 HTTP $code"
-    }
+    /** v2.2 audit round 8: one shared wording with the engine —
+     *  see [Errors.httpMessage]; the number never stands alone. */
+    fun httpReason(code: Int): String = Errors.httpMessage(code)
 }
 
 /** Layer 1: pure HTML parsing (unit-testable, no network). */
@@ -288,7 +285,7 @@ class Sniffer(private val userAgent: String = DownloadEngine.DEFAULT_UA) {
             if (code in 301..308 && code != 304 && code != 306) {
                 val loc = c.getHeaderField("Location")
                 c.disconnect()
-                if (loc.isNullOrBlank()) throw IllegalStateException("服务器跳转但没给地址（HTTP $code）")
+                if (loc.isNullOrBlank()) throw IllegalStateException("服务器跳转但没给新地址，已停下")
                 current = SniffParser.resolve(current, loc)
                     ?: throw IllegalStateException("服务器给的跳转地址无效")
                 return@repeat // next hop
@@ -368,7 +365,7 @@ class Sniffer(private val userAgent: String = DownloadEngine.DEFAULT_UA) {
                 return if (ps.active && e is java.io.IOException) {
                     SniffResult.Failure(ProxySettings.unreachableMessage(ps, e))
                 } else {
-                    SniffResult.Failure("打开页面失败：${e.message ?: "网络错误"}")
+                    SniffResult.Failure("打开页面失败：${Errors.human(e)}")
                 }
             }
             if (f.isFile) {

@@ -620,7 +620,7 @@ class DownloadService : Service() {
             // default OFF; see runCompletionAction).
             runCompletionAction(task)
         } catch (e: Exception) {
-            task.note = "下载完成，但改名失败（${e.message ?: "未知错误"}），" +
+            task.note = "下载完成，但改名失败（${Errors.human(e)}），" +
                 "文件在下载目录里，名字带 .part 后缀，去掉后缀即可使用。"
             notifyAggregate()
         }
