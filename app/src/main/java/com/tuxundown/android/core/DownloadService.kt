@@ -76,6 +76,10 @@ class DownloadService : Service() {
         // process entry (idempotent — see CrashGuard.install).
         CrashGuard.install(this)
         DownloadCenter.init(this)
+        // v2.5: fallback trigger for the deferred startup work
+        // when the process was started by the service rather
+        // than the UI (one-shot inside; the UI path is primary).
+        DownloadCenter.runDeferredStartup()
         // v1.5 startup audit: channel creation is idempotent, but a
         // ROM quirk here must never take the whole service down.
         runCatching {

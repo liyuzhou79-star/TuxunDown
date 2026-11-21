@@ -481,10 +481,46 @@ object DownloadCenter {
         appContext = context.applicationContext
         store = TaskStore(context.applicationContext)
         store.load()
-        // v2.4: fold long-finished records into the archive once
-        // per launch (cheap; a no-op when the setting is off).
-        runCatching { applyArchiveSweep() }
         syncProxyState()
+    }
+
+    private val deferredStartupRan =
+        java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * v2.5 cold-start round 2: work the FIRST FRAME does not
+     * need, run once per process on a daemon thread after the
+     * UI is up (MainActivity calls this from a LaunchedEffect;
+     * the service calls it on create as a fallback for
+     * service-first process starts). Today the bucket holds
+     * only the archive sweep (v2.4 put it in init: it walks
+     * every record and may rewrite tasks.json — real work on
+     * the launch path for zero first-frame benefit).
+     *
+     * What deliberately stays synchronous in init, and why:
+     * store.load() IS the first frame (the home screen is the
+     * task list), and syncProxyState is six pref reads feeding
+     * a volatile mirror the engine reads at download start.
+     * Everything else was already lazy before this round —
+     * stats counters, the per-host thread memory and the
+     * sniff history are parsed on first USE, never at launch;
+     * the clipboard read has been post-first-frame since v1.3.
+     *
+     * CrashGuard alignment: in safe mode the deferred bucket
+     * is SKIPPED for the launch (and the one-shot is spent) —
+     * the rescue path runs the minimum possible, and by
+     * construction nothing in the bucket is ever essential.
+     */
+    fun runDeferredStartup() {
+        if (!deferredStartupRan.compareAndSet(false, true)) return
+        if (CrashGuard.safeMode) return
+        Thread {
+            runCatching { applyArchiveSweep() }
+        }.apply {
+            isDaemon = true
+            name = "deferred-startup"
+            start()
+        }
     }
 
     fun isOnWifi(): Boolean {

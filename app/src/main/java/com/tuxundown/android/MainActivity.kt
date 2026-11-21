@@ -449,6 +449,14 @@ fun DownApp() {
     }
     var clipboardLink by remember { mutableStateOf("") }
 
+    // v2.5 cold-start round 2: non-first-frame startup work
+    // (today: the archive sweep) runs AFTER the first frame —
+    // see DownloadCenter.runDeferredStartup. Safe mode skips
+    // it inside, aligned with the guide/clipboard skips below.
+    LaunchedEffect(Unit) {
+        DownloadCenter.runDeferredStartup()
+    }
+
     // Clipboard prompt: if the clipboard holds a link we have not
     // asked about yet, offer a one-tap task when the app opens.
     LaunchedEffect(Unit) {
