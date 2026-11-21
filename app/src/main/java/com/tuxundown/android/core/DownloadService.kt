@@ -143,6 +143,32 @@ class DownloadService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // v1.8: notification action buttons land here. Pause goes
+        // through DownloadCenter like a card tap; cancel mirrors
+        // the card's delete (a RUNNING task is cancelled through
+        // the engine-owner flow so the file is deleted only after
+        // the engine has fully stopped; anything else is removed
+        // directly, keeping the finished file for DONE tasks).
+        when (intent?.action) {
+            ACTION_PAUSE -> intent.getStringExtra(EXTRA_TASK_ID)?.let { id ->
+                DownloadCenter.store.byId(id)?.let { DownloadCenter.pauseTask(it) }
+            }
+            ACTION_CANCEL -> intent.getStringExtra(EXTRA_TASK_ID)?.let { id ->
+                val t = DownloadCenter.store.byId(id)
+                if (t != null) {
+                    if (t.status == TaskStatus.RUNNING) {
+                        DownloadCenter.cancelTask(t)
+                    } else {
+                        Thread {
+                            if (t.status != TaskStatus.DONE) {
+                                PublicStorage.deleteTarget(this, t)
+                            }
+                            DownloadCenter.store.remove(t)
+                        }.start()
+                    }
+                }
+            }
+        }
         startForeground(NOTIF_ID, buildNotification("准备下载…", "", 0))
         if (worker?.isAlive != true) {
             worker = Thread { drainQueue() }.apply { isDaemon = true; start() }
@@ -500,38 +526,96 @@ class DownloadService : Service() {
                 if (eta > 0) append(" · 还剩 ${Format.eta(eta)}")
                 append(" · 已完成 ${(running.progress * 100).toInt()}%")
             }
-            notifyUpdate("正在下载 · ${running.fileName}", text, (running.progress * 100).toInt())
+            // v1.8: a single running task earns pause/cancel
+            // buttons right on the notification.
+            notifyUpdate(
+                "正在下载 · ${running.fileName}", text,
+                (running.progress * 100).toInt(),
+                actionTask = running,
+            )
         } else {
             val text = buildString {
                 append("总速度 ${Format.speed(totalSpeed)}")
                 append(" · 已完成 $totalPct%")
             }
-            notifyUpdate("正在下载 ${active.size} 个任务", text, totalPct)
+            // v1.8: several tasks — the expanded notification
+            // lists each one's own progress instead of buttons
+            // that could only ever name one of them.
+            val lines = active.take(5).joinToString("\n") { t ->
+                val name = t.fileName.ifBlank { t.url }
+                val pct = (t.progress * 100).toInt()
+                if (t.status == TaskStatus.RUNNING) {
+                    "$name · $pct% · ${Format.speed(t.speedBps)}"
+                } else {
+                    "$name · $pct% · 排队中"
+                }
+            } + if (active.size > 5) "\n…还有 ${active.size - 5} 个任务" else ""
+            notifyUpdate("正在下载 ${active.size} 个任务", text, totalPct, bigText = lines)
         }
     }
 
-    private fun buildNotification(title: String, text: String, pct: Int): Notification {
+    private fun buildNotification(
+        title: String,
+        text: String,
+        pct: Int,
+        actionTask: TaskRecord? = null,
+        bigText: String? = null,
+    ): Notification {
         val pi = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        return NotificationCompat.Builder(this, CHANNEL)
+        val b = NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle(title)
             .setContentText(text)
             .setContentIntent(pi)
             .setOngoing(true)
             .setProgress(100, pct, false)
-            .build()
+        if (bigText != null) {
+            b.setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
+        }
+        if (actionTask != null) {
+            b.addAction(
+                android.R.drawable.ic_media_pause, "暂停",
+                actionPendingIntent(ACTION_PAUSE, actionTask.id, 1),
+            )
+            b.addAction(
+                android.R.drawable.ic_menu_close_clear_cancel, "取消",
+                actionPendingIntent(ACTION_CANCEL, actionTask.id, 2),
+            )
+        }
+        return b.build()
     }
 
-    private fun notifyUpdate(title: String, text: String, pct: Int) {
+    /** v1.8: a service PendingIntent carrying one notification action. */
+    private fun actionPendingIntent(action: String, taskId: String, code: Int): PendingIntent {
+        val intent = Intent(this, DownloadService::class.java)
+            .setAction(action)
+            .putExtra(EXTRA_TASK_ID, taskId)
+        return PendingIntent.getService(
+            this, code * 31 + taskId.hashCode(), intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
+    private fun notifyUpdate(
+        title: String,
+        text: String,
+        pct: Int,
+        actionTask: TaskRecord? = null,
+        bigText: String? = null,
+    ) {
         getSystemService(NotificationManager::class.java)
-            .notify(NOTIF_ID, buildNotification(title, text, pct))
+            .notify(NOTIF_ID, buildNotification(title, text, pct, actionTask, bigText))
     }
 
     companion object {
         private const val CHANNEL = "downloads"
         private const val NOTIF_ID = 1
+        // v1.8: notification action buttons.
+        const val ACTION_PAUSE = "com.tuxundown.android.action.PAUSE_TASK"
+        const val ACTION_CANCEL = "com.tuxundown.android.action.CANCEL_TASK"
+        const val EXTRA_TASK_ID = "taskId"
     }
 }

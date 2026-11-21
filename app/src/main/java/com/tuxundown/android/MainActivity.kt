@@ -10,6 +10,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -21,6 +22,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -32,6 +34,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -56,6 +59,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -68,9 +72,11 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
@@ -91,7 +97,9 @@ import com.tuxundown.android.sniff.SniffSort
 import com.tuxundown.android.sniff.SniffedResource
 import com.tuxundown.android.sniff.Sniffer
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.io.File
+import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
 
@@ -253,6 +261,11 @@ fun DownApp(sharedUrl: String) {
     // ---- rename dialog (v1.4 item 18) ----
     var renameTask by remember { mutableStateOf<TaskRecord?>(null) }
     var renameText by remember { mutableStateOf("") }
+
+    // ---- v1.8: swipe-right delete asks first (the X button keeps
+    // its old immediate behaviour; a swipe is easier to trigger by
+    // accident, so it earns a confirmation). ----
+    var swipeDeleteTask by remember { mutableStateOf<TaskRecord?>(null) }
 
     // ---- v1.3 state: onboarding guide, clipboard prompt ----
     val appVersion = remember {
@@ -640,6 +653,7 @@ fun DownApp(sharedUrl: String) {
             onInstall = { installApk(task) },
             onShare = { shareFile(task) },
             onDelete = { deleteTask(task) },
+            onSwipeDelete = { swipeDeleteTask = task },
             onJumpQueue = {
                 if (DownloadCenter.moveToFrontOfQueue(task)) {
                     Toast.makeText(context, "已插队到队列最前", Toast.LENGTH_SHORT).show()
@@ -1303,6 +1317,37 @@ fun DownApp(sharedUrl: String) {
             },
             dismissButton = {
                 TextButton(onClick = { renameTask = null }) { Text("取消") }
+            },
+        )
+    }
+
+    // ---- v1.8: swipe-delete confirmation ----
+    if (swipeDeleteTask != null) {
+        val dt = swipeDeleteTask!!
+        AlertDialog(
+            onDismissRequest = { swipeDeleteTask = null },
+            title = { Text("删除这个任务？") },
+            text = {
+                Text(
+                    when (dt.status) {
+                        TaskStatus.RUNNING ->
+                            "它正在下载：会先停下再删除，下载目录里没下完的半成品文件也会一起删掉。"
+                        TaskStatus.DONE ->
+                            "只删任务记录；已经下好的文件会保留在下载目录里，不受影响。"
+                        else ->
+                            "任务记录和没下完的半成品文件都会一起删掉，删了不能恢复。"
+                    }
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    swipeDeleteTask = null
+                    selectedIds = selectedIds - dt.id
+                    deleteTask(dt)
+                }) { Text("删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { swipeDeleteTask = null }) { Text("取消") }
             },
         )
     }
@@ -2372,6 +2417,7 @@ fun TaskCard(
     onInstall: () -> Unit,
     onShare: () -> Unit,
     onDelete: () -> Unit,
+    onSwipeDelete: () -> Unit,
     onJumpQueue: () -> Unit,
     onRename: () -> Unit,
     onSources: () -> Unit,
@@ -2390,9 +2436,94 @@ fun TaskCard(
     }
     val displayName = task.fileName.ifBlank { task.url }
     val kind = kindOfName(task.savedName.ifBlank { task.fileName })
+
+    // ---- v1.8 swipe gestures: slide LEFT = pause/resume, slide
+    // RIGHT = delete (the caller confirms first). Raw horizontal
+    // drag + an offset Animatable — no new dependency. The action
+    // layer sits BEHIND the card and is revealed as it slides.
+    // Long-press multi-select is untouched (a press without
+    // horizontal movement never becomes a drag), and while
+    // selecting, swipes are off entirely. ----
+    val swipeScope = rememberCoroutineScope()
+    val swipeOffset = remember(task.id) { Animatable(0f) }
+    val canPauseResume = task.status == TaskStatus.RUNNING ||
+        task.status == TaskStatus.QUEUED ||
+        task.status == TaskStatus.PAUSED ||
+        task.status == TaskStatus.FAILED
+    val swipeLabel = when (task.status) {
+        TaskStatus.RUNNING, TaskStatus.QUEUED -> "暂停"
+        TaskStatus.PAUSED, TaskStatus.FAILED -> "继续"
+        else -> ""
+    }
+    Box(Modifier.fillMaxWidth()) {
+        Box(
+            Modifier
+                .matchParentSize()
+                .clip(RoundedCornerShape(12.dp))
+                .background(
+                    when {
+                        swipeOffset.value > 8f -> WinPalette.Red
+                        swipeOffset.value < -8f && swipeLabel == "暂停" -> WinPalette.Yellow
+                        swipeOffset.value < -8f && swipeLabel.isNotBlank() -> WinPalette.Green
+                        else -> Color.Transparent
+                    }
+                ),
+        ) {
+            if (swipeOffset.value > 8f) {
+                Text(
+                    "松开删除",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.align(Alignment.CenterStart).padding(start = 18.dp),
+                )
+            } else if (swipeOffset.value < -8f && swipeLabel.isNotBlank()) {
+                Text(
+                    "松开$swipeLabel",
+                    color = if (swipeLabel == "暂停") Color.Black else Color.White,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.align(Alignment.CenterEnd).padding(end = 18.dp),
+                )
+            }
+        }
     Card(
         Modifier
             .fillMaxWidth()
+            .offset { IntOffset(swipeOffset.value.roundToInt(), 0) }
+            .then(
+                if (selecting) Modifier else Modifier.pointerInput(task.id, task.status) {
+                    val threshold = 100.dp.toPx()
+                    detectHorizontalDragGestures(
+                        onHorizontalDrag = { change, dragAmount ->
+                            change.consume()
+                            val maxDrag = size.width * 0.45f
+                            val minDrag = if (canPauseResume) -maxDrag else 0f
+                            val target = (swipeOffset.value + dragAmount)
+                                .coerceIn(minDrag, maxDrag)
+                            swipeScope.launch { swipeOffset.snapTo(target) }
+                        },
+                        onDragEnd = {
+                            swipeScope.launch {
+                                when {
+                                    swipeOffset.value > threshold -> {
+                                        swipeOffset.animateTo(0f)
+                                        onSwipeDelete()
+                                    }
+                                    swipeOffset.value < -threshold && canPauseResume -> {
+                                        swipeOffset.animateTo(0f)
+                                        if (task.status == TaskStatus.RUNNING ||
+                                            task.status == TaskStatus.QUEUED
+                                        ) onPause() else onResume()
+                                    }
+                                    else -> swipeOffset.animateTo(0f)
+                                }
+                            }
+                        },
+                        onDragCancel = {
+                            swipeScope.launch { swipeOffset.animateTo(0f) }
+                        },
+                    )
+                }
+            )
             .combinedClickable(
                 onClick = { if (selecting) onToggleSelect() },
                 onLongClick = { onToggleSelect() },
@@ -2678,6 +2809,7 @@ fun TaskCard(
             }
         }
     }
+    } // v1.8: swipe Box
 }
 
 /**
