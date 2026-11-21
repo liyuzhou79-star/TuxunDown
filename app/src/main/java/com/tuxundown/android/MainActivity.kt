@@ -104,6 +104,7 @@ import com.tuxundown.android.core.DownloadedFiles
 import com.tuxundown.android.core.Format
 import com.tuxundown.android.core.FtpClient
 import com.tuxundown.android.core.LinkExtract
+import com.tuxundown.android.core.ThunderLink
 import com.tuxundown.android.core.ProxySettings
 import com.tuxundown.android.core.PublicStorage
 import com.tuxundown.android.core.ScheduleTime
@@ -452,7 +453,12 @@ fun DownApp() {
                 val text = clip.getItemAt(0).coerceToText(context)?.toString() ?: ""
                 // v2.1: same extractor as the add dialog (adds
                 // ftp:// and proper CJK punctuation handling).
+                // v2.5: a clipboard holding only a thunder://
+                // envelope extracts to nothing above — decode it
+                // as the fallback so the prompt still offers it
+                // (the prompt then shows the REAL address).
                 val url = LinkExtract.extract(text).firstOrNull()
+                    ?: ThunderLink.findDecoded(text).firstOrNull()
                 if (!url.isNullOrBlank() && url != DownloadCenter.clipboardPrompted &&
                     store.tasks.none { it.url == url }
                 ) {
@@ -713,10 +719,31 @@ fun DownApp() {
      * task, a page with many resources is counted as skipped.
      */
     fun startBatch(raw: String) {
-        // v1.7: ftp:// lines are batch-eligible too (direct tasks).
-        val lines = raw.lines().map { it.trim() }
+        // v2.5: a thunder:// line decodes to its real address
+        // first; an undecodable one is counted and named in the
+        // final toast, never silently dropped.
+        var thunderFailed = 0
+        val lines = raw.lines().map { it.trim() }.mapNotNull { line ->
+            if (ThunderLink.isThunderLink(line)) {
+                val d = ThunderLink.decode(line)
+                if (d == null) thunderFailed++
+                d
+            } else {
+                line
+            }
+        }
+            // v1.7: ftp:// lines are batch-eligible too (direct tasks).
             .filter { it.startsWith("http") || FtpClient.isFtpUrl(it) }
-        if (lines.isEmpty()) return
+        if (lines.isEmpty()) {
+            if (thunderFailed > 0) {
+                Toast.makeText(
+                    context,
+                    "迅雷链接解不开（里面的地址不完整或已损坏）",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+            return
+        }
         // v1.8: batch creation is always immediate — a daily slot
         // computed for a single task must not leak into the batch.
         if (scheduleMode == 1) pendingScheduleAt = 0L
@@ -752,7 +779,8 @@ fun DownApp() {
                 Toast.makeText(
                     context,
                     "批量完成：新建 $created 个任务" +
-                        if (skipped > 0) "，跳过 $skipped 个（重复或网页资源需单独选）" else "",
+                        (if (skipped > 0) "，跳过 $skipped 个（重复或网页资源需单独选）" else "") +
+                        (if (thunderFailed > 0) "，$thunderFailed 个迅雷链接解不开" else ""),
                     Toast.LENGTH_LONG,
                 ).show()
             }
@@ -762,6 +790,27 @@ fun DownApp() {
     fun startSmart(raw: String) {
         var u = raw.trim()
         if (u.isBlank() || sniffing) return
+        // v2.5: thunder:// links are envelopes, not addresses —
+        // decode them back to the real address IN PLACE first,
+        // so every path below (single, batch, probe, sniff)
+        // sees ordinary links. A paste whose thunder links ALL
+        // fail to decode says so plainly instead of sniffing
+        // the envelope.
+        if (ThunderLink.containsToken(u)) {
+            val prep = ThunderLink.replaceTokens(u)
+            if (prep.decoded == 0) {
+                message = "这个迅雷链接解不开（里面的地址不完整或已损坏），换一个链接试试。"
+                return
+            }
+            if (prep.failed > 0) {
+                Toast.makeText(
+                    context,
+                    "有 ${prep.failed} 个迅雷链接解不开，已跳过",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+            u = prep.text.trim()
+        }
         // v2.1: arbitrary text — a paragraph shared from a chat
         // app, a forum post — can carry the link(s) inside prose.
         // Extract first (LinkExtract): several links go down the
@@ -874,11 +923,16 @@ fun DownApp() {
                         ).show()
                         else -> {
                             val lineLinks = text.lines().map { it.trim() }.filter {
-                                it.startsWith("http") || FtpClient.isFtpUrl(it)
+                                it.startsWith("http") || FtpClient.isFtpUrl(it) ||
+                                    ThunderLink.isThunderLink(it)
                             }
                             val effective = when {
                                 lineLinks.isNotEmpty() -> text
-                                else -> LinkExtract.extract(text).joinToString("\n")
+                                // v2.5: prose fallback also decodes
+                                // thunder envelopes buried in text.
+                                else -> (LinkExtract.extract(text) +
+                                    ThunderLink.findDecoded(text))
+                                    .distinct().joinToString("\n")
                             }
                             if (effective.isBlank()) {
                                 Toast.makeText(
@@ -1641,7 +1695,10 @@ fun DownApp() {
                     Spacer(Modifier.height(4.dp))
                     TextButton(
                         onClick = {
-                            val u = urlText.trim()
+                            // v2.5: the browser can only open a real
+                            // address — decode a thunder envelope.
+                            val rawU = urlText.trim()
+                            val u = ThunderLink.decode(rawU) ?: rawU
                             if (u.isNotBlank() && !sniffing) {
                                 context.startActivity(
                                     Intent(context, SniffActivity::class.java)

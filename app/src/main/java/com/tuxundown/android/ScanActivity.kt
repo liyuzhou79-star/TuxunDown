@@ -22,6 +22,7 @@ import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.qrcode.QRCodeReader
 import com.tuxundown.android.core.DownloadCenter
 import com.tuxundown.android.core.TaskStatus
+import com.tuxundown.android.core.ThunderLink
 
 /**
  * QR scan-to-add (v1.6): point the camera at a QR code, or pick a
@@ -287,8 +288,12 @@ class ScanActivity : Activity() {
 
     private fun onDecoded(raw: String) {
         if (finished) return
-        val url = Regex("https?://\\S+").find(raw.trim())?.value
-            ?.trimEnd('.', ',', '，', '。', '"', '\'')
+        // v2.5: a QR code holding a thunder:// envelope decodes
+        // to the real address first (the https? pattern below
+        // cannot see inside the envelope).
+        val url = ThunderLink.findDecoded(raw).firstOrNull()
+            ?: Regex("https?://\\S+").find(raw.trim())?.value
+                ?.trimEnd('.', ',', '，', '。', '"', '\'')
         if (url.isNullOrBlank()) {
             Toast.makeText(
                 this, "二维码里不是链接：${raw.take(40)}", Toast.LENGTH_LONG
