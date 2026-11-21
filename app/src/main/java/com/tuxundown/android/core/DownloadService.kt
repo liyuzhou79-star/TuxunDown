@@ -927,9 +927,12 @@ class DownloadService : Service() {
         val active = store.tasks.filter {
             it.status == TaskStatus.RUNNING || it.status == TaskStatus.QUEUED
         }
-        val totalAll = active.filter { it.totalSize > 0 }.sumOf { it.totalSize }
-        val doneAll = active.filter { it.totalSize > 0 }.sumOf { it.downloaded }
-        val totalPct = if (totalAll > 0) (doneAll * 100 / totalAll).toInt() else 0
+        // v2.6 audit round 12: the headline numbers (count +
+        // total %) come from WidgetState — the ONE aggregation
+        // the widget and the home summary card also use — so
+        // the three surfaces cannot drift apart arithmetically.
+        val agg = WidgetState.summary(store.tasks)
+        val totalPct = agg.totalPct
         val totalSpeed = runningTasks.sumOf { it.speedBps }
         if (runningTasks.size == 1 && active.size == 1) {
             val running = runningTasks.first()
@@ -963,7 +966,7 @@ class DownloadService : Service() {
                     "$name · $pct% · 排队中"
                 }
             } + if (active.size > 5) "\n…还有 ${active.size - 5} 个任务" else ""
-            notifyUpdate("正在下载 ${active.size} 个任务", text, totalPct, bigText = lines)
+            notifyUpdate("正在下载 ${agg.activeCount} 个任务", text, totalPct, bigText = lines)
         }
     }
 

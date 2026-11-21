@@ -115,6 +115,7 @@ import com.tuxundown.android.core.TaskRecord
 import com.tuxundown.android.core.TaskStatus
 import com.tuxundown.android.core.UpdateCheck
 import com.tuxundown.android.core.UserAgents
+import com.tuxundown.android.core.WidgetState
 import com.tuxundown.android.sniff.LinkRouter
 import com.tuxundown.android.sniff.SizeProbe
 import com.tuxundown.android.sniff.SniffFilter
@@ -4173,13 +4174,18 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
 }
 
 /** Aggregate card shown while several tasks are active, like the
- *  Windows multi-file transfer summary. */
+ *  Windows multi-file transfer summary.
+ *  v2.6 audit round 12: the numbers come from WidgetState — the
+ *  same aggregation the notification and the widget use. This
+ *  card used to redo the math in Float, whose precision on
+ *  large files could put its percent one point off the other
+ *  two surfaces; now all three print the identical number. */
 @androidx.compose.runtime.Composable
 fun SummaryCard(active: List<TaskRecord>) {
-    val withSize = active.filter { it.totalSize > 0 }
-    val totalSize = withSize.sumOf { it.totalSize }
-    val totalDone = withSize.sumOf { it.downloaded }
-    val totalProgress = if (totalSize > 0) (totalDone.toFloat() / totalSize).coerceIn(0f, 1f) else 0f
+    val agg = WidgetState.summary(active)
+    val totalSize = agg.totalBytes
+    val totalDone = agg.doneBytes
+    val totalProgress = agg.totalPct / 100f
     val totalSpeed = active.filter { it.status == TaskStatus.RUNNING }.sumOf { it.speedBps }
     Card(
         Modifier.fillMaxWidth(),
@@ -4197,7 +4203,9 @@ fun SummaryCard(active: List<TaskRecord>) {
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    "已完成 ${Format.percent(totalProgress)}%",
+                    // The integer percent itself — never a Float
+                    // round-trip of it (0.29f × 100 truncates to 28).
+                    "已完成 ${agg.totalPct}%",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
