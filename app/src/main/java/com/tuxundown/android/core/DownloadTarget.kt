@@ -72,7 +72,10 @@ class PfdTarget(private val pfd: ParcelFileDescriptor) : DownloadTarget {
     override fun size(): Long = Os.fstat(fd).st_size
 
     override fun sync() {
-        Os.fsync(fd)
+        // FileDescriptor.sync(): the plain-Java fsync, available on
+        // every API level we support (Os.fsync is not in the SDK
+        // stubs for all of them).
+        fd.sync()
     }
 
     override fun close() {

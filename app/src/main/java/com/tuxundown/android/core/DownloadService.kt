@@ -197,7 +197,10 @@ class DownloadService : Service() {
                     store.save()
                     break
                 }
-                val th = Thread { runOne(task) }
+                val th = Thread {
+                    runOne(task)
+                    rescheduleDailyIfNeeded(task)
+                }
                 th.isDaemon = true
                 running[task.id] = th
                 th.start()
@@ -421,6 +424,51 @@ class DownloadService : Service() {
             task.status = TaskStatus.QUEUED
             task.error = ""
         }
+    }
+
+    /**
+     * v1.8: a daily-scheduled task that reached a terminal state
+     * (DONE, or FAILED after its retries ran out) re-queues itself
+     * for the same wall-clock time on the next day instead of
+     * ending. A PAUSED task is left alone — the user stopped it on
+     * purpose. The byte state is fully reset: tomorrow's run is a
+     * FRESH download of whatever the URL serves then (validators
+     * cleared, target cleared so the finished file is never
+     * reopened — the new copy lands as a "name (1)" sibling at
+     * finalize, like any same-name download).
+     */
+    private fun rescheduleDailyIfNeeded(task: TaskRecord) {
+        if (!task.scheduleDaily) return
+        if (task.status != TaskStatus.DONE && task.status != TaskStatus.FAILED) return
+        val store = DownloadCenter.store
+        if (store.byId(task.id) == null) return // deleted meanwhile
+        val next = ScheduleTime.advanceDaily(
+            task.scheduledAt, System.currentTimeMillis()
+        )
+        task.chunkDone = BooleanArray(0)
+        task.chunkSize = 0
+        task.downloaded = 0
+        task.totalSize = -1
+        task.etag = ""
+        task.lastModified = ""
+        task.targetUri = ""
+        task.savedUri = ""
+        task.savedName = ""
+        task.speedBps = 0
+        task.elapsedMs = 0
+        task.finishedAt = 0
+        task.retryCount = 0
+        task.autoRetriesUsed = 0
+        task.error = ""
+        task.checksumState = Checksum.STATE_NONE
+        task.hlsDone = BooleanArray(0)
+        task.hlsTotalSegments = 0
+        synchronized(task.hlsSizes) { task.hlsSizes.clear() }
+        task.scheduledAt = next
+        task.status = TaskStatus.QUEUED
+        task.note = "每天定时：已排到下一次 ${Format.clockTime(next)} 开始。" +
+            "上一次的文件已保存在下载目录里（重名时会自动改成带 (1) 的名字）。"
+        store.saveNow()
     }
 
     /** Sleep in small slices; false if the task vanished meanwhile. */

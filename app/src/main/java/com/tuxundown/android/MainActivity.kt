@@ -55,6 +55,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -81,12 +82,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
+import com.tuxundown.android.core.Backup
 import com.tuxundown.android.core.Checksum
 import com.tuxundown.android.core.ChecksumVerifier
 import com.tuxundown.android.core.DownloadCenter
 import com.tuxundown.android.core.Format
 import com.tuxundown.android.core.FtpClient
 import com.tuxundown.android.core.PublicStorage
+import com.tuxundown.android.core.ScheduleTime
+import com.tuxundown.android.core.SpeedTest
 import com.tuxundown.android.core.TaskRecord
 import com.tuxundown.android.core.TaskStatus
 import com.tuxundown.android.core.UserAgents
@@ -230,6 +234,9 @@ fun DownApp(sharedUrl: String) {
     var nameText by remember { mutableStateOf("") }
     var mirrorsText by remember { mutableStateOf("") }
     var scheduleMin by remember { mutableStateOf(0) }
+    // v1.8: schedule mode 0 = 一次性（立即/延时）, 1 = 每天定时.
+    var scheduleMode by remember { mutableStateOf(0) }
+    var dailyTimeText by remember { mutableStateOf("23:30") }
     var pendingScheduleAt by remember { mutableStateOf(0L) }
     var sniffing by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf("") }
@@ -271,7 +278,7 @@ fun DownApp(sharedUrl: String) {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "1.7.0"
+        }.getOrNull() ?: "1.8.0"
     }
     var showGuide by remember {
         mutableStateOf(DownloadCenter.guideSeenVersion != appVersion)
@@ -316,12 +323,19 @@ fun DownApp(sharedUrl: String) {
         }
     }
 
-    // ---- v1.4 item 19: task-list import / export (JSON, no file bytes) ----
+    // ---- v1.8: ONE backup entry point — settings + tasks in a
+    // single JSON file (this replaces the v1.4 tasks-only export;
+    // old v1.4 files still import, see Backup.parse). The file
+    // never contains downloaded bytes or the download directory. ----
     val exportLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/json")
     ) { uri ->
         if (uri != null) {
-            val json = store.exportJson()
+            val json = Backup.build(
+                store.exportJson(),
+                DownloadCenter.settingsSnapshotJson(),
+                System.currentTimeMillis(),
+            )
             Thread {
                 val ok = runCatching {
                     context.contentResolver.openOutputStream(uri)?.use {
@@ -331,7 +345,7 @@ fun DownApp(sharedUrl: String) {
                 activity.runOnUiThread {
                     Toast.makeText(
                         context,
-                        if (ok) "任务列表已导出" else "导出失败",
+                        if (ok) "备份已导出（设置＋任务）" else "导出失败",
                         Toast.LENGTH_SHORT,
                     ).show()
                 }
@@ -352,10 +366,40 @@ fun DownApp(sharedUrl: String) {
                     if (text == null) {
                         Toast.makeText(context, "导入失败：读不到文件", Toast.LENGTH_SHORT).show()
                     } else {
-                        val n = store.importJson(text)
+                        val parsed = Backup.parse(text)
+                        if (parsed.tasksJson == null && parsed.settings == null) {
+                            Toast.makeText(
+                                context,
+                                "导入失败：这个文件不是 TuxunDown 的备份",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                            return@runOnUiThread
+                        }
+                        var msg = ""
+                        if (parsed.tasksJson != null) {
+                            val n = store.importJson(parsed.tasksJson)
+                            msg += "恢复 $n 个任务（重复的跳过了）"
+                        }
+                        if (parsed.settings != null) {
+                            DownloadCenter.applySettingsJson(parsed.settings)
+                            // Refresh the settings mirrors so the
+                            // settings page shows the restored values.
+                            wifiOnly = DownloadCenter.wifiOnly
+                            limitKBps = DownloadCenter.speedLimitKBps
+                            vibrateOn = DownloadCenter.completeVibrate
+                            soundOn = DownloadCenter.completeSound
+                            maxConc = DownloadCenter.maxConcurrent
+                            autoRetry = DownloadCenter.autoRetryCount
+                            trafficMB = DownloadCenter.trafficThresholdMB
+                            dualChan = DownloadCenter.dualChannel
+                            userAgentUi = DownloadCenter.userAgent
+                            amoledUi = DownloadCenter.amoledBlack
+                            AmoledState.enabled = DownloadCenter.amoledBlack
+                            msg += if (msg.isEmpty()) "设置已恢复" else "，设置也已恢复"
+                        }
                         Toast.makeText(
                             context,
-                            if (n > 0) "已导入 $n 个任务（重复的跳过了）" else "没有可导入的新任务",
+                            if (msg.isEmpty()) "备份里没有可恢复的内容" else "导入完成：$msg",
                             Toast.LENGTH_LONG,
                         ).show()
                     }
@@ -370,6 +414,7 @@ fun DownApp(sharedUrl: String) {
         referer: String = "",
         fileName: String = "",
         mirrors: List<String> = emptyList(),
+        daily: Boolean = false,
     ): Boolean {
         // Audit A2 (UI side): the same URL twice would produce two
         // records fighting over one file name — refuse politely.
@@ -389,7 +434,14 @@ fun DownApp(sharedUrl: String) {
         t.sources = mirrors.map { it.trim() }
             .filter { it.startsWith("http") && it != url }
             .distinct().toMutableList()
-        if (pendingScheduleAt > System.currentTimeMillis()) {
+        if (daily && pendingScheduleAt > 0) {
+            // v1.8: daily recurrence — the service re-queues the
+            // task for the same time every day after each run.
+            t.scheduleDaily = true
+            t.scheduledAt = pendingScheduleAt
+            t.note = "每天定时下载：第一次在 ${Format.clockTime(pendingScheduleAt)} 开始，" +
+                "之后每天这个时间自动再下一次。"
+        } else if (pendingScheduleAt > System.currentTimeMillis()) {
             t.scheduledAt = pendingScheduleAt
             t.note = "预约下载：将在 ${Format.clockTime(pendingScheduleAt)} 开始。"
         }
@@ -397,7 +449,11 @@ fun DownApp(sharedUrl: String) {
         DownloadCenter.enqueue(t)
         Toast.makeText(
             context,
-            if (t.scheduledAt > 0) "已预约，${Format.clockTime(t.scheduledAt)} 自动开始" else "已新建下载任务",
+            when {
+                t.scheduleDaily -> "已设每天定时，${Format.clockTime(t.scheduledAt)} 开始"
+                t.scheduledAt > 0 -> "已预约，${Format.clockTime(t.scheduledAt)} 自动开始"
+                else -> "已新建下载任务"
+            },
             Toast.LENGTH_SHORT,
         ).show()
         return true
@@ -406,7 +462,7 @@ fun DownApp(sharedUrl: String) {
     fun handleSniffResult(result: SniffResult, pageUrl: String) {
         when (result) {
             is SniffResult.DirectFile -> {
-                createTask(result.url, pageUrl)
+                createTask(result.url, pageUrl, daily = scheduleMode == 1)
                 showAdd = false
                 urlText = ""
             }
@@ -462,6 +518,9 @@ fun DownApp(sharedUrl: String) {
         val lines = raw.lines().map { it.trim() }
             .filter { it.startsWith("http") || FtpClient.isFtpUrl(it) }
         if (lines.isEmpty()) return
+        // v1.8: batch creation is always immediate — a daily slot
+        // computed for a single task must not leak into the batch.
+        if (scheduleMode == 1) pendingScheduleAt = 0L
         showAdd = false
         urlText = ""
         Toast.makeText(context, "正在批量处理 ${lines.size} 个链接…", Toast.LENGTH_SHORT).show()
@@ -504,9 +563,22 @@ fun DownApp(sharedUrl: String) {
     fun startSmart(raw: String) {
         val u = raw.trim()
         if (u.isBlank() || sniffing) return
-        pendingScheduleAt = if (scheduleMin > 0) {
-            System.currentTimeMillis() + scheduleMin * 60_000L
-        } else 0L
+        if (scheduleMode == 1) {
+            // v1.8: daily mode — validate the wall-clock time and
+            // resolve it to the next occurrence.
+            val hm = ScheduleTime.parseHhMm(dailyTimeText)
+            if (hm == null) {
+                message = "每天定时的时间格式不对，填 23:30 这样的格式（24 小时制）。"
+                return
+            }
+            pendingScheduleAt = ScheduleTime.nextOccurrence(
+                hm.first, hm.second, System.currentTimeMillis()
+            )
+        } else {
+            pendingScheduleAt = if (scheduleMin > 0) {
+                System.currentTimeMillis() + scheduleMin * 60_000L
+            } else 0L
+        }
         // Multi-line paste = batch mode (v1.3).
         if (u.lines().count { it.isNotBlank() } > 1) {
             startBatch(u)
@@ -516,7 +588,7 @@ fun DownApp(sharedUrl: String) {
         // v1.7: FTP links are always direct file tasks — no HTTP
         // probe, no sniffing; the engine's FTP path handles them.
         if (FtpClient.isFtpUrl(u)) {
-            createTask(u, fileName = nameText)
+            createTask(u, fileName = nameText, daily = scheduleMode == 1)
             showAdd = false
             urlText = ""
             nameText = ""
@@ -524,7 +596,7 @@ fun DownApp(sharedUrl: String) {
             return
         }
         if (LinkRouter.looksLikeFileUrl(u)) {
-            createTask(u, fileName = nameText, mirrors = mirrors)
+            createTask(u, fileName = nameText, mirrors = mirrors, daily = scheduleMode == 1)
             showAdd = false
             urlText = ""
             nameText = ""
@@ -538,7 +610,7 @@ fun DownApp(sharedUrl: String) {
             activity.runOnUiThread {
                 if (route == LinkRouter.Route.DIRECT_FILE) {
                     sniffing = false
-                    createTask(u, fileName = nameText, mirrors = mirrors)
+                    createTask(u, fileName = nameText, mirrors = mirrors, daily = scheduleMode == 1)
                     showAdd = false
                     urlText = ""
                     nameText = ""
@@ -771,12 +843,17 @@ fun DownApp(sharedUrl: String) {
                 }
             },
             onShowGuide = { showGuide = true },
-            onExport = { exportLauncher.launch("tuxundown-tasks.json") },
+            onExport = { exportLauncher.launch("tuxundown-backup.json") },
             onImport = { importLauncher.launch(arrayOf("application/json", "text/plain")) },
             onBack = { screen = "home" },
         )
     } else if (screen == "stats") {
-        StatsScreen(onBack = { screen = "home" })
+        StatsScreen(
+            onBack = { screen = "home" },
+            onSpeedTest = { screen = "speedtest" },
+        )
+    } else if (screen == "speedtest") {
+        SpeedTestScreen(onBack = { screen = "stats" })
     } else {
         // ================= HOME — ONE scrolling LazyColumn (v1.4 fix) =================
         // Root cause of "主页不能向下滑动": the home used to be a plain
@@ -1054,15 +1131,47 @@ fun DownApp(sharedUrl: String) {
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    // v1.8: one-shot (existing) or daily recurrence.
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        val opts = listOf(0 to "立即", 30 to "30分钟后", 60 to "1小时后", 180 to "3小时后")
-                        for ((m, label) in opts) {
-                            if (m == scheduleMin) {
-                                Button(onClick = { }) { Text(label) }
-                            } else {
-                                OutlinedButton(onClick = { scheduleMin = m }) { Text(label) }
+                        if (scheduleMode == 0) {
+                            Button(onClick = { }) { Text("一次性") }
+                        } else {
+                            OutlinedButton(onClick = { scheduleMode = 0 }) { Text("一次性") }
+                        }
+                        if (scheduleMode == 1) {
+                            Button(onClick = { }) { Text("每天定时") }
+                        } else {
+                            OutlinedButton(onClick = { scheduleMode = 1 }) { Text("每天定时") }
+                        }
+                    }
+                    if (scheduleMode == 0) {
+                        Row(
+                            Modifier.padding(top = 6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            val opts = listOf(0 to "立即", 30 to "30分钟后", 60 to "1小时后", 180 to "3小时后")
+                            for ((m, label) in opts) {
+                                if (m == scheduleMin) {
+                                    Button(onClick = { }) { Text(label) }
+                                } else {
+                                    OutlinedButton(onClick = { scheduleMin = m }) { Text(label) }
+                                }
                             }
                         }
+                    } else {
+                        OutlinedTextField(
+                            value = dailyTimeText,
+                            onValueChange = { dailyTimeText = it },
+                            label = { Text("每天几点开始（如 23:30）") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                        )
+                        Text(
+                            "到点自动下载；下完（或失败）后自动排到第二天同一时间，" +
+                                "每次都是重新下载一份新文件。暂停后不会自动恢复，要继续在卡片上点继续。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                     Text(
                         "直链自动直接下载；网页自动嗅探里面的资源。一行一个链接、粘多行可以批量新建。",
@@ -1600,7 +1709,7 @@ fun FileTypeBadge(kind: String, name: String) {
  * completed tasks; nothing is uploaded anywhere.
  */
 @androidx.compose.runtime.Composable
-fun StatsScreen(onBack: () -> Unit) {
+fun StatsScreen(onBack: () -> Unit, onSpeedTest: () -> Unit) {
     var refresh by remember { mutableStateOf(0) }
     @Suppress("UNUSED_EXPRESSION") refresh // re-read counters after a clear
     LazyColumn(
@@ -1640,6 +1749,178 @@ fun StatsScreen(onBack: () -> Unit) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 6.dp),
+                )
+            }
+        }
+        item(key = "st-test") {
+            SettingsGroup("网络测速") {
+                Text(
+                    "用下载引擎同款方式，测这台手机现在的真实下载速度：" +
+                        "先单条连接测一遍，再 4 条连接一起测一遍，对比着看。",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(Modifier.height(10.dp))
+                Button(onClick = onSpeedTest) { Text("开始测速") }
+            }
+        }
+    }
+}
+
+/**
+ * Built-in speed test screen (v1.8): single connection vs four
+ * parallel connections against a public test endpoint. The copy
+ * is explicit that this measures the speed TO THE TEST SERVER —
+ * any given file's server can be slower or faster.
+ */
+@androidx.compose.runtime.Composable
+fun SpeedTestScreen(onBack: () -> Unit) {
+    var running by remember { mutableStateOf(false) }
+    var phase by remember { mutableStateOf("") }
+    var endpointLabel by remember { mutableStateOf("") }
+    var liveBps by remember { mutableStateOf(0L) }
+    var singleBps by remember { mutableStateOf(-1L) }
+    var multiBps by remember { mutableStateOf(-1L) }
+    var testRef by remember { mutableStateOf<SpeedTest?>(null) }
+    // Leaving the screen stops the test (it would keep burning
+    // data in the background otherwise).
+    DisposableEffect(Unit) {
+        onDispose { testRef?.cancel() }
+    }
+    fun post(block: () -> Unit) {
+        android.os.Handler(android.os.Looper.getMainLooper()).post(block)
+    }
+    fun startTest() {
+        if (running) return
+        running = true
+        phase = "准备测速…"
+        endpointLabel = ""
+        liveBps = 0
+        singleBps = -1
+        multiBps = -1
+        val test = SpeedTest()
+        testRef = test
+        Thread {
+            var finished = false
+            for (ep in SpeedTest.ENDPOINTS) {
+                if (test.cancelled) break
+                post {
+                    endpointLabel = ep.label
+                    phase = "单线程测速中（1 条连接）…"
+                    liveBps = 0
+                }
+                val s = test.runPhase(ep.url, 1, SpeedTest.PHASE_MS) { b ->
+                    post { liveBps = b }
+                }
+                if (test.cancelled) break
+                if (s <= 0) continue // this endpoint moved nothing: try the next
+                post {
+                    singleBps = s
+                    phase = "多线程测速中（4 条连接）…"
+                    liveBps = 0
+                }
+                val m = test.runPhase(ep.url, 4, SpeedTest.PHASE_MS) { b ->
+                    post { liveBps = b }
+                }
+                if (!test.cancelled) {
+                    post { multiBps = m }
+                    finished = true
+                }
+                break
+            }
+            post {
+                running = false
+                phase = when {
+                    test.cancelled -> "已停止"
+                    finished -> "测速完成"
+                    else -> "测速失败：测速点都连不上，检查一下网络再试"
+                }
+            }
+        }.start()
+    }
+    LazyColumn(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item(key = "sp-head") {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onBack) { Text("← 返回") }
+                Text(
+                    "网络测速",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
+        item(key = "sp-main") {
+            SettingsGroup("单线程 vs 多线程") {
+                Text(
+                    "测的是这台手机到测速服务器的速度（当前网络下）。" +
+                        "下载某个具体文件能跑多快，还要看那个文件的服务器给不给力——" +
+                        "这里的数字是网络本身的上限参考，不是承诺。",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                if (endpointLabel.isNotBlank()) {
+                    Text(
+                        "测速点：$endpointLabel",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                }
+                if (phase.isNotBlank()) {
+                    Text(
+                        phase,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(top = 10.dp),
+                    )
+                }
+                if (running) {
+                    Text(
+                        Format.speed(liveBps),
+                        color = WinPalette.ChartGreen,
+                        fontSize = 30.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                if (singleBps >= 0) {
+                    InfoRow("单线程：", Format.speed(singleBps))
+                }
+                if (multiBps >= 0) {
+                    InfoRow("多线程（4 条）：", Format.speed(multiBps))
+                }
+                if (singleBps > 0 && multiBps > 0) {
+                    val ratio = multiBps.toDouble() / singleBps.toDouble()
+                    InfoRow(
+                        "对比：",
+                        if (ratio >= 1.05) {
+                            "多线程约为单线程的 ${"%.1f".format(ratio)} 倍——" +
+                                "连接数加上去确实能提速，这正是本 App 多线程下载的原理"
+                        } else {
+                            "多线程没比单线程快多少——当前网络或测速服务器是按总量给速度的，" +
+                                "这种情况下加连接帮不上忙（下载真实文件时同理）"
+                        },
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (running) {
+                        OutlinedButton(onClick = { testRef?.cancel() }) { Text("停止") }
+                    } else {
+                        Button(onClick = { startTest() }) {
+                            Text(if (singleBps >= 0) "再测一次" else "开始测速")
+                        }
+                    }
+                }
+                Text(
+                    "一次完整测速约 12 秒，大约消耗 10–100 MB 流量（网速越快用得越多），建议在 WiFi 下测。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp),
                 )
             }
         }
@@ -1949,11 +2230,13 @@ fun SettingsScreen(
                 }
                 HorizontalDivider(Modifier.padding(vertical = 10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onExport) { Text("导出任务列表") }
-                    OutlinedButton(onClick = onImport) { Text("导入任务列表") }
+                    OutlinedButton(onClick = onExport) { Text("导出全部备份") }
+                    OutlinedButton(onClick = onImport) { Text("导入备份") }
                 }
                 Text(
-                    "导出的是任务记录（JSON，不含文件本体），换手机或重装后导入即可恢复列表和续传进度。",
+                    "一个 JSON 文件装下全部设置＋任务记录（不含文件本体），换手机或重装后导入一次全恢复。" +
+                        "下载目录不在备份里（文件夹授权没法跨设备，导入后在设置里重选一次）。" +
+                        "旧版导出的任务列表文件也能导入，只是没有设置部分。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 6.dp),
@@ -2118,13 +2401,13 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 能下 FTP 了：ftp:// 链接直接粘贴或批量粘贴就能下，服务器支持时还能断点续传\n" +
-            "· 下载后能验真：给任务填上发布页给的 SHA-256 / MD5，下完自动算一遍，卡片上写明对上没对上\n" +
-            "· 修了一个排队坑：开了「仅 WiFi」排队的任务，连上 WiFi 后会自己开始，不用再打开 App 戳它\n" +
-            "· 设置里能改 User-Agent 了：预置几种常用标识，也能自己填\n" +
-            "· 设置里多了「清理孤儿 .part 文件」：把没任务认领的半成品扫出来删掉，腾空间\n" +
-            "· 深色模式多了 AMOLED 纯黑开关，OLED 屏幕更省电\n" +
-            "· 任务保存更省了：频繁保存合并成最多 1.5 秒写一次，长列表更顺；流媒体合并时的内存占用也压住了",
+            "· 多了内置测速页：在主页点「统计」→「开始测速」，单线程和多线程（4 条连接）各测一遍，对比着看你现在的网络到底能跑多快\n" +
+            "· 任务卡能滑了：往左滑暂停/继续，往右滑删除（会先弹窗问你一声，不会误删）\n" +
+            "· 下载通知能操作了：单个任务时通知上直接有「暂停 / 取消」按钮；多个任务时展开通知能看到每个任务各自的进度\n" +
+            "· 预约下载能「每天定时」了：新建时选每天定时、填个时间，任务每天到点自动重新下载一次\n" +
+            "· 备份变全量了：设置＋任务导出成一个文件，导入一次全恢复（旧版导出的任务列表文件也能导入）\n" +
+            "· 点下载更快进入状态：续传时少等一个网络来回、镜像源改成并行校验、分片大小按文件大小分档（小文件不再切得太碎）\n" +
+            "· 每个文件下完都会真正刷盘封口，断电也不怕出现「显示下完了、其实没写进去」",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
             "· 文件直链 → 直接开始多线程下载，还能预先改好保存文件名\n" +
@@ -2559,7 +2842,9 @@ fun TaskCard(
                         TaskStatus.PAUSED ->
                             if (unknownSize) "已暂停 · 大小未知" else "已暂停 · 已完成 $pct%"
                         TaskStatus.QUEUED ->
-                            if (task.scheduledAt > System.currentTimeMillis())
+                            if (task.scheduleDaily)
+                                "每天 ${Format.clockTime(task.scheduledAt)} 定时下载"
+                            else if (task.scheduledAt > System.currentTimeMillis())
                                 "预约 ${Format.clockTime(task.scheduledAt)} 开始"
                             else "排队中，等待开始"
                         TaskStatus.DONE -> "已完成"
@@ -2615,7 +2900,9 @@ fun TaskCard(
                     }
                     TaskStatus.PAUSED -> "已下载 ${Format.size(task.downloaded)} / ${Format.size(task.totalSize)}"
                     TaskStatus.QUEUED ->
-                        if (task.scheduledAt > System.currentTimeMillis())
+                        if (task.scheduleDaily)
+                            "每天 ${Format.clockTime(task.scheduledAt)} 自动下载一次"
+                        else if (task.scheduledAt > System.currentTimeMillis())
                             "预约在 ${Format.clockTime(task.scheduledAt)} 自动开始"
                         else "等待前面的任务完成"
                     TaskStatus.DONE -> Format.size(task.totalSize)
@@ -2707,7 +2994,10 @@ fun TaskCard(
                     }
                     TaskStatus.QUEUED -> {
                         Text(
-                            if (task.scheduledAt > System.currentTimeMillis())
+                            if (task.scheduleDaily)
+                                "每天 ${Format.clockTime(task.scheduledAt)} 自动下载一次；" +
+                                    "想停掉这个每日计划，暂停它或直接删除任务即可"
+                            else if (task.scheduledAt > System.currentTimeMillis())
                                 "预约在 ${Format.clockTime(task.scheduledAt)} 自动开始"
                             else "等待前面的任务完成",
                             style = MaterialTheme.typography.bodyMedium,

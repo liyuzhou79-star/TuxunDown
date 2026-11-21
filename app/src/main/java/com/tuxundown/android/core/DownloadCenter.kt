@@ -113,6 +113,55 @@ object DownloadCenter {
         get() = pBool("amoledBlack", false)
         set(v) { prefs().edit().putBoolean("amoledBlack", v).apply() }
 
+    // ---- v1.8: full backup — settings snapshot / apply ----
+    // The backup carries every user setting EXCEPT the download
+    // directory: a SAF tree Uri (and its permission) names a
+    // folder on one specific device and cannot transfer.
+
+    fun settingsSnapshotJson(): org.json.JSONObject {
+        val o = org.json.JSONObject()
+        o.put("wifiOnly", wifiOnly)
+        o.put("speedLimitKBps", speedLimitKBps)
+        o.put("maxConcurrent", maxConcurrent)
+        o.put("autoRetryCount", autoRetryCount)
+        o.put("trafficThresholdMB", trafficThresholdMB)
+        o.put("dualChannel", dualChannel)
+        o.put("userAgent", userAgent)
+        o.put("amoledBlack", amoledBlack)
+        o.put("completeVibrate", completeVibrate)
+        o.put("completeSound", completeSound)
+        o.put("detailsExpanded", detailsExpanded)
+        o.put("sniffHistory", org.json.JSONArray(sniffHistory))
+        return o
+    }
+
+    /** Apply a settings object from a backup; absent keys keep their current values. */
+    fun applySettingsJson(o: org.json.JSONObject) {
+        if (o.has("wifiOnly")) wifiOnly = o.optBoolean("wifiOnly", wifiOnly)
+        if (o.has("speedLimitKBps")) speedLimitKBps = o.optInt("speedLimitKBps", speedLimitKBps)
+        if (o.has("maxConcurrent")) maxConcurrent = o.optInt("maxConcurrent", maxConcurrent)
+        if (o.has("autoRetryCount")) autoRetryCount = o.optInt("autoRetryCount", autoRetryCount)
+        if (o.has("trafficThresholdMB")) {
+            trafficThresholdMB = o.optInt("trafficThresholdMB", trafficThresholdMB)
+        }
+        if (o.has("dualChannel")) dualChannel = o.optBoolean("dualChannel", dualChannel)
+        if (o.has("userAgent")) userAgent = o.optString("userAgent", userAgent)
+        if (o.has("amoledBlack")) amoledBlack = o.optBoolean("amoledBlack", amoledBlack)
+        if (o.has("completeVibrate")) {
+            completeVibrate = o.optBoolean("completeVibrate", completeVibrate)
+        }
+        if (o.has("completeSound")) completeSound = o.optBoolean("completeSound", completeSound)
+        if (o.has("detailsExpanded")) {
+            detailsExpanded = o.optBoolean("detailsExpanded", detailsExpanded)
+        }
+        val hist = o.optJSONArray("sniffHistory")
+        if (hist != null) {
+            sniffHistory = (0 until hist.length())
+                .map { hist.optString(it) }
+                .filter { it.isNotBlank() }
+        }
+    }
+
     /** Build a task record, flagging HLS (.m3u8) links automatically. */
     fun newTask(url: String, headers: Map<String, String> = emptyMap()): TaskRecord {
         val t = TaskRecord(url = url, headers = headers.toMutableMap())
