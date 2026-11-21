@@ -43,6 +43,25 @@ object PublicStorage {
 
     fun partName(finalName: String): String = "$finalName.part"
 
+    /**
+     * v2.3: free bytes on the volume downloads land on, or -1
+     * when it cannot be measured honestly. Only the DEFAULT
+     * location (the public Download folder on the primary shared
+     * volume) has a real path to stat; a custom SAF folder is an
+     * arbitrary tree Uri whose volume Android will not identify,
+     * so the space pre-check skips there instead of guessing a
+     * number that could block a legitimate download.
+     */
+    fun availableBytes(context: Context): Long {
+        if (DownloadCenter.downloadDirUri.isNotBlank()) return -1
+        return runCatching {
+            val dir = Environment.getExternalStoragePublicDirectory(
+                Environment.DIRECTORY_DOWNLOADS
+            )
+            android.os.StatFs(dir.absolutePath).availableBytes
+        }.getOrDefault(-1)
+    }
+
     /** Human-readable name of the current download location, for the UI. */
     fun locationLabel(context: Context): String {
         val custom = DownloadCenter.downloadDirName

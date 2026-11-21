@@ -387,6 +387,31 @@ class DownloadService : Service() {
                         confirmed = task.mobileConfirmed,
                     )
                 },
+                // v2.3 space pre-check: the engine consults this
+                // once the size is known. Other RUNNING tasks
+                // reserve their remaining bytes, so tasks starting
+                // together cannot all promise themselves the same
+                // free space (see SpaceCheck for the accounting).
+                spaceGuard = {
+                    val needed = SpaceCheck.remainingOf(
+                        task.totalSize, task.downloaded, task.singleThreadOnly,
+                    )
+                    val reserved = SpaceCheck.reservedOf(
+                        store.tasks.filter {
+                            it.id != task.id && it.status == TaskStatus.RUNNING
+                        }.map {
+                            SpaceCheck.remainingOf(
+                                it.totalSize, it.downloaded, it.singleThreadOnly,
+                            )
+                        }
+                    )
+                    val avail = PublicStorage.availableBytes(this)
+                    when (val v = SpaceCheck.assess(avail, needed, reserved)) {
+                        is SpaceCheck.Verdict.Insufficient ->
+                            SpaceCheck.blockMessage(task.totalSize, avail, v.missingBytes)
+                        else -> null
+                    }
+                },
                 // v1.6 dual channel: alternate connections ride the
                 // cellular network the system granted us.
                 // v1.9: when a proxy is configured it applies on

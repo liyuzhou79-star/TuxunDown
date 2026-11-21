@@ -59,6 +59,13 @@ class DownloadEngine(
      *  size is known) and once a second during the transfer; returning
      *  false pauses the task instead of burning mobile data. */
     private val trafficGuard: () -> Boolean = { true },
+    /** v2.3 space pre-check: consulted once the size is known
+     *  (after the probe / revalidation; in FTP after SIZE) —
+     *  returns the plain-language block message, or null to
+     *  proceed. A guard that itself fails never blocks (the
+     *  caller wraps it in runCatching): an unmeasurable volume
+     *  is not a full one. */
+    private val spaceGuard: () -> String? = { null },
     /** v1.5: remembered optimal thread count for this host (0 = none).
      *  A fresh segmented start begins AT this count and skips probing. */
     private val initialThreadsHint: Int = 0,
@@ -214,6 +221,19 @@ class DownloadEngine(
                 task.note = "流量保护：当前是流量网络，这个文件有 ${Format.size(task.totalSize)}，" +
                     "已自动暂停省流量。回到 WiFi 点继续，或在流量下再点一次继续也可下载。"
                 return task.status
+            }
+            // v2.3 space pre-check: the size is certain only now —
+            // stop BEFORE the first byte when the volume cannot
+            // hold what is left to write, instead of dying halfway
+            // through a multi-GB file (see SpaceCheck).
+            if (task.totalSize > 0) {
+                val spaceMsg = runCatching { spaceGuard() }.getOrNull()
+                if (spaceMsg != null) {
+                    dropPreTarget()
+                    task.status = TaskStatus.PAUSED
+                    task.note = spaceMsg
+                    return task.status
+                }
             }
             if (task.totalSize == 0L) {
                 // A genuinely empty file: nothing to transfer.
@@ -1449,6 +1469,15 @@ class DownloadEngine(
                 task.note = "流量保护：当前是流量网络，这个文件有 ${Format.size(task.totalSize)}，" +
                     "已自动暂停省流量。回到 WiFi 点继续，或在流量下再点一次继续也可下载。"
                 return task.status
+            }
+            // v2.3 space pre-check (FTP learns its size from SIZE).
+            if (total > 0) {
+                val spaceMsg = runCatching { spaceGuard() }.getOrNull()
+                if (spaceMsg != null) {
+                    task.status = TaskStatus.PAUSED
+                    task.note = spaceMsg
+                    return task.status
+                }
             }
             val rest = client.restSupported()
             target = targetProvider()
