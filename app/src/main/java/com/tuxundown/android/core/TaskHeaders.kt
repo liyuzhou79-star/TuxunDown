@@ -61,10 +61,16 @@ object TaskHeaders {
 
     /**
      * Headers whose values must never leave the device inside an
-     * exported backup (v1.9): the session Cookie. It is a login
-     * credential; the backup file may be stored or sent anywhere.
+     * exported backup: credentials. v1.9 stripped only the session
+     * Cookie; the v2.3 security audit adds Authorization and
+     * Proxy-Authorization — a Bearer/Basic token is exactly as
+     * much a login credential as a cookie, and the backup file
+     * may be stored or sent anywhere.
      */
-    fun isSensitive(name: String): Boolean = name.equals("Cookie", ignoreCase = true)
+    fun isSensitive(name: String): Boolean =
+        name.equals("Cookie", ignoreCase = true) ||
+            name.equals("Authorization", ignoreCase = true) ||
+            name.equals("Proxy-Authorization", ignoreCase = true)
 
     /** A copy of [headers] with the sensitive entries removed. */
     fun strippedForExport(headers: Map<String, String>): Map<String, String> =

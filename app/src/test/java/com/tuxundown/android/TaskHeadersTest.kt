@@ -55,4 +55,21 @@ class TaskHeadersTest {
         assertTrue(TaskHeaders.isSensitive("COOKIE"))
         assertFalse(TaskHeaders.isSensitive("Referer"))
     }
+
+    @Test
+    fun exportStripAlsoRemovesAuthorization() {
+        // v2.3 audit round 9: a Bearer/Basic token is a credential
+        // exactly like a cookie and must not ride into a backup.
+        val headers = mapOf(
+            "Authorization" to "Bearer secret-token",
+            "proxy-authorization" to "Basic c2VjcmV0",
+            "Referer" to "https://a.b/",
+        )
+        val stripped = TaskHeaders.strippedForExport(headers)
+        assertFalse(stripped.keys.any { it.equals("Authorization", ignoreCase = true) })
+        assertFalse(stripped.keys.any { it.equals("Proxy-Authorization", ignoreCase = true) })
+        assertEquals("https://a.b/", stripped["Referer"])
+        assertTrue(TaskHeaders.isSensitive("authorization"))
+        assertTrue(TaskHeaders.isSensitive("PROXY-AUTHORIZATION"))
+    }
 }

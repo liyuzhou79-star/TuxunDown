@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    v2.3 audit round 9: system (cloud) backup exclusions.
+    - sharedpref/settings.xml: the settings file. It holds the
+      proxy credentials (Keystore-encrypted since v2.3, but the
+      ciphertext, the sniff history and the clipboard state are
+      still nobody's business in a cloud backup).
+    - file/tasks.json (+ .bak): live task state, whose headers
+      carry session Cookies needed for resume — credentials.
+    - file/last_crash.txt: the local crash log (device-local by
+      design since v2.2; it never leaves the phone).
+    - file/downloads/: the pre-v1.2 private scratch dir; partial
+      binaries do not belong in a backup either.
+    The app's OWN backup file (设置 -> 备份) remains the supported
+    migration path — it strips secrets by design.
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="settings.xml" />
+    <exclude domain="file" path="tasks.json" />
+    <exclude domain="file" path="tasks.json.bak" />
+    <exclude domain="file" path="last_crash.txt" />
+    <exclude domain="file" path="downloads/" />
+</full-backup-content>

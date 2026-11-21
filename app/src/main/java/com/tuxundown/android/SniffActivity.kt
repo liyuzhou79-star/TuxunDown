@@ -77,6 +77,13 @@ class SniffActivity : Activity() {
         web.settings.javaScriptEnabled = true
         web.settings.domStorageEnabled = true
         web.settings.cacheMode = WebSettings.LOAD_DEFAULT
+        // v2.3 audit round 9: file/content access default to TRUE
+        // and this browser never needs local files — turn both off
+        // explicitly, so a hostile page cannot even attempt a
+        // file:// or content:// read through some path the
+        // navigation gate below might miss.
+        web.settings.allowFileAccess = false
+        web.settings.allowContentAccess = false
         // v1.9 audit: navigation is gated to web schemes. A page
         // (or an ad inside it) trying to steer the WebView at
         // intent://, file://, tel: and friends used to just fail

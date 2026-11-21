@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    v2.3 audit round 9: Android 12+ data extraction rules — the
+    same exclusions as backup_rules.xml, applied to BOTH cloud
+    backup and device-to-device transfer. See backup_rules.xml
+    for the reasoning per entry.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="settings.xml" />
+        <exclude domain="file" path="tasks.json" />
+        <exclude domain="file" path="tasks.json.bak" />
+        <exclude domain="file" path="last_crash.txt" />
+        <exclude domain="file" path="downloads/" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="settings.xml" />
+        <exclude domain="file" path="tasks.json" />
+        <exclude domain="file" path="tasks.json.bak" />
+        <exclude domain="file" path="last_crash.txt" />
+        <exclude domain="file" path="downloads/" />
+    </device-transfer>
+</data-extraction-rules>

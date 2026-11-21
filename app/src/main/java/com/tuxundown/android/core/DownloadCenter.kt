@@ -167,9 +167,28 @@ object DownloadCenter {
         get() = pString("proxyUser", "")
         set(v) { prefs().edit().putString("proxyUser", v).apply(); syncProxyState() }
 
+    /**
+     * v2.3 audit round 9: the proxy password is stored ONLY as a
+     * Keystore ciphertext (see SecretStore). A legacy plain value
+     * from <= v2.2 is migrated the first time it is read; if the
+     * device Keystore refuses to encrypt, the plain form is kept
+     * (no worse than v2.2) and the migration retries next read.
+     */
     var proxyPass: String
-        get() = pString("proxyPass", "")
-        set(v) { prefs().edit().putString("proxyPass", v).apply(); syncProxyState() }
+        get() {
+            val raw = pString("proxyPass", "")
+            if (raw.isBlank()) return ""
+            if (SecretStore.isEncrypted(raw)) return SecretStore.decrypt(raw)
+            SecretStore.encrypt(raw)?.let { enc ->
+                prefs().edit().putString("proxyPass", enc).apply()
+            }
+            return raw
+        }
+        set(v) {
+            val stored = if (v.isBlank()) "" else SecretStore.encrypt(v) ?: v
+            prefs().edit().putString("proxyPass", stored).apply()
+            syncProxyState()
+        }
 
     fun proxySettings(): ProxySettings = ProxySettings(
         enabled = proxyEnabled,
