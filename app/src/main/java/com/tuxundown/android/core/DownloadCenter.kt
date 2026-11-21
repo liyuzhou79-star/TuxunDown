@@ -86,6 +86,89 @@ object DownloadCenter {
         sniffHistory = listOf(url) + sniffHistory.filter { it != url }
     }
 
+    /**
+     * v1.6: WiFi+mobile dual channel (best effort). Default OFF.
+     * When on, the service asks the system for a cellular network
+     * and the engine alternates connections between the two; when
+     * the environment cannot provide one, tasks say so in their
+     * note instead of pretending. Turning it on IS the user's
+     * traffic confirmation (the traffic guard steps aside), but
+     * 仅 WiFi still wins when both are enabled.
+     */
+    var dualChannel: Boolean
+        get() = pBool("dualChannel", false)
+        set(v) { prefs().edit().putBoolean("dualChannel", v).apply() }
+
+    /** Build a task record, flagging HLS (.m3u8) links automatically. */
+    fun newTask(url: String, headers: Map<String, String> = emptyMap()): TaskRecord {
+        val t = TaskRecord(url = url, headers = headers.toMutableMap())
+        if (DownloadEngine.isHlsUrl(url)) t.isHls = true
+        return t
+    }
+
+    // ---- v1.6: download statistics (local only, never uploaded) ----
+
+    fun recordCompletion(task: TaskRecord) {
+        val bytes = if (task.totalSize > 0) task.totalSize else task.downloaded
+        val e = prefs().edit()
+        if (bytes > 0) {
+            e.putLong("statsTotalBytes", pLong("statsTotalBytes", 0) + bytes)
+            val now = System.currentTimeMillis()
+            val today = StatsMath.todayBytes(
+                pString("statsTodayKey", ""), pLong("statsTodayBytes", 0), now
+            )
+            e.putString("statsTodayKey", StatsMath.dayKey(now))
+            e.putLong("statsTodayBytes", today + bytes)
+        }
+        e.putInt("statsDoneCount", pInt("statsDoneCount", 0) + 1)
+        if (task.avgBps > 0) {
+            e.putLong("statsSpeedSum", pLong("statsSpeedSum", 0) + task.avgBps)
+            e.putInt("statsSpeedCount", pInt("statsSpeedCount", 0) + 1)
+        }
+        e.apply()
+    }
+
+    fun statsTotalBytes(): Long = pLong("statsTotalBytes", 0)
+
+    fun statsTodayBytes(): Long = StatsMath.todayBytes(
+        pString("statsTodayKey", ""), pLong("statsTodayBytes", 0),
+        System.currentTimeMillis(),
+    )
+
+    fun statsDoneCount(): Int = pInt("statsDoneCount", 0)
+
+    fun statsAvgBps(): Long {
+        val count = pInt("statsSpeedCount", 0)
+        return if (count > 0) pLong("statsSpeedSum", 0) / count else 0
+    }
+
+    fun clearStats() {
+        prefs().edit()
+            .remove("statsTotalBytes").remove("statsDoneCount")
+            .remove("statsTodayKey").remove("statsTodayBytes")
+            .remove("statsSpeedSum").remove("statsSpeedCount")
+            .apply()
+    }
+
+    /**
+     * v1.6: this task's live share of the user's global speed
+     * budget. The 全局限速 setting is a TOTAL across all running
+     * tasks, split by priority weight (see BandwidthBudget); 0
+     * means unlimited. Read on every limiter tick, so changing the
+     * setting — or another task starting/finishing — rebalances
+     * immediately.
+     */
+    fun budgetShareBps(forTaskId: String): Long {
+        val total = speedLimitKBps.toLong() * 1024
+        if (total <= 0) return 0
+        val running = store.tasks.filter { it.status == TaskStatus.RUNNING }
+        if (running.isEmpty()) return total
+        val idx = running.indexOfFirst { it.id == forTaskId }
+        if (idx < 0) return total
+        val weights = running.map { BandwidthBudget.weightOf(it.priority) }
+        return BandwidthBudget.shares(total, weights)[idx]
+    }
+
     // ---- cancellation (audit A7) ----
     // Deleting a RUNNING task used to race the engine: the UI deleted
     // the .part file while worker threads were still writing into it.
@@ -116,6 +199,9 @@ object DownloadCenter {
 
     private fun pInt(key: String, def: Int): Int =
         runCatching { prefs().getInt(key, def) }.getOrDefault(def)
+
+    private fun pLong(key: String, def: Long): Long =
+        runCatching { prefs().getLong(key, def) }.getOrDefault(def)
 
     private fun pString(key: String, def: String): String =
         runCatching { prefs().getString(key, def) }.getOrDefault(def) ?: def
@@ -192,10 +278,14 @@ object DownloadCenter {
         return true
     }
 
-    /** v1.4 插队： move a queued task to the front of the queue. */
+    /** v1.4 插队： move a queued task to the front of the queue.
+     *  v1.6: a jumped task also gains bandwidth-budget weight. */
     fun moveToFrontOfQueue(task: TaskRecord): Boolean {
         val changed = QueueOrder.moveToFrontOfQueue(store.tasks, task)
-        if (changed) store.save()
+        if (changed) {
+            if (task.priority == 0) task.priority = 1
+            store.save()
+        }
         return changed
     }
 

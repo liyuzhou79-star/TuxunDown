@@ -60,6 +60,11 @@ class DownloadEngine(
     /** v1.5: called once when a segmented download FAILS, so the
      *  caller can age out the remembered count for this host. */
     private val onHostFailed: () -> Unit = {},
+    /** v1.6 dual channel: an alternate connection opener (e.g.
+     *  bound to the cellular network). When present, new
+     *  connections alternate between the default network and this
+     *  one, so WiFi and mobile data carry the download together. */
+    private val extraOpener: ((URL) -> HttpURLConnection)? = null,
 ) {
     /** False once the thread count is settled (hint used, plateau
      *  reached or ceiling hit): the sampler stops growing workers. */
@@ -75,6 +80,13 @@ class DownloadEngine(
     @Volatile private var trafficBlocked = false
 
     private fun stopped(): Boolean = paused || netBlocked || trafficBlocked
+
+    /** v1.6 dual channel: flips each new connection between the
+     *  default network and [extraOpener] when one was supplied. */
+    private val openerFlip = AtomicInteger(0)
+
+    /** v1.6 multi-source: primary + validated mirrors for this run. */
+    @Volatile private var activeSources: List<String> = listOf(task.url)
 
     private val downloadedBytes = AtomicLong(task.downloaded)
     private val nextChunk = AtomicInteger(0)
@@ -145,6 +157,16 @@ class DownloadEngine(
             target = targetProvider()
             try {
                 if (task.singleThreadOnly || task.totalSize <= 0) {
+                    // Mirrors can only help a segmented download; say
+                    // so instead of silently ignoring them (v1.6).
+                    if (task.sources.isNotEmpty() &&
+                        !task.note.contains("镜像源需要服务器支持分片")
+                    ) {
+                        appendNote(
+                            "镜像源需要服务器支持分片（Range）才能一起用，" +
+                                "这个服务器不支持，已只用主地址下载。"
+                        )
+                    }
                     return runSingleStream()
                 }
                 val result = runSegmented()
@@ -188,7 +210,16 @@ class DownloadEngine(
     ): HttpURLConnection {
         var current = startUrl
         repeat(MAX_REDIRECTS + 1) {
-            val c = URL(current).openConnection() as HttpURLConnection
+            val hopUrl = URL(current)
+            val extra = extraOpener
+            val c = if (extra != null && openerFlip.getAndIncrement() % 2 == 1) {
+                // Dual channel: odd connections ride the alternate
+                // network; if it refuses, fall back to the default.
+                runCatching { extra(hopUrl) }
+                    .getOrElse { hopUrl.openConnection() as HttpURLConnection }
+            } else {
+                hopUrl.openConnection() as HttpURLConnection
+            }
             c.connectTimeout = 15_000
             c.readTimeout = 30_000
             c.instanceFollowRedirects = false
@@ -304,6 +335,10 @@ class DownloadEngine(
             task.chunkDone = BooleanArray(ChunkPlanner.chunkCount(total, task.chunkSize))
         }
         val count = task.chunkDone.size
+        // v1.6 multi-source: validate the mirrors ONCE per run
+        // (same total size + a mid-file byte sample) before any
+        // worker may take bytes from them.
+        activeSources = validateSources()
         // Resume cursor: first unfinished chunk.
         var firstOpen = task.chunkDone.indexOfFirst { !it }
         if (firstOpen < 0) firstOpen = count
@@ -464,6 +499,109 @@ class DownloadEngine(
         }
     }
 
+    // ---------- multi-source validation (v1.6) ----------
+
+    /**
+     * Check every user-supplied mirror against the primary file:
+     * same total size AND a matching mid-file byte sample. Mirrors
+     * that disagree are refused — loudly, in the task note — because
+     * mixing two different files' chunks would corrupt the result.
+     * Returns the usable source list (primary first).
+     */
+    private fun validateSources(): List<String> {
+        val extras = task.sources.map { it.trim() }
+            .filter { it.isNotBlank() && it != task.url }
+            .distinct()
+        if (extras.isEmpty() || task.totalSize <= 0) return listOf(task.url)
+        val sampleOffset = task.totalSize / 2
+        val sampleLen = minOf(64L * 1024, task.totalSize - sampleOffset).toInt()
+        val primarySample = if (sampleLen > 0) {
+            fetchSample(task.url, sampleOffset, sampleLen)
+        } else null
+        val valid = mutableListOf(task.url)
+        var rejected = 0
+        for (src in extras) {
+            val total = probeTotal(src)
+            val sample = if (total == task.totalSize && sampleLen > 0) {
+                fetchSample(src, sampleOffset, sampleLen)
+            } else null
+            if (SourceCheck.isSameFile(task.totalSize, total, primarySample, sample)) {
+                valid.add(src)
+            } else {
+                rejected++
+            }
+        }
+        if (rejected > 0) {
+            appendNote(
+                "有 $rejected 个镜像源和主地址的文件对不上（大小或内容不一致），" +
+                    "已拒绝使用，只用对得上的源下载。"
+            )
+        }
+        if (valid.size > 1 && !task.note.contains("多源下载")) {
+            appendNote("多源下载：${valid.size} 个地址一起下同一个文件。")
+        }
+        if (rejected > 0 || valid.size > 1) onSave()
+        return valid
+    }
+
+    private fun appendNote(text: String) {
+        task.note = if (task.note.isBlank()) text else task.note + " " + text
+    }
+
+    /** Total size of [url] via a 1-byte Range probe; -1 if unknown. */
+    private fun probeTotal(url: String): Long {
+        val c = runCatching {
+            openFollowingRedirects(url) { it.setRequestProperty("Range", "bytes=0-0") }
+        }.getOrNull() ?: return -1
+        try {
+            if (c.responseCode != HttpURLConnection.HTTP_PARTIAL) return -1
+            val range = c.getHeaderField("Content-Range") ?: return -1
+            return range.substringAfter('/', "").trim().toLongOrNull() ?: -1
+        } finally {
+            c.disconnect()
+        }
+    }
+
+    /** Up to [len] bytes of [url] starting at [offset]; null on any failure. */
+    private fun fetchSample(url: String, offset: Long, len: Int): ByteArray? {
+        val c = runCatching {
+            openFollowingRedirects(url) {
+                it.setRequestProperty("Range", "bytes=$offset-${offset + len - 1}")
+            }
+        }.getOrNull() ?: return null
+        try {
+            if (c.responseCode != HttpURLConnection.HTTP_PARTIAL) return null
+            return c.inputStream.use { input ->
+                val out = java.io.ByteArrayOutputStream()
+                val buf = ByteArray(8192)
+                var total = 0
+                while (total < len) {
+                    val n = input.read(buf, 0, minOf(buf.size, len - total))
+                    if (n < 0) break
+                    out.write(buf, 0, n)
+                    total += n
+                }
+                out.toByteArray()
+            }
+        } catch (e: Exception) {
+            return null
+        } finally {
+            c.disconnect()
+        }
+    }
+
+    /**
+     * Which source serves this chunk attempt: chunk indexes rotate
+     * across the validated sources, and a retry moves to the NEXT
+     * source — so a source that dies mid-download hands its chunks
+     * over to the others automatically.
+     */
+    private fun sourceFor(ac: ActiveChunk, attempt: Int): String {
+        val srcs = activeSources
+        if (srcs.size <= 1) return task.url
+        return srcs[(ac.index + attempt - 1).mod(srcs.size)]
+    }
+
     private fun spawnWorker(chunkCount: Int) {
         activeWorkers.incrementAndGet()
         val t = Thread {
@@ -525,7 +663,7 @@ class DownloadEngine(
             attempt++
             if (attempt > 1) task.retryCount++ // v1.4 stats: chunk-level retries
             try {
-                downloadRange(ac)
+                downloadRange(ac, sourceFor(ac, attempt))
                 ok = ac.pos >= ac.end
             } catch (e: Exception) {
                 if (isStorageFull(e)) {
@@ -554,14 +692,17 @@ class DownloadEngine(
         }
     }
 
-    private fun downloadRange(ac: ActiveChunk) {
+    private fun downloadRange(ac: ActiveChunk, sourceUrl: String = task.url) {
         // v1.3: the request starts at the part's CURRENT offset, so a
         // retry (or a stall eviction) keeps every byte already written
         // instead of re-downloading the whole part.
+        // v1.6: the bytes may come from any validated mirror —
+        // SourceCheck proved they are the same file, and the
+        // Content-Range start check below still guards every hop.
         val from = ac.pos
         val to = ac.end - 1
         if (from > to) return
-        val c = openFollowingRedirects(task.url) {
+        val c = openFollowingRedirects(sourceUrl) {
             it.setRequestProperty("Range", "bytes=$from-$to")
         }
         ac.connection = c

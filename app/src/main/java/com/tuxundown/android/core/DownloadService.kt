@@ -34,6 +34,13 @@ class DownloadService : Service() {
     /** v1.5: fires when connectivity returns; un-parks deferred tasks. */
     private var netCallback: ConnectivityManager.NetworkCallback? = null
 
+    /** v1.6 dual channel: the cellular network the system granted
+     *  us (null when the environment cannot provide one). */
+    @Volatile private var cellularNetwork: Network? = null
+    private var cellCallback: ConnectivityManager.NetworkCallback? = null
+    @Volatile private var dualRequested = false
+    @Volatile private var dualActive = false
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -56,7 +63,52 @@ class DownloadService : Service() {
             netCallback?.let { cm.unregisterNetworkCallback(it) }
         }
         netCallback = null
+        releaseCellular()
         super.onDestroy()
+    }
+
+    /**
+     * v1.6 dual channel: ask the system for a cellular network to
+     * download over ALONGSIDE WiFi. Best effort by design — if no
+     * cellular network shows up within ~6 s (mobile data off, no
+     * signal, carrier/ROM restrictions), [dualActive] stays false
+     * and runOne tells the user plainly in the task note.
+     */
+    private fun acquireCellularIfWanted() {
+        dualRequested = DownloadCenter.dualChannel && !DownloadCenter.wifiOnly
+        dualActive = false
+        cellularNetwork = null
+        if (!dualRequested) return
+        val latch = java.util.concurrent.CountDownLatch(1)
+        runCatching {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val cb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    cellularNetwork = network
+                    latch.countDown()
+                }
+            }
+            val request = NetworkRequest.Builder()
+                .addTransportType(android.net.NetworkCapabilities.TRANSPORT_CELLULAR)
+                .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+            // The framework-side timeout releases the request on its
+            // own if nothing ever becomes available.
+            cm.requestNetwork(request, cb, 15_000)
+            cellCallback = cb
+            latch.await(6, java.util.concurrent.TimeUnit.SECONDS)
+        }
+        dualActive = cellularNetwork != null
+    }
+
+    private fun releaseCellular() {
+        runCatching {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            cellCallback?.let { cm.unregisterNetworkCallback(it) }
+        }
+        cellCallback = null
+        cellularNetwork = null
+        dualActive = false
     }
 
     private fun registerNetworkCallback() {
@@ -100,6 +152,8 @@ class DownloadService : Service() {
 
     private fun drainQueue() {
         val store = DownloadCenter.store
+        // v1.6: dual channel is negotiated once per drain session.
+        acquireCellularIfWanted()
         val running = mutableMapOf<String, Thread>()
         while (true) {
             // Reap finished engine threads.
@@ -168,6 +222,7 @@ class DownloadService : Service() {
                 try { Thread.sleep(400) } catch (e: InterruptedException) { break }
             }
         }
+        releaseCellular()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -180,6 +235,17 @@ class DownloadService : Service() {
             // same instant we picked it up; never download a ghost.
             if (store.byId(task.id) == null) return
             task.status = TaskStatus.RUNNING
+            // v1.6 dual channel honesty: the card says whether the
+            // second network really came up — never fake it.
+            if (dualRequested && !task.note.contains("双通道")) {
+                val dualNote = if (dualActive) {
+                    "双通道已开启：WiFi 和流量两条网络一起下这个文件。"
+                } else {
+                    "双通道没开成：当前环境拿不到可用的流量网络" +
+                        "（移动数据没开、没信号或运营商限制），已用单条网络下载。"
+                }
+                task.note = if (task.note.isBlank()) dualNote else task.note + " " + dualNote
+            }
             store.save()
             val legacy = store.fileOf(task)
             val engine = DownloadEngine(
@@ -195,26 +261,37 @@ class DownloadService : Service() {
                 },
                 onProgress = { notifyAggregate() },
                 onSave = { store.save() },
-                // User speed limit (token bucket, read live so
-                // changing the setting mid-download takes effect) and
-                // the WiFi-only guard consulted during the transfer.
+                // User speed limit: v1.6 turns it into a TOTAL
+                // budget shared by all running tasks (weighted by
+                // priority), read live so changes rebalance at once.
                 limiter = SpeedLimiter(rateBps = {
-                    DownloadCenter.speedLimitKBps.toLong() * 1024
+                    DownloadCenter.budgetShareBps(task.id)
                 }),
                 networkGuard = {
                     !(DownloadCenter.wifiOnly && !DownloadCenter.isOnWifi())
                 },
                 // v1.4 traffic protection: on mobile data, an
                 // oversized task pauses instead of burning data,
-                // unless the user confirmed this task.
+                // unless the user confirmed this task. v1.6: an
+                // ACTIVE dual channel is that confirmation — the
+                // user explicitly asked to spend mobile data.
                 trafficGuard = {
-                    !TrafficGuard.shouldBlock(
+                    dualActive || !TrafficGuard.shouldBlock(
                         onWifi = DownloadCenter.isOnWifi(),
                         totalSize = task.totalSize,
                         thresholdMB = DownloadCenter.trafficThresholdMB,
                         confirmed = task.mobileConfirmed,
                     )
                 },
+                // v1.6 dual channel: alternate connections ride the
+                // cellular network the system granted us.
+                extraOpener = if (dualActive) {
+                    cellularNetwork?.let { net ->
+                        { u: java.net.URL ->
+                            net.openConnection(u) as java.net.HttpURLConnection
+                        }
+                    }
+                } else null,
                 // v1.5: per-host thread memory — start known hosts at
                 // their remembered optimum, remember new optima, and
                 // age the memory out when a host starts failing.
@@ -323,6 +400,8 @@ class DownloadService : Service() {
             }
             task.note = "$where：$displayName"
             notifyUpdate("下载完成", displayName, 100)
+            // v1.6: feed the statistics screen (local counters).
+            DownloadCenter.recordCompletion(task)
             completionFeedback()
         } catch (e: Exception) {
             task.note = "下载完成，但改名失败（${e.message ?: "未知错误"}），" +
