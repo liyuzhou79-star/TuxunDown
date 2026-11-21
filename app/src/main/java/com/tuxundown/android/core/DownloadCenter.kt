@@ -113,6 +113,49 @@ object DownloadCenter {
         get() = pBool("amoledBlack", false)
         set(v) { prefs().edit().putBoolean("amoledBlack", v).apply() }
 
+    // ---- v1.9: download proxy (engine + sniffer; ProxySettings) ----
+    // Every setter re-syncs the runtime mirror the sniff layer
+    // reads (ProxyState) and the SOCKS authenticator.
+
+    var proxyEnabled: Boolean
+        get() = pBool("proxyEnabled", false)
+        set(v) { prefs().edit().putBoolean("proxyEnabled", v).apply(); syncProxyState() }
+
+    var proxyType: Int
+        get() = pInt("proxyType", ProxySettings.TYPE_HTTP)
+        set(v) { prefs().edit().putInt("proxyType", v).apply(); syncProxyState() }
+
+    var proxyHost: String
+        get() = pString("proxyHost", "")
+        set(v) { prefs().edit().putString("proxyHost", v).apply(); syncProxyState() }
+
+    var proxyPort: Int
+        get() = pInt("proxyPort", 0)
+        set(v) { prefs().edit().putInt("proxyPort", v).apply(); syncProxyState() }
+
+    var proxyUser: String
+        get() = pString("proxyUser", "")
+        set(v) { prefs().edit().putString("proxyUser", v).apply(); syncProxyState() }
+
+    var proxyPass: String
+        get() = pString("proxyPass", "")
+        set(v) { prefs().edit().putString("proxyPass", v).apply(); syncProxyState() }
+
+    fun proxySettings(): ProxySettings = ProxySettings(
+        enabled = proxyEnabled,
+        type = proxyType,
+        host = proxyHost,
+        port = proxyPort,
+        username = proxyUser,
+        password = proxyPass,
+    )
+
+    private fun syncProxyState() {
+        if (appContext == null) return
+        ProxyState.settings = proxySettings()
+        ProxyState.installAuthenticator()
+    }
+
     // ---- v1.8: full backup — settings snapshot / apply ----
     // The backup carries every user setting EXCEPT the download
     // directory: a SAF tree Uri (and its permission) names a
@@ -132,6 +175,15 @@ object DownloadCenter {
         o.put("completeSound", completeSound)
         o.put("detailsExpanded", detailsExpanded)
         o.put("sniffHistory", org.json.JSONArray(sniffHistory))
+        // v1.9: proxy settings travel with the backup EXCEPT the
+        // password — a credential does not belong in a file the
+        // user may store or send anywhere. It must be re-entered
+        // after a restore (the settings copy says so).
+        o.put("proxyEnabled", proxyEnabled)
+        o.put("proxyType", proxyType)
+        o.put("proxyHost", proxyHost)
+        o.put("proxyPort", proxyPort)
+        o.put("proxyUser", proxyUser)
         return o
     }
 
@@ -160,6 +212,12 @@ object DownloadCenter {
                 .map { hist.optString(it) }
                 .filter { it.isNotBlank() }
         }
+        // v1.9: proxy (password deliberately not in backups).
+        if (o.has("proxyEnabled")) proxyEnabled = o.optBoolean("proxyEnabled", proxyEnabled)
+        if (o.has("proxyType")) proxyType = o.optInt("proxyType", proxyType)
+        if (o.has("proxyHost")) proxyHost = o.optString("proxyHost", proxyHost)
+        if (o.has("proxyPort")) proxyPort = o.optInt("proxyPort", proxyPort)
+        if (o.has("proxyUser")) proxyUser = o.optString("proxyUser", proxyUser)
     }
 
     /** Build a task record, flagging HLS (.m3u8) links automatically. */
@@ -302,6 +360,7 @@ object DownloadCenter {
         appContext = context.applicationContext
         store = TaskStore(context.applicationContext)
         store.load()
+        syncProxyState()
     }
 
     fun isOnWifi(): Boolean {

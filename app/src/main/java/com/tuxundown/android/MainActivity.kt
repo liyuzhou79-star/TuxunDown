@@ -88,6 +88,7 @@ import com.tuxundown.android.core.ChecksumVerifier
 import com.tuxundown.android.core.DownloadCenter
 import com.tuxundown.android.core.Format
 import com.tuxundown.android.core.FtpClient
+import com.tuxundown.android.core.ProxySettings
 import com.tuxundown.android.core.PublicStorage
 import com.tuxundown.android.core.ScheduleTime
 import com.tuxundown.android.core.SpeedTest
@@ -241,6 +242,17 @@ fun DownApp() {
     var dualChan by remember { mutableStateOf(DownloadCenter.dualChannel) }
     var userAgentUi by remember { mutableStateOf(DownloadCenter.userAgent) }
     var amoledUi by remember { mutableStateOf(DownloadCenter.amoledBlack) }
+    // ---- v1.9: proxy mirrors (DownloadCenter owns persistence) ----
+    var proxyOn by remember { mutableStateOf(DownloadCenter.proxyEnabled) }
+    var proxyTypeUi by remember { mutableStateOf(DownloadCenter.proxyType) }
+    var proxyHostUi by remember { mutableStateOf(DownloadCenter.proxyHost) }
+    var proxyPortUi by remember {
+        mutableStateOf(
+            if (DownloadCenter.proxyPort > 0) DownloadCenter.proxyPort.toString() else ""
+        )
+    }
+    var proxyUserUi by remember { mutableStateOf(DownloadCenter.proxyUser) }
+    var proxyPassUi by remember { mutableStateOf(DownloadCenter.proxyPass) }
 
     // ---- v1.5: battery-optimisation whitelist status for the
     // settings keep-alive card. Refreshed every time the settings
@@ -460,6 +472,16 @@ fun DownApp() {
                             userAgentUi = DownloadCenter.userAgent
                             amoledUi = DownloadCenter.amoledBlack
                             AmoledState.enabled = DownloadCenter.amoledBlack
+                            proxyOn = DownloadCenter.proxyEnabled
+                            proxyTypeUi = DownloadCenter.proxyType
+                            proxyHostUi = DownloadCenter.proxyHost
+                            proxyPortUi = if (DownloadCenter.proxyPort > 0) {
+                                DownloadCenter.proxyPort.toString()
+                            } else ""
+                            proxyUserUi = DownloadCenter.proxyUser
+                            // The proxy password is NOT in backups
+                            // (by design); proxyPassUi keeps whatever
+                            // is currently stored on this device.
                             msg += if (msg.isEmpty()) "设置已恢复" else "，设置也已恢复"
                         }
                         Toast.makeText(
@@ -874,6 +896,22 @@ fun DownApp() {
                 DownloadCenter.amoledBlack = it
                 AmoledState.enabled = it
             },
+            proxyOn = proxyOn,
+            onProxyOn = { proxyOn = it; DownloadCenter.proxyEnabled = it },
+            proxyType = proxyTypeUi,
+            onProxyType = { proxyTypeUi = it; DownloadCenter.proxyType = it },
+            proxyHost = proxyHostUi,
+            onProxyHost = { proxyHostUi = it; DownloadCenter.proxyHost = it.trim() },
+            proxyPortText = proxyPortUi,
+            onProxyPortText = { v ->
+                val digits = v.filter { it.isDigit() }.take(5)
+                proxyPortUi = digits
+                DownloadCenter.proxyPort = digits.toIntOrNull() ?: 0
+            },
+            proxyUser = proxyUserUi,
+            onProxyUser = { proxyUserUi = it; DownloadCenter.proxyUser = it },
+            proxyPass = proxyPassUi,
+            onProxyPass = { proxyPassUi = it; DownloadCenter.proxyPass = it },
             vibrateOn = vibrateOn,
             onVibrate = { vibrateOn = it; DownloadCenter.completeVibrate = it },
             soundOn = soundOn,
@@ -2019,6 +2057,18 @@ fun SettingsScreen(
     onUserAgent: (String) -> Unit,
     amoled: Boolean,
     onAmoled: (Boolean) -> Unit,
+    proxyOn: Boolean,
+    onProxyOn: (Boolean) -> Unit,
+    proxyType: Int,
+    onProxyType: (Int) -> Unit,
+    proxyHost: String,
+    onProxyHost: (String) -> Unit,
+    proxyPortText: String,
+    onProxyPortText: (String) -> Unit,
+    proxyUser: String,
+    onProxyUser: (String) -> Unit,
+    proxyPass: String,
+    onProxyPass: (String) -> Unit,
     vibrateOn: Boolean,
     onVibrate: (Boolean) -> Unit,
     soundOn: Boolean,
@@ -2201,6 +2251,87 @@ fun SettingsScreen(
                     onClick = { onUserAgent(uaCustom.trim()) },
                     modifier = Modifier.padding(top = 6.dp),
                 ) { Text("用这个自定义 UA") }
+            }
+        }
+        item(key = "s-proxy") {
+            SettingsGroup("代理") {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("下载代理")
+                        Text(
+                            "开启后，下载和嗅探的网络请求都走这个代理；默认关",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = proxyOn, onCheckedChange = onProxyOn)
+                }
+                if (proxyOn) {
+                    Text(
+                        "代理类型",
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                    ChipRow(
+                        options = listOf(
+                            ProxySettings.TYPE_HTTP to "HTTP",
+                            ProxySettings.TYPE_SOCKS to "SOCKS5",
+                        ),
+                        selected = proxyType,
+                        onPick = onProxyType,
+                    )
+                    OutlinedTextField(
+                        value = proxyHost,
+                        onValueChange = onProxyHost,
+                        label = { Text("主机地址（如 127.0.0.1）") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    )
+                    OutlinedTextField(
+                        value = proxyPortText,
+                        onValueChange = onProxyPortText,
+                        label = { Text("端口（如 7890）") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                    )
+                    OutlinedTextField(
+                        value = proxyUser,
+                        onValueChange = onProxyUser,
+                        label = { Text("用户名（可不填）") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                    )
+                    OutlinedTextField(
+                        value = proxyPass,
+                        onValueChange = onProxyPass,
+                        label = { Text("密码（可不填）") },
+                        singleLine = true,
+                        visualTransformation =
+                            androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                    )
+                    val problem = ProxySettings.validate(true, proxyHost, proxyPortText)
+                    if (problem != null) {
+                        Text(
+                            problem,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = WinPalette.Red,
+                            modifier = Modifier.padding(top = 6.dp),
+                        )
+                    }
+                }
+                Text(
+                    "代理连不上时，任务会停下来并写明原因，绝不会悄悄改走直连。" +
+                        "两个例外请注意：FTP 链接不走代理（协议限制）；内置浏览器打开网页本身不走代理" +
+                        "（系统限制），但它抓到链接后建的下载任务走代理。" +
+                        "代理密码只存在这台手机的设置里，不会进导出备份。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
             }
         }
         item(key = "s-look") {
@@ -3088,6 +3219,16 @@ fun TaskCard(
                 }
                 if (task.sources.isNotEmpty()) {
                     InfoRow("下载源：", "${1 + task.sources.size} 个地址（含镜像）")
+                }
+                // v1.9: proxy marker — while a proxy is active,
+                // this task's connections ride it (FTP excepted:
+                // the hand-written client cannot use one, and the
+                // settings copy says so).
+                val proxyNow = DownloadCenter.proxySettings()
+                if (proxyNow.active && !FtpClient.isFtpUrl(task.url) &&
+                    task.status != TaskStatus.DONE
+                ) {
+                    InfoRow("下载代理：", "${proxyNow.typeLabel()} ${proxyNow.label()}")
                 }
                 if (task.status != TaskStatus.DONE) {
                     Spacer(Modifier.height(6.dp))

@@ -1,6 +1,8 @@
 package com.tuxundown.android.sniff
 
 import com.tuxundown.android.core.DownloadEngine
+import com.tuxundown.android.core.ProxySettings
+import com.tuxundown.android.core.ProxyState
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.HttpURLConnection
@@ -65,7 +67,8 @@ object LinkRouter {
     fun probe(url: String, userAgent: String = DownloadEngine.DEFAULT_UA): Route {
         var method = "HEAD"
         repeat(2) {
-            val c = URL(url).openConnection() as HttpURLConnection
+            // v1.9: the probe rides the configured proxy too.
+            val c = ProxyState.open(URL(url))
             c.connectTimeout = 12_000
             c.readTimeout = 12_000
             c.instanceFollowRedirects = true
@@ -273,7 +276,8 @@ class Sniffer(private val userAgent: String = DownloadEngine.DEFAULT_UA) {
             if (!visited.add(current)) {
                 throw IllegalStateException("页面跳转成环，无法继续")
             }
-            val c = URL(current).openConnection() as HttpURLConnection
+            // v1.9: page fetches ride the configured proxy too.
+            val c = ProxyState.open(URL(current))
             c.connectTimeout = 15_000
             c.readTimeout = 20_000
             c.instanceFollowRedirects = false
@@ -357,7 +361,15 @@ class Sniffer(private val userAgent: String = DownloadEngine.DEFAULT_UA) {
             val f = try {
                 fetch(current)
             } catch (e: Exception) {
-                return SniffResult.Failure("打开页面失败：${e.message ?: "网络错误"}")
+                // v1.9: with a proxy configured, an I/O failure
+                // almost always means the proxy is unreachable —
+                // say so (and that nothing went direct).
+                val ps = ProxyState.settings
+                return if (ps.active && e is java.io.IOException) {
+                    SniffResult.Failure(ProxySettings.unreachableMessage(ps, e))
+                } else {
+                    SniffResult.Failure("打开页面失败：${e.message ?: "网络错误"}")
+                }
             }
             if (f.isFile) {
                 return SniffResult.DirectFile(
@@ -484,7 +496,7 @@ object SizeProbe {
     private fun probeOne(url: String, userAgent: String): Long {
         // HEAD first: cheapest, and most file servers answer it.
         runCatching {
-            val c = URL(url).openConnection() as HttpURLConnection
+            val c = ProxyState.open(URL(url))
             c.connectTimeout = TIMEOUT_MS
             c.readTimeout = TIMEOUT_MS
             c.instanceFollowRedirects = true
@@ -498,7 +510,7 @@ object SizeProbe {
         // Range GET of a single byte: Content-Range reports the total
         // even on servers that refuse HEAD. The body is never read.
         runCatching {
-            val c = URL(url).openConnection() as HttpURLConnection
+            val c = ProxyState.open(URL(url))
             c.connectTimeout = TIMEOUT_MS
             c.readTimeout = TIMEOUT_MS
             c.instanceFollowRedirects = true

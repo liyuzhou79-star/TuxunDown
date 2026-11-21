@@ -333,16 +333,27 @@ class DownloadService : Service() {
                 },
                 // v1.6 dual channel: alternate connections ride the
                 // cellular network the system granted us.
+                // v1.9: when a proxy is configured it applies on
+                // the cellular leg too (openConnection(url, proxy)).
                 extraOpener = if (dualActive) {
                     cellularNetwork?.let { net ->
-                        { u: java.net.URL ->
-                            net.openConnection(u) as java.net.HttpURLConnection
+                        val px = DownloadCenter.proxySettings().javaProxy()
+                        if (px != null) {
+                            { u: java.net.URL ->
+                                net.openConnection(u, px) as java.net.HttpURLConnection
+                            }
+                        } else {
+                            { u: java.net.URL ->
+                                net.openConnection(u) as java.net.HttpURLConnection
+                            }
                         }
                     }
                 } else null,
                 // v1.7: the user's custom User-Agent setting; a UA
                 // captured for THIS task still wins (UserAgents).
                 customUserAgent = DownloadCenter.userAgent,
+                // v1.9: the app-wide download proxy (default off).
+                proxySettings = DownloadCenter.proxySettings(),
                 // v1.5: per-host thread memory — start known hosts at
                 // their remembered optimum, remember new optima, and
                 // age the memory out when a host starts failing.

@@ -68,6 +68,12 @@ class DownloadEngine(
     /** v1.7: the user's custom User-Agent setting ("" = default).
      *  A UA captured for THIS task (sniffer/browser) still wins. */
     private val customUserAgent: String = "",
+    /** v1.9: the app-wide download proxy. When active, EVERY
+     *  connection this engine opens goes through it; a proxy
+     *  that cannot be reached fails the run with a plain message
+     *  (see openFollowingRedirects) — never a silent direct
+     *  connection. FTP runs ignore it (documented in settings). */
+    private val proxySettings: ProxySettings = ProxySettings(),
 ) {
     /** False once the thread count is settled (hint used, plateau
      *  reached or ceiling hit): the sampler stops growing workers. */
@@ -250,6 +256,20 @@ class DownloadEngine(
     }
 
     /**
+     * v1.9: open on the default network — through the configured
+     * proxy when one is active. openConnection(proxy) is the ONLY
+     * path then; there is no direct fall-back anywhere.
+     */
+    private fun openDefault(url: URL): HttpURLConnection {
+        val p = proxySettings.javaProxy()
+        return if (p != null) {
+            url.openConnection(p) as HttpURLConnection
+        } else {
+            url.openConnection() as HttpURLConnection
+        }
+    }
+
+    /**
      * Open a connection and follow redirects MANUALLY (audit A5):
      * HttpURLConnection's built-in follower refuses http <-> https
      * hops, which real download servers use all the time. Session
@@ -275,9 +295,9 @@ class DownloadEngine(
                 // Dual channel: odd connections ride the alternate
                 // network; if it refuses, fall back to the default.
                 runCatching { extra(hopUrl) }
-                    .getOrElse { hopUrl.openConnection() as HttpURLConnection }
+                    .getOrElse { openDefault(hopUrl) }
             } else {
-                hopUrl.openConnection() as HttpURLConnection
+                openDefault(hopUrl)
             }
             c.connectTimeout = 15_000
             c.readTimeout = 30_000
@@ -286,6 +306,10 @@ class DownloadEngine(
                 "User-Agent",
                 UserAgents.resolve(task.headers["User-Agent"], customUserAgent),
             )
+            // v1.9: HTTP-proxy credentials ride every hop.
+            proxySettings.proxyAuthHeader()?.let {
+                c.setRequestProperty("Proxy-Authorization", it)
+            }
             // v1.7 compat: Basic authentication embedded in the URL
             // itself (http://user:pass@host/file). HttpURLConnection
             // never turns userInfo into an Authorization header on
@@ -306,7 +330,22 @@ class DownloadEngine(
             task.headers["Cookie"]?.let { c.setRequestProperty("Cookie", it) }
             task.headers["Referer"]?.let { c.setRequestProperty("Referer", it) }
             apply(c)
-            val code = c.responseCode
+            // v1.9: reading the response code is what actually
+            // connects. With a proxy configured, a connect failure
+            // here means the PROXY is unreachable — say exactly
+            // that and stop; the one thing we must never do is
+            // quietly retry without the proxy.
+            val code = try {
+                c.responseCode
+            } catch (e: java.io.IOException) {
+                runCatching { c.disconnect() }
+                if (proxySettings.active) {
+                    throw IllegalStateException(
+                        ProxySettings.unreachableMessage(proxySettings, e)
+                    )
+                }
+                throw e
+            }
             if (code in 301..303 || code == 307 || code == 308) {
                 val loc = c.getHeaderField("Location")
                 c.disconnect()
