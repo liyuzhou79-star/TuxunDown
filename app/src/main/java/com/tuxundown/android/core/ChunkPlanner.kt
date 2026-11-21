@@ -15,18 +15,38 @@ object ChunkPlanner {
     const val MAX_CHUNK = 4L * 1024 * 1024
 
     /**
-     * Pick a chunk size (v1.3 adaptive): aim for ~24 chunks per
-     * connection. More, smaller chunks than v1.2 means the work-
-     * stealing queue stays fluid (a fast connection never waits long
-     * for its next piece and a slow connection never holds a big
-     * piece hostage), while the 4 MB cap keeps per-request overhead
-     * negligible on huge files. Small files get proportionally finer
-     * chunks down to 128 KB.
+     * Pick a chunk size — v1.8 tiered by file size (this replaces
+     * the v1.3 formula total/(threads*24), which cut a 30 MB file
+     * into 240 slivers of 128 KB: hundreds of extra requests whose
+     * round trips cost more than the stealing flexibility bought).
+     *
+     * The tiers keep the chunk COUNT in the few-hundred range at
+     * every size — enough pieces for the work-stealing queue to
+     * stay fluid, few enough that per-request overhead stays
+     * negligible:
+     *   <= 8 MB   -> 128 KB   (<= 64 chunks; tiny files finish fast anyway)
+     *   <= 128 MB -> 512 KB   (<= 256 chunks)
+     *   <= 1 GB   -> 1 MB     (<= 1024 chunks)
+     *   <= 8 GB   -> 2 MB     (<= 4096 chunks)
+     *   >  8 GB   -> 4 MB     (the MAX_CHUNK cap)
+     * On top of the tier, a thread-count guard: when the tier would
+     * give each connection fewer than ~3 chunks (very high thread
+     * counts on a mid-size file), the chunk shrinks so every worker
+     * still gets several pieces — never below MIN_CHUNK, where the
+     * file is simply too small to feed everyone (harmless: extra
+     * workers exit immediately).
      */
     fun chunkSizeFor(totalSize: Long, threads: Int): Long {
         if (totalSize <= 0) return MIN_CHUNK
-        val target = totalSize / (threads.coerceAtLeast(1) * 24L)
-        return target.coerceIn(MIN_CHUNK, MAX_CHUNK)
+        val tier = when {
+            totalSize <= 8L * 1024 * 1024 -> MIN_CHUNK
+            totalSize <= 128L * 1024 * 1024 -> 512L * 1024
+            totalSize <= 1024L * 1024 * 1024 -> 1024L * 1024
+            totalSize <= 8L * 1024 * 1024 * 1024 -> 2L * 1024 * 1024
+            else -> MAX_CHUNK
+        }
+        val perThreadCap = totalSize / (threads.coerceAtLeast(1) * 3L)
+        return minOf(tier, maxOf(perThreadCap, MIN_CHUNK)).coerceIn(MIN_CHUNK, MAX_CHUNK)
     }
 
     fun chunkCount(totalSize: Long, chunkSize: Long): Int {

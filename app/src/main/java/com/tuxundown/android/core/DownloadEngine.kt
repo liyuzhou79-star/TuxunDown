@@ -145,9 +145,54 @@ class DownloadEngine(
                 task.isHls = true
                 return runHls()
             }
-            if (task.totalSize <= 0 || task.fileName.isBlank()) probe()
+            // v1.8 start-up speed pass — count the round trips a
+            // start used to pay before the first chunk could move:
+            //   fresh:  probe (1) — unavoidable, the total size and
+            //           Range support are genuinely unknown.
+            //   resume: validateResume's own 1-byte request (1),
+            //           THEN the .part target open (a MediaStore /
+            //           SAF binder round trip), strictly serial.
+            //   mirrors: 1 + 2N sequential requests in
+            //           validateSources (fixed there, see its doc).
+            // Now a resume makes ONE pre-flight request (the
+            // revalidation IS the probe for a known-size task) and
+            // the target opens CONCURRENTLY with it on a side
+            // thread — the file name is already known on a resume,
+            // which is the only thing the open ever waited for.
+            val resuming = task.chunkDone.any { it } ||
+                (task.singleThreadOnly && task.downloaded > 0)
+            val preTarget = java.util.concurrent.atomic.AtomicReference<DownloadTarget?>()
+            val preTargetError = java.util.concurrent.atomic.AtomicReference<Exception?>()
+            val preThread = if (resuming && task.fileName.isNotBlank()) {
+                Thread {
+                    try {
+                        preTarget.set(targetProvider())
+                    } catch (e: Exception) {
+                        preTargetError.set(e)
+                    }
+                }.apply { isDaemon = true; start() }
+            } else null
+            fun takePreTarget(): DownloadTarget? {
+                if (preThread == null) return null
+                preThread.join()
+                preTargetError.get()?.let { throw it }
+                return preTarget.get()
+            }
+            fun dropPreTarget() {
+                if (preThread == null) return
+                runCatching { preThread.join(5_000) }
+                preTarget.get()?.let { runCatching { it.close() } }
+            }
+            try {
+                if (task.totalSize <= 0 || task.fileName.isBlank()) probe()
+                else if (resuming) revalidateResume()
+            } catch (e: Exception) {
+                dropPreTarget()
+                throw e
+            }
             // Traffic protection can only judge once the size is known.
             if (!trafficGuard()) {
+                dropPreTarget()
                 trafficBlocked = true
                 task.status = TaskStatus.PAUSED
                 task.note = "流量保护：当前是流量网络，这个文件有 ${Format.size(task.totalSize)}，" +
@@ -156,14 +201,13 @@ class DownloadEngine(
             }
             if (task.totalSize == 0L) {
                 // A genuinely empty file: nothing to transfer.
-                target = targetProvider()
+                target = takePreTarget() ?: targetProvider()
                 try { target.truncate(0) } finally { runCatching { target.close() } }
                 task.downloaded = 0
                 task.status = TaskStatus.DONE
                 return task.status
             }
-            validateResume()
-            target = targetProvider()
+            target = takePreTarget() ?: targetProvider()
             try {
                 if (task.singleThreadOnly || task.totalSize <= 0) {
                     // Mirrors can only help a segmented download; say
@@ -316,15 +360,22 @@ class DownloadEngine(
     }
 
     /**
-     * Audit A4: before resuming a partially downloaded file, ask the
-     * server whether the file is still the same one. If a stored
-     * validator (ETag / Last-Modified) or the total size disagrees,
-     * the old partial bytes belong to a different file version —
-     * drop the chunk state and start the byte ranges over (the .part
-     * file itself is truncated by the segmented run that follows).
-     * When the server offers no validators either time, resume as-is.
+     * Audit A4 + v1.8: before resuming a partially downloaded file,
+     * ask the server whether the file is still the same one. If a
+     * stored validator (ETag / Last-Modified) or the total size
+     * disagrees, the old partial bytes belong to a different file
+     * version — drop the chunk state and start the byte ranges over
+     * (the .part file itself is truncated by the segmented run that
+     * follows). When the server offers no validators either time,
+     * resume as-is.
+     *
+     * v1.8: this is now the resume path's ONLY pre-flight request
+     * (run() calls it instead of probe() when the size is known),
+     * and the .part target opens concurrently with it — one round
+     * trip saved on every resume versus the old probe-then-validate
+     * arrangement.
      */
-    private fun validateResume() {
+    private fun revalidateResume() {
         val resuming = task.chunkDone.any { it } ||
             (task.singleThreadOnly && task.downloaded > 0)
         if (!resuming) return
@@ -557,21 +608,42 @@ class DownloadEngine(
         if (extras.isEmpty() || task.totalSize <= 0) return listOf(task.url)
         val sampleOffset = task.totalSize / 2
         val sampleLen = minOf(64L * 1024, task.totalSize - sampleOffset).toInt()
-        val primarySample = if (sampleLen > 0) {
-            fetchSample(task.url, sampleOffset, sampleLen)
-        } else null
+        // v1.8: the checks run CONCURRENTLY — the primary's sample
+        // and every mirror's (total, then sample) fetch overlap on
+        // a small pool. The old code paid two SEQUENTIAL round
+        // trips per mirror before the first chunk could start
+        // (3 mirrors ≈ 7 round trips); now the whole validation
+        // costs about two round trips of wall time.
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(
+            minOf(4, extras.size + 1)
+        ) { r -> Thread(r).apply { isDaemon = true } }
         val valid = mutableListOf(task.url)
         var rejected = 0
-        for (src in extras) {
-            val total = probeTotal(src)
-            val sample = if (total == task.totalSize && sampleLen > 0) {
-                fetchSample(src, sampleOffset, sampleLen)
-            } else null
-            if (SourceCheck.isSameFile(task.totalSize, total, primarySample, sample)) {
-                valid.add(src)
-            } else {
-                rejected++
+        try {
+            val primarySampleF = pool.submit(java.util.concurrent.Callable {
+                if (sampleLen > 0) fetchSample(task.url, sampleOffset, sampleLen) else null
+            })
+            val mirrorFs = extras.map { src ->
+                src to pool.submit(java.util.concurrent.Callable {
+                    val total = probeTotal(src)
+                    val sample = if (total == task.totalSize && sampleLen > 0) {
+                        fetchSample(src, sampleOffset, sampleLen)
+                    } else null
+                    total to sample
+                })
             }
+            val primarySample = runCatching { primarySampleF.get() }.getOrNull()
+            for ((src, f) in mirrorFs) {
+                val (total, sample) = runCatching { f.get() }
+                    .getOrDefault(-1L to null)
+                if (SourceCheck.isSameFile(task.totalSize, total, primarySample, sample)) {
+                    valid.add(src)
+                } else {
+                    rejected++
+                }
+            }
+        } finally {
+            pool.shutdown()
         }
         if (rejected > 0) {
             appendNote(
