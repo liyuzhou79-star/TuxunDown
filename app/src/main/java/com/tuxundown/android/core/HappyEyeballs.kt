@@ -143,7 +143,14 @@ object HappyEyeballs {
             winner.get()?.let { return it }
             throw firstError.get() ?: IOException("连接失败")
         } finally {
-            executor.shutdownNow()
+            // shutdown(), NOT shutdownNow(): an attempt already
+            // in flight must be allowed to finish so it can hand
+            // its result to dispose (a real socket connect does
+            // not stop on interrupt anyway — it would complete
+            // and leak if we had already torn the pool down).
+            // Attempts still waiting out their stagger bail on
+            // the won flag; the threads are daemons regardless.
+            executor.shutdown()
         }
     }
 }
