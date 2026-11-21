@@ -128,6 +128,40 @@ class SniffActivity : Activity() {
         }
         frame.addView(web)
 
+        // ---- long-press a link: download THAT link (v1.9) ----
+        // The hit test tells us the URL under the finger; the task
+        // carries the same session headers a real download tap
+        // would have captured (Cookie / Referer / UA). The browser
+        // stays open afterwards — the user may want more links.
+        web.setOnLongClickListener {
+            val hit = web.hitTestResult
+            val link = hit.extra
+            val isLink = hit.type == WebView.HitTestResult.SRC_ANCHOR_TYPE ||
+                hit.type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE
+            if (isLink && !link.isNullOrBlank() && isDownloadableUrl(link)) {
+                AlertDialog.Builder(this)
+                    .setTitle("下载这个链接？")
+                    .setMessage(link)
+                    .setPositiveButton("用 TuxunDown 下载") { _, _ ->
+                        val headers = mutableMapOf<String, String>()
+                        headers["User-Agent"] = web.settings.userAgentString ?: ""
+                        runCatching { CookieManager.getInstance().getCookie(link) }
+                            .getOrNull()?.let { headers["Cookie"] = it }
+                        web.url?.let { headers["Referer"] = it }
+                        if (createTask(link, headers)) {
+                            Toast.makeText(this, "已新建下载任务", Toast.LENGTH_LONG).show()
+                        } else {
+                            Toast.makeText(this, "这个链接已经在任务列表里了", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                    .setNegativeButton("取消", null)
+                    .show()
+                true
+            } else {
+                false
+            }
+        }
+
         // ---- floating take-over button (v1.4 item 17) ----
         val fab = Button(this).apply {
             text = "⬇ 用 TuxunDown 下载"

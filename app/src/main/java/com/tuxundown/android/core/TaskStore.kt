@@ -220,8 +220,13 @@ class TaskStore(context: Context) {
         }
     }
 
-    /** v1.4: export the whole task list as JSON text (no file bytes). */
-    fun exportJson(): String = serialize(tasks)
+    /**
+     * v1.4: export the whole task list as JSON text (no file
+     * bytes). v1.9: exports STRIP each task's Cookie header —
+     * it is a login credential and a backup file may end up
+     * anywhere; the on-disk store keeps it (resume needs it).
+     */
+    fun exportJson(): String = serialize(tasks, stripSensitiveHeaders = true)
 
     /**
      * v1.4: import tasks from an exported JSON text. Records whose id
@@ -273,8 +278,14 @@ class TaskStore(context: Context) {
         const val MAX_SOURCES = 20
         const val MAX_HEADERS = 50
 
-        /** Pure serialization — same format on disk and for export. */
-        fun serialize(list: List<TaskRecord>): String {
+        /** Pure serialization — same format on disk and for export.
+         *  [stripSensitiveHeaders] is for EXPORTS only (v1.9): the
+         *  Cookie header is removed so a backup file never carries
+         *  a session credential. */
+        fun serialize(
+            list: List<TaskRecord>,
+            stripSensitiveHeaders: Boolean = false,
+        ): String {
             val arr = JSONArray()
             for (t in list) {
                 val o = JSONObject()
@@ -319,7 +330,12 @@ class TaskStore(context: Context) {
                 synchronized(t.speedHistory) { for (v in t.speedHistory) hist.put(v) }
                 o.put("speedHistory", hist)
                 val h = JSONObject()
-                for ((k, v) in t.headers) h.put(k, v)
+                val headersOut = if (stripSensitiveHeaders) {
+                    TaskHeaders.strippedForExport(t.headers)
+                } else {
+                    t.headers
+                }
+                for ((k, v) in headersOut) h.put(k, v)
                 o.put("headers", h)
                 arr.put(o)
             }

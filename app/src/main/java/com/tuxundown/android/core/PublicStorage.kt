@@ -277,6 +277,91 @@ object PublicStorage {
         return out
     }
 
+    // ---------- v1.9: finished-file scan for the files page ----------
+
+    /** A finished (non-.part) file found in the download location. */
+    data class ScannedFile(val uri: Uri, val name: String, val size: Long, val modifiedAt: Long)
+
+    /**
+     * List the FINISHED files in the current download location
+     * (public Download root, or the user's SAF folder). The
+     * caller merges this with the task records; entries a record
+     * already claims are dropped there. ".part" files belong to
+     * the orphan cleanup, not to this list.
+     */
+    fun scanDownloadedFiles(context: Context): List<ScannedFile> {
+        val out = mutableListOf<ScannedFile>()
+        val custom = DownloadCenter.downloadDirUri
+        if (custom.isNotBlank()) {
+            val tree = runCatching {
+                DocumentFile.fromTreeUri(context, Uri.parse(custom))
+            }.getOrNull()
+            if (tree != null && tree.canRead()) {
+                for (f in tree.listFiles()) {
+                    val name = f.name ?: continue
+                    if (!f.isFile) continue
+                    if (name.endsWith(".part", ignoreCase = true)) continue
+                    out.add(
+                        ScannedFile(
+                            f.uri, name,
+                            runCatching { f.length() }.getOrDefault(-1),
+                            runCatching { f.lastModified() }.getOrDefault(0),
+                        )
+                    )
+                }
+            }
+        } else {
+            val cursor = runCatching {
+                context.contentResolver.query(
+                    downloadsCollection(),
+                    arrayOf(
+                        MediaStore.Downloads._ID,
+                        MediaStore.Downloads.DISPLAY_NAME,
+                        MediaStore.Downloads.SIZE,
+                        MediaStore.Downloads.DATE_MODIFIED,
+                    ),
+                    "${MediaStore.Downloads.RELATIVE_PATH} = ?",
+                    arrayOf(Environment.DIRECTORY_DOWNLOADS + "/"),
+                    "${MediaStore.Downloads.DISPLAY_NAME} ASC",
+                )
+            }.getOrNull()
+            cursor?.use {
+                val idIdx = it.getColumnIndexOrThrow(MediaStore.Downloads._ID)
+                val nameIdx = it.getColumnIndexOrThrow(MediaStore.Downloads.DISPLAY_NAME)
+                val sizeIdx = it.getColumnIndexOrThrow(MediaStore.Downloads.SIZE)
+                val modIdx = it.getColumnIndexOrThrow(MediaStore.Downloads.DATE_MODIFIED)
+                while (it.moveToNext()) {
+                    val name = it.getString(nameIdx) ?: continue
+                    if (name.endsWith(".part", ignoreCase = true)) continue
+                    val uri = Uri.withAppendedPath(
+                        downloadsCollection(), it.getLong(idIdx).toString()
+                    )
+                    out.add(
+                        ScannedFile(
+                            uri, name,
+                            runCatching { it.getLong(sizeIdx) }.getOrDefault(-1),
+                            // MediaStore DATE_MODIFIED is SECONDS.
+                            runCatching { it.getLong(modIdx) * 1000 }.getOrDefault(0),
+                        )
+                    )
+                }
+            }
+        }
+        return out
+    }
+
+    /** Delete one file by its Uri string; false when refused. */
+    fun deleteByUri(context: Context, uriString: String): Boolean {
+        val uri = runCatching { Uri.parse(uriString) }.getOrNull() ?: return false
+        val doc = runCatching { DocumentFile.fromSingleUri(context, uri) }.getOrNull()
+        if (doc != null && doc.exists()) {
+            return runCatching { doc.delete() }.getOrDefault(false)
+        }
+        return runCatching {
+            context.contentResolver.delete(uri, null, null) > 0
+        }.getOrDefault(false)
+    }
+
     /** Delete one orphan .part; false when the system refused. */
     fun deleteOrphan(context: Context, orphan: OrphanPart): Boolean {
         val doc = runCatching {

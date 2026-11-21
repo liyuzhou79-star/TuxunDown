@@ -88,6 +88,24 @@ class TaskStoreJsonTest {
     }
 
     @Test
+    fun exportStripsCookieButDiskFormatKeepsIt() {
+        // v1.9: a backup file must never carry the session
+        // credential; the on-disk serialization (default) keeps
+        // it, because resuming needs it.
+        val t = TaskRecord(url = "https://a.b/f.bin")
+        t.headers["Cookie"] = "session=secret"
+        t.headers["Referer"] = "https://a.b/page"
+        val exported = TaskStore.deserialize(
+            TaskStore.serialize(listOf(t), stripSensitiveHeaders = true)
+        )
+        assertEquals(1, exported.size)
+        assertTrue(exported[0].headers.keys.none { it.equals("Cookie", true) })
+        assertEquals("https://a.b/page", exported[0].headers["Referer"])
+        val onDisk = TaskStore.deserialize(TaskStore.serialize(listOf(t)))
+        assertEquals("session=secret", onDisk[0].headers["Cookie"])
+    }
+
+    @Test
     fun hostileBackupRecordsAreContained() {
         // v1.9 audit: an imported backup is untrusted input.
         // - a record claiming an astronomical file with 1-byte

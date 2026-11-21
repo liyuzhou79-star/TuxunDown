@@ -86,17 +86,20 @@ import com.tuxundown.android.core.Backup
 import com.tuxundown.android.core.Checksum
 import com.tuxundown.android.core.ChecksumVerifier
 import com.tuxundown.android.core.DownloadCenter
+import com.tuxundown.android.core.DownloadedFiles
 import com.tuxundown.android.core.Format
 import com.tuxundown.android.core.FtpClient
 import com.tuxundown.android.core.ProxySettings
 import com.tuxundown.android.core.PublicStorage
 import com.tuxundown.android.core.ScheduleTime
 import com.tuxundown.android.core.SpeedTest
+import com.tuxundown.android.core.TaskHeaders
 import com.tuxundown.android.core.TaskRecord
 import com.tuxundown.android.core.TaskStatus
 import com.tuxundown.android.core.UserAgents
 import com.tuxundown.android.sniff.LinkRouter
 import com.tuxundown.android.sniff.SizeProbe
+import com.tuxundown.android.sniff.SniffFilter
 import com.tuxundown.android.sniff.SniffResult
 import com.tuxundown.android.sniff.SniffSort
 import com.tuxundown.android.sniff.SniffedResource
@@ -176,6 +179,21 @@ class MainActivity : ComponentActivity() {
  */
 object SharedLinkState {
     var text by mutableStateOf("")
+}
+
+/**
+ * v1.9: the last sniff result, held in process memory so that
+ * closing the result dialog does NOT throw it away — the home
+ * screen offers a "上次嗅探结果" entry that reopens it (a fresh
+ * sniff would cost the page fetch and the size probe all over
+ * again, and the page might have changed since). Process death
+ * still clears it; that is accepted and stated in the guide.
+ */
+object SniffSession {
+    val listState = mutableStateOf<List<SniffedResource>>(emptyList())
+    val pageState = mutableStateOf("")
+    val totalState = mutableStateOf(0)
+    val openState = mutableStateOf(false)
 }
 
 /**
@@ -293,13 +311,18 @@ fun DownApp() {
     var message by remember { mutableStateOf("") }
 
     // ---- sniff result dialog state (v1.4: multi-select + filter + sort) ----
-    var sniffList by remember { mutableStateOf<List<SniffedResource>>(emptyList()) }
-    var sniffTotal by remember { mutableStateOf(0) }
-    var sniffPage by remember { mutableStateOf("") }
+    // v1.9: the list/page/total live in SniffSession (process
+    // memory) so closing the dialog keeps the session — the home
+    // screen can reopen it without sniffing again.
+    var sniffList by SniffSession.listState
+    var sniffTotal by SniffSession.totalState
+    var sniffPage by SniffSession.pageState
+    var sniffOpen by SniffSession.openState
     var sniffChecked by remember { mutableStateOf<Set<String>>(emptySet()) }
     var sniffKind by remember { mutableStateOf("") } // "" = all kinds
     var sniffSort by remember { mutableStateOf(0) } // 0 默认 1 名称 2 类型 3 大小
     var sniffProbing by remember { mutableStateOf(false) } // v1.6 size probe phase
+    var sniffShowNoise by remember { mutableStateOf(false) } // v1.9 noise folding
 
     // ---- mirror-sources dialog (v1.6 item 4) ----
     var sourcesTask by remember { mutableStateOf<TaskRecord?>(null) }
@@ -308,6 +331,11 @@ fun DownApp() {
     // ---- checksum dialog (v1.7) ----
     var hashTask by remember { mutableStateOf<TaskRecord?>(null) }
     var hashText by remember { mutableStateOf("") }
+
+    // ---- request-header editor dialog (v1.9) ----
+    var headersTask by remember { mutableStateOf<TaskRecord?>(null) }
+    var headersText by remember { mutableStateOf("") }
+    var headersError by remember { mutableStateOf("") }
 
     // ---- home list state (v1.4: tabs, search, sort, multi-select) ----
     var tab by remember { mutableStateOf(0) } // 0 全部 1 下载中 2 已完成 3 失败
@@ -558,6 +586,8 @@ fun DownApp() {
                 sniffList = result.resources
                 sniffTotal = result.totalCount
                 sniffPage = result.pageUrl
+                sniffOpen = true
+                sniffShowNoise = false
                 sniffChecked = result.resources
                     .filter { it.looksLikeDownloadEntry }
                     .map { it.url }.toSet()
@@ -832,6 +862,11 @@ fun DownApp() {
                 hashTask = task
                 hashText = task.expectedSha256.ifBlank { task.expectedMd5 }
             },
+            onHeaders = {
+                headersTask = task
+                headersText = TaskHeaders.toText(task.headers)
+                headersError = ""
+            },
         )
     }
 
@@ -955,6 +990,8 @@ fun DownApp() {
             onBack = { screen = "home" },
             onSpeedTest = { screen = "speedtest" },
         )
+    } else if (screen == "files") {
+        FilesScreen(onBack = { screen = "home" })
     } else if (screen == "speedtest") {
         SpeedTestScreen(onBack = { screen = "stats" })
     } else {
@@ -1007,6 +1044,24 @@ fun DownApp() {
             item(key = "newbtn") {
                 Button(onClick = { showAdd = true }, modifier = Modifier.fillMaxWidth()) {
                     Text("＋ 新建下载")
+                }
+            }
+
+            item(key = "filesbtn") {
+                OutlinedButton(
+                    onClick = { screen = "files" },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("已下载文件") }
+            }
+
+            // v1.9: reopen the retained sniff session (closing
+            // the result dialog no longer discards it).
+            if (sniffList.isNotEmpty() && !sniffOpen) {
+                item(key = "sniffagain") {
+                    OutlinedButton(
+                        onClick = { sniffOpen = true },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("上次嗅探结果（${sniffList.size} 个资源，点开继续选）") }
                 }
             }
 
@@ -1348,10 +1403,15 @@ fun DownApp() {
         )
     }
 
-    if (sniffList.isNotEmpty()) {
+    if (sniffOpen && sniffList.isNotEmpty()) {
         val kindsPresent = sniffList.map { it.kind }.distinct()
+        // v1.9: duplicate groups (same name + same measured size)
+        // and the noise fold (analytics/ads/tiny images).
+        val dupCounts = SniffFilter.duplicateCounts(sniffList)
+        val noiseCount = sniffList.count { SniffFilter.isNoise(it) }
         val shownSniff = sniffList
             .filter { sniffKind.isBlank() || it.kind == sniffKind }
+            .filter { sniffShowNoise || !SniffFilter.isNoise(it) }
             .let { list ->
                 when (sniffSort) {
                     1 -> list.sortedBy { it.name.lowercase() }
@@ -1361,7 +1421,7 @@ fun DownApp() {
                 }
             }
         AlertDialog(
-            onDismissRequest = { sniffList = emptyList() },
+            onDismissRequest = { sniffOpen = false },
             title = {
                 Text(
                     if (sniffTotal > sniffList.size)
@@ -1414,6 +1474,35 @@ fun DownApp() {
                             }
                         }) { Text("全选/取消") }
                     }
+                    if (dupCounts.isNotEmpty()) {
+                        Text(
+                            "有 ${dupCounts.size} 个资源和别的资源同名同大小，" +
+                                "可能是同一个文件被页面列了两次，勾选时留意别重复下载。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
+                    if (noiseCount > 0) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                if (sniffShowNoise) {
+                                    "噪音资源已展开（统计 / 广告 / 小图片）"
+                                } else {
+                                    "已折叠 $noiseCount 个疑似噪音资源（统计 / 广告 / 小图片）"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                            )
+                            TextButton(onClick = { sniffShowNoise = !sniffShowNoise }) {
+                                Text(if (sniffShowNoise) "收起" else "展开")
+                            }
+                        }
+                    }
                     if (sniffProbing) {
                         Text(
                             "正在测每个文件的大小（最多测前 ${SizeProbe.MAX_PROBED} 个，测不到的会写大小未知）…",
@@ -1460,7 +1549,11 @@ fun DownApp() {
                                         "${kindLabel(res.kind)}" +
                                             (if (res.looksLikeDownloadEntry) " · 疑似下载入口" else "") +
                                             (if (res.size >= 0) " · ${Format.size(res.size)}"
-                                            else " · 大小未知"),
+                                            else " · 大小未知") +
+                                            (dupCounts[res.url]?.let {
+                                                " · 可能重复（共 $it 个同名同大小）"
+                                            } ?: "") +
+                                            (if (SniffFilter.isNoise(res)) " · 疑似噪音" else ""),
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
@@ -1482,7 +1575,9 @@ fun DownApp() {
                 TextButton(
                     onClick = {
                         val chosen = sniffList.filter { it.url in sniffChecked }
-                        sniffList = emptyList()
+                        // v1.9: closing keeps the session — the
+                        // home screen can reopen this same list.
+                        sniffOpen = false
                         var created = 0
                         for (res in chosen) {
                             if (createTask(res.url, sniffPage)) created++
@@ -1496,7 +1591,7 @@ fun DownApp() {
                 ) { Text("下载所选（${sniffChecked.size}）") }
             },
             dismissButton = {
-                TextButton(onClick = { sniffList = emptyList() }) { Text("关闭") }
+                TextButton(onClick = { sniffOpen = false }) { Text("关闭") }
             },
         )
     }
@@ -1720,6 +1815,73 @@ fun DownApp() {
         )
     }
 
+    // ---- request-header editor dialog (v1.9) ----
+    if (headersTask != null) {
+        val ht2 = headersTask!!
+        AlertDialog(
+            onDismissRequest = { headersTask = null },
+            title = { Text("请求头") },
+            text = {
+                Column {
+                    Text(
+                        "这个任务每次连接服务器时带上的请求头，一行一个，格式是「名字: 值」。" +
+                            "改完保存后，之后新建的连接就会用新的（暂停再继续最稳妥）。" +
+                            "Cookie 是登录凭证，只存在这台手机里，导出备份时会被剔除。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = headersText,
+                        onValueChange = { headersText = it },
+                        label = { Text("如 Cookie: session=…（可留空清空）") },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 3,
+                        maxLines = 8,
+                    )
+                    if (headersError.isNotBlank()) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            headersError,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = WinPalette.Red,
+                        )
+                    }
+                    if (ht2.status == TaskStatus.RUNNING) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "任务正在下载：已经连上的连接不会变，新开的连接会用新请求头。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val parsed = TaskHeaders.parse(headersText)
+                    if (parsed.problems.isNotEmpty()) {
+                        headersError = parsed.problems.joinToString("\n")
+                    } else {
+                        ht2.headers.clear()
+                        ht2.headers.putAll(parsed.headers)
+                        store.save()
+                        headersTask = null
+                        Toast.makeText(
+                            context,
+                            if (parsed.headers.isEmpty()) "请求头已清空"
+                            else "已保存 ${parsed.headers.size} 个请求头",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    }
+                }) { Text("保存") }
+            },
+            dismissButton = {
+                TextButton(onClick = { headersTask = null }) { Text("取消") }
+            },
+        )
+    }
+
     // ---- clipboard link prompt (v1.3) ----
     if (clipboardLink.isNotBlank()) {
         AlertDialog(
@@ -1875,6 +2037,239 @@ fun StatsScreen(onBack: () -> Unit, onSpeedTest: () -> Unit) {
  * is explicit that this measures the speed TO THE TEST SERVER —
  * any given file's server can be slower or faster.
  */
+/**
+ * Downloaded-files manager (v1.9): every finished file in the
+ * current download location — task records first (authoritative),
+ * plus a directory scan for files whose record was deleted
+ * (deleting a record keeps the file, by design). Open / share /
+ * delete; deleting the FILE and deleting the RECORD are two
+ * separate actions, each confirmed on its own.
+ */
+@androidx.compose.runtime.Composable
+fun FilesScreen(onBack: () -> Unit) {
+    val context = LocalContext.current
+    var entries by remember { mutableStateOf<List<DownloadedFiles.Entry>>(emptyList()) }
+    var loading by remember { mutableStateOf(true) }
+    var sortMode by remember { mutableStateOf(DownloadedFiles.SORT_TIME) }
+    var reloadKey by remember { mutableStateOf(0) }
+    var deleteEntry by remember { mutableStateOf<DownloadedFiles.Entry?>(null) }
+
+    LaunchedEffect(reloadKey) {
+        loading = true
+        Thread {
+            val fromRecords = DownloadCenter.store.tasks
+                .filter { it.status == TaskStatus.DONE && it.savedUri.isNotBlank() }
+                .map { t ->
+                    DownloadedFiles.Entry(
+                        name = t.savedName.ifBlank { t.fileName },
+                        uri = t.savedUri,
+                        size = if (t.totalSize > 0) t.totalSize else t.downloaded,
+                        modifiedAt = t.finishedAt,
+                        taskId = t.id,
+                    )
+                }
+            val fromScan = runCatching { PublicStorage.scanDownloadedFiles(context) }
+                .getOrDefault(emptyList())
+                .map {
+                    DownloadedFiles.Entry(
+                        it.name, it.uri.toString(), it.size, it.modifiedAt, ""
+                    )
+                }
+            val merged = DownloadedFiles.merge(fromRecords, fromScan)
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                entries = merged
+                loading = false
+            }
+        }.start()
+    }
+
+    fun openEntry(e: DownloadedFiles.Entry) {
+        val ext = e.name.substringAfterLast('.', "").lowercase()
+        val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "*/*"
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            setDataAndType(Uri.parse(e.uri), mime)
+        }
+        runCatching { context.startActivity(Intent.createChooser(intent, "打开文件")) }
+            .onFailure {
+                Toast.makeText(context, "没有能打开这个文件的应用", Toast.LENGTH_SHORT).show()
+            }
+    }
+
+    fun shareEntry(e: DownloadedFiles.Entry) {
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "*/*"
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            putExtra(Intent.EXTRA_STREAM, Uri.parse(e.uri))
+        }
+        runCatching { context.startActivity(Intent.createChooser(intent, "分享文件")) }
+    }
+
+    val shown = DownloadedFiles.sort(entries, sortMode)
+    LazyColumn(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item(key = "f-head") {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onBack) { Text("← 返回") }
+                Text(
+                    "已下载文件",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
+        item(key = "f-summary") {
+            Column {
+                Text(
+                    when {
+                        loading -> "正在扫描下载目录…"
+                        entries.isEmpty() -> "还没有下好的文件"
+                        else -> "共 ${entries.size} 个文件 · 合计占用 " +
+                            Format.size(DownloadedFiles.totalSize(entries))
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    "位置：${PublicStorage.locationLabel(context)}" +
+                        "（含以前删过任务记录、只剩下文件本体的）",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(
+                    Modifier.padding(top = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "排序：",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    val modes = listOf(
+                        DownloadedFiles.SORT_TIME to "时间",
+                        DownloadedFiles.SORT_SIZE to "大小",
+                    )
+                    for ((m, label) in modes) {
+                        if (m == sortMode) {
+                            Button(onClick = { }) { Text(label) }
+                        } else {
+                            OutlinedButton(onClick = { sortMode = m }) { Text(label) }
+                        }
+                    }
+                }
+            }
+        }
+        if (!loading && entries.isEmpty()) {
+            item(key = "f-empty") {
+                Text("下好的文件会出现在这里，可以打开、分享、删除。")
+            }
+        }
+        items(shown, key = { it.uri }) { e ->
+            Card(
+                Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                ),
+            ) {
+                Column(Modifier.padding(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        FileTypeBadge(kind = kindOfName(e.name), name = e.name)
+                        Spacer(Modifier.size(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                e.name,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                Format.size(e.size) +
+                                    (if (e.modifiedAt > 0) {
+                                        " · " + Format.dateTime(e.modifiedAt)
+                                    } else "") +
+                                    (if (e.taskId.isBlank()) " · 仅剩文件（记录已删）" else ""),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    Row(
+                        Modifier.padding(top = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Button(onClick = { openEntry(e) }) { Text("打开") }
+                        OutlinedButton(onClick = { shareEntry(e) }) { Text("分享") }
+                        OutlinedButton(onClick = { deleteEntry = e }) { Text("删除") }
+                    }
+                }
+            }
+        }
+    }
+
+    // Delete: FILE and RECORD are separate choices (v1.9) — the
+    // dialog spells out what each one does before anything goes.
+    if (deleteEntry != null) {
+        val e = deleteEntry!!
+        val task = if (e.taskId.isNotBlank()) {
+            DownloadCenter.store.byId(e.taskId)
+        } else null
+        AlertDialog(
+            onDismissRequest = { deleteEntry = null },
+            title = { Text("删除") },
+            text = {
+                Text(
+                    "「${e.name}」（${Format.size(e.size)}）\n" +
+                        if (task != null) {
+                            "· 只删记录：任务记录去掉，文件保留在下载目录里，之后在本页显示为「仅剩文件」。\n" +
+                                "· 删文件：文件本体删掉，任务记录也一起清掉，不能恢复。"
+                        } else {
+                            "这个文件已经没有任务记录了，删除就是把文件本体删掉，不能恢复。"
+                        }
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    deleteEntry = null
+                    Thread {
+                        val ok = PublicStorage.deleteByUri(context, e.uri)
+                        if (task != null) DownloadCenter.store.remove(task)
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            Toast.makeText(
+                                context,
+                                if (ok) "文件已删除" else "删除失败，系统没有允许",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                            reloadKey++
+                        }
+                    }.start()
+                }) { Text(if (task != null) "删文件（连记录）" else "删除文件") }
+            },
+            dismissButton = {
+                Row {
+                    if (task != null) {
+                        TextButton(onClick = {
+                            DownloadCenter.store.remove(task)
+                            deleteEntry = null
+                            reloadKey++
+                            Toast.makeText(
+                                context, "记录已删除，文件保留", Toast.LENGTH_SHORT
+                            ).show()
+                        }) { Text("只删记录") }
+                    }
+                    TextButton(onClick = { deleteEntry = null }) { Text("取消") }
+                }
+            },
+        )
+    }
+}
+
 @androidx.compose.runtime.Composable
 fun SpeedTestScreen(onBack: () -> Unit) {
     var running by remember { mutableStateOf(false) }
@@ -2432,7 +2827,9 @@ fun SettingsScreen(
                 Text(
                     "一个 JSON 文件装下全部设置＋任务记录（不含文件本体），换手机或重装后导入一次全恢复。" +
                         "下载目录不在备份里（文件夹授权没法跨设备，导入后在设置里重选一次）。" +
-                        "旧版导出的任务列表文件也能导入，只是没有设置部分。",
+                        "旧版导出的任务列表文件也能导入，只是没有设置部分。" +
+                        "敏感信息不进备份：每个任务的 Cookie 和代理密码都会被剔除，" +
+                        "导入后需要登录态的任务要重新从内置浏览器抓一次链接。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 6.dp),
@@ -2901,6 +3298,7 @@ fun TaskCard(
     onRename: () -> Unit,
     onSources: () -> Unit,
     onChecksum: () -> Unit,
+    onHeaders: () -> Unit,
 ) {
     var expanded by remember(task.id) {
         mutableStateOf(DownloadCenter.detailsExpanded)
@@ -3249,6 +3647,18 @@ fun TaskCard(
                     Spacer(Modifier.height(6.dp))
                     OutlinedButton(onClick = onChecksum) {
                         Text(if (expectedHash == null) "设置校验哈希" else "改校验哈希")
+                    }
+                }
+                // v1.9: per-task request headers — view/edit the
+                // Cookie / Referer / UA this task sends. Edits hit
+                // the live map the engine reads per connection.
+                if (task.status != TaskStatus.DONE) {
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedButton(onClick = onHeaders) {
+                        Text(
+                            if (task.headers.isEmpty()) "加请求头（Cookie 等）"
+                            else "查看 / 改请求头（${task.headers.size} 个）"
+                        )
                     }
                 }
                 if (task.retryCount > 0) {

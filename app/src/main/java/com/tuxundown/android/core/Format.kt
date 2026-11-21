@@ -52,6 +52,19 @@ object Format {
     fun percent(progress: Float): Int =
         (progress.coerceIn(0f, 1f) * 100).toInt()
 
+    /** "2026-11-22 14:30" label for a finished file (v1.9). */
+    fun dateTime(epochMs: Long): String {
+        if (epochMs <= 0) return ""
+        val cal = java.util.Calendar.getInstance().apply { timeInMillis = epochMs }
+        return "%04d-%02d-%02d %02d:%02d".format(
+            cal.get(java.util.Calendar.YEAR),
+            cal.get(java.util.Calendar.MONTH) + 1,
+            cal.get(java.util.Calendar.DAY_OF_MONTH),
+            cal.get(java.util.Calendar.HOUR_OF_DAY),
+            cal.get(java.util.Calendar.MINUTE),
+        )
+    }
+
     /** "14:30" wall-clock label for a scheduled start (v1.4). */
     fun clockTime(epochMs: Long): String {
         val cal = java.util.Calendar.getInstance().apply { timeInMillis = epochMs }

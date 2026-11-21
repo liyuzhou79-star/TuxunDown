@@ -428,6 +428,53 @@ class Sniffer(private val userAgent: String = DownloadEngine.DEFAULT_UA) {
     }
 }
 
+/**
+ * Noise classification + duplicate detection for the sniff
+ * result list (v1.9, pure, unit-tested).
+ *
+ * Noise = resources that are essentially never what the user
+ * opened the page for: analytics/tracking endpoints (matched
+ * by well-known URL markers) and measured-tiny images (page
+ * decoration — only once the size probe has actually measured
+ * them; an unknown size proves nothing). Noise is FOLDED by
+ * default in the UI, never deleted: one tap brings it back.
+ */
+object SniffFilter {
+
+    private val NOISE_MARKERS = listOf(
+        "google-analytics", "googletagmanager", "doubleclick",
+        "hm.baidu.com", "cnzz", "sentry.io", "beacon", "tongji",
+        "/track/", "pixel.",
+    )
+
+    fun isNoise(res: SniffedResource): Boolean {
+        val u = res.url.lowercase()
+        if (NOISE_MARKERS.any { u.contains(it) }) return true
+        if (res.kind == "image" && res.size in 1..(16 * 1024)) return true
+        return false
+    }
+
+    /**
+     * url -> size of its duplicate group, for every resource
+     * whose (name, size) pair is shared by 2+ resources. Only
+     * resources with a MEASURED size take part: two files that
+     * merely share a name prove nothing, but same name + same
+     * exact size is a strong "same file listed twice" signal
+     * (pages often link a file from both a button and a banner).
+     */
+    fun duplicateCounts(list: List<SniffedResource>): Map<String, Int> {
+        val groups = list.filter { it.size > 0 }
+            .groupBy { it.name.lowercase() to it.size }
+        val out = HashMap<String, Int>()
+        for ((_, members) in groups) {
+            if (members.size >= 2) {
+                for (m in members) out[m.url] = members.size
+            }
+        }
+        return out
+    }
+}
+
 /** Sort orders for the sniff result list (pure, unit-tested). */
 object SniffSort {
     /** Biggest first; unknown sizes (-1) always sink to the end. */
