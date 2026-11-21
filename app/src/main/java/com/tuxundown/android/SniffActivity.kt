@@ -183,6 +183,19 @@ class SniffActivity : Activity() {
         frame.addView(fab, fabParams)
 
         root.addView(frame)
+        // v2.1 safe-area pass: on Android 15 (targetSdk 35) this
+        // window is drawn edge-to-edge — without insets the hint
+        // text slides under the status bar and the floating
+        // download button under the gesture bar. Pad the root by
+        // the system bars; the WebView area shrinks accordingly,
+        // which is exactly the pre-15 layout.
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+            val bars = insets.getInsets(
+                androidx.core.view.WindowInsetsCompat.Type.systemBars()
+            )
+            v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            insets
+        }
         setContentView(root)
         // v1.9 audit: after a rotation the WebView's back stack
         // and page are restored instead of throwing away the page

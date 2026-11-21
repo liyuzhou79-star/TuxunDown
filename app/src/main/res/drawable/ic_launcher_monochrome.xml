@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  v2.1: Android 13 themed-icon (monochrome) layer — the T-arrow
+  glyph of the launcher foreground as a single-colour silhouette.
+  The system tints this layer with the user's wallpaper palette;
+  it must stay ONE flat shape (themed icons ignore colours).
+  Drawn in the 108 grid inside the standard safe zone.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M33,34 h42 v12 h-15 v14 h14 l-20,22 l-20,-22 h14 v-14 h-15 z" />
+</vector>

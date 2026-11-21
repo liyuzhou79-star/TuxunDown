@@ -87,13 +87,25 @@ class ScanActivity : Activity() {
         }
         bar.addView(galleryBtn)
         bar.addView(cancelBtn)
-        root.addView(
-            bar,
-            FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL },
-        )
+        val barParams = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL }
+        root.addView(bar, barParams)
+        // v2.1 safe-area pass: the camera preview stays full-bleed
+        // (it is a viewfinder), but on Android 15's edge-to-edge
+        // windows the top hint would hide under the status bar and
+        // the bottom buttons under the gesture bar — lift just the
+        // two control layers by the system-bar insets.
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
+            val bars = insets.getInsets(
+                androidx.core.view.WindowInsetsCompat.Type.systemBars()
+            )
+            hint.setPadding(28, 20 + bars.top, 28, 20)
+            barParams.bottomMargin = bars.bottom + 24
+            bar.layoutParams = barParams
+            insets
+        }
         setContentView(root)
 
         sv.holder.addCallback(object : SurfaceHolder.Callback {

@@ -32,6 +32,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -125,6 +127,14 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         DownloadCenter.init(this)
+        // v2.1 safe-area pass: targetSdk 35 means Android 15 draws
+        // this window edge-to-edge whether we ask or not, sliding
+        // content under the status and gesture bars. Opt in
+        // explicitly on every version so the behaviour is the
+        // same everywhere; the Compose root (DownApp) and the
+        // full-screen guide pad themselves by the system-bar
+        // insets, and the bar icon contrast follows the theme.
+        androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
         if (Build.VERSION.SDK_INT >= 33) {
             // v1.5 startup audit: a permission-request hiccup on an
             // exotic ROM must never cost the launch itself.
@@ -139,6 +149,16 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val dark = isSystemInDarkTheme()
+            // v2.1 safe-area: with edge-to-edge windows, the
+            // system-bar icon contrast must follow the APP's
+            // (Compose-driven) theme, not the platform theme.
+            val composeView = androidx.compose.ui.platform.LocalView.current
+            androidx.compose.runtime.SideEffect {
+                val controller = androidx.core.view.WindowCompat
+                    .getInsetsController(window, composeView)
+                controller.isAppearanceLightStatusBars = !dark
+                controller.isAppearanceLightNavigationBars = !dark
+            }
             MaterialTheme(
                 colorScheme = when {
                     // v1.7: AMOLED pure black — background and cards
@@ -934,6 +954,18 @@ fun DownApp() {
             }
         }
 
+    // v2.1 safe-area: the whole UI sits inside the system-bar
+    // insets (see MainActivity.onCreate) — screens and their
+    // bottom buttons never slide under the status or gesture bar
+    // on any Android version. Dialogs are separate windows; the
+    // full-screen guide pads itself.
+    Box(
+        Modifier
+            .fillMaxSize()
+            .windowInsetsPadding(
+                WindowInsets.systemBars.union(WindowInsets.displayCutout)
+            ),
+    ) {
     if (screen == "settings") {
         SettingsScreen(
             version = appVersion,
@@ -1980,6 +2012,7 @@ fun DownApp() {
             },
         )
     }
+    } // v2.1 safe-area Box
 }
 
 fun kindLabel(kind: String): String = when (kind) {
@@ -3319,6 +3352,12 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
         Column(
             Modifier
                 .fillMaxSize()
+                // v2.1 safe-area: this dialog is its own window and
+                // fills it — pad for the system bars so the title
+                // and the navigation buttons stay reachable.
+                .windowInsetsPadding(
+                    WindowInsets.systemBars.union(WindowInsets.displayCutout)
+                )
                 .background(MaterialTheme.colorScheme.background)
                 .padding(24.dp),
         ) {
