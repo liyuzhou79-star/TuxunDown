@@ -362,6 +362,17 @@ object DownloadCenter {
         if (o.has("proxyUser")) proxyUser = o.optString("proxyUser", proxyUser)
     }
 
+    /**
+     * v2.8: set (or clear) the user's own note on a task. The
+     * text is sanitized here (trim + length cap) so every writer
+     * gets the same rule, then persisted with the record — it
+     * rides the shared serializer into backups automatically.
+     */
+    fun setUserNote(task: TaskRecord, raw: String) {
+        task.userNote = LinkSchemes.sanitizeUserNote(raw)
+        store.save()
+    }
+
     /** Build a task record, flagging HLS (.m3u8) links automatically. */
     fun newTask(url: String, headers: Map<String, String> = emptyMap()): TaskRecord {
         val t = TaskRecord(url = url, headers = headers.toMutableMap())

@@ -479,6 +479,10 @@ fun DownApp() {
     var headersText by remember { mutableStateOf("") }
     var headersError by remember { mutableStateOf("") }
 
+    // ---- user-note editor dialog (v2.8) ----
+    var noteTask by remember { mutableStateOf<TaskRecord?>(null) }
+    var noteText by remember { mutableStateOf("") }
+
     // ---- home list state (v1.4: tabs, search, sort, multi-select) ----
     var tab by remember { mutableStateOf(0) } // 0 全部 1 下载中 2 已完成 3 失败
     var query by remember { mutableStateOf("") }
@@ -1179,6 +1183,10 @@ fun DownApp() {
                 headersText = TaskHeaders.toText(task.headers)
                 headersError = ""
             },
+            onUserNote = {
+                noteTask = task
+                noteText = task.userNote
+            },
             onTaskLimit = { kbps ->
                 // v2.1: per-task cap lives on the record; the
                 // engine's limiter reads it live on every tick.
@@ -1227,7 +1235,10 @@ fun DownApp() {
         }
         .filter {
             query.isBlank() ||
-                it.fileName.contains(query, true) || it.url.contains(query, true)
+                it.fileName.contains(query, true) || it.url.contains(query, true) ||
+                // v2.8: the user's own note is searchable too —
+                // "给娃下的那批" should be findable by its note.
+                it.userNote.contains(query, true)
         }
         .let { list ->
             when (sortMode) {
@@ -2356,6 +2367,50 @@ fun DownApp() {
             },
             dismissButton = {
                 TextButton(onClick = { headersTask = null }) { Text("取消") }
+            },
+        )
+    }
+
+    // ---- user-note editor dialog (v2.8) ----
+    if (noteTask != null) {
+        val nt2 = noteTask!!
+        AlertDialog(
+            onDismissRequest = { noteTask = null },
+            title = { Text("备注") },
+            text = {
+                Column {
+                    Text(
+                        "给这个任务写一句你自己的备注，方便以后找——比如「给娃下的课件」。" +
+                            "备注只存在这台手机里，跟着任务一起进备份；主页搜索框里搜备注内容也能找到它。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = noteText,
+                        onValueChange = {
+                            noteText = it.take(LinkSchemes.MAX_USER_NOTE_CHARS)
+                        },
+                        label = { Text("备注（留空保存 = 清除）") },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 1,
+                        maxLines = 3,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    DownloadCenter.setUserNote(nt2, noteText)
+                    noteTask = null
+                    Toast.makeText(
+                        context,
+                        if (nt2.userNote.isBlank()) "备注已清除" else "备注已保存",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }) { Text("保存") }
+            },
+            dismissButton = {
+                TextButton(onClick = { noteTask = null }) { Text("取消") }
             },
         )
     }
@@ -4588,6 +4643,7 @@ fun TaskCard(
     onSources: () -> Unit,
     onChecksum: () -> Unit,
     onHeaders: () -> Unit,
+    onUserNote: () -> Unit,
     onTaskLimit: (Int) -> Unit,
     onOpenInBrowser: () -> Unit,
     onOpenFiles: () -> Unit,
@@ -5017,6 +5073,18 @@ fun TaskCard(
                 }
                 if (task.retryCount > 0) {
                     InfoRow("重试次数：", "${task.retryCount} 次（分片级）")
+                }
+                // v2.8: the user's own note — displayed above
+                // the system's note line and editable whatever
+                // the status (a note on a DONE task is how you
+                // remember what the file was FOR). The editor is
+                // a dialog, like the headers editor.
+                if (task.userNote.isNotBlank()) {
+                    InfoRow("备注：", task.userNote)
+                }
+                Spacer(Modifier.height(6.dp))
+                OutlinedButton(onClick = onUserNote) {
+                    Text(if (task.userNote.isBlank()) "加备注" else "改备注")
                 }
                 if (task.note.isNotBlank()) {
                     Spacer(Modifier.height(4.dp))

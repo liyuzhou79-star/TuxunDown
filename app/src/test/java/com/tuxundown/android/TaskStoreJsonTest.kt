@@ -135,6 +135,21 @@ class TaskStoreJsonTest {
     }
 
     @Test
+    fun roundTripKeepsUserNoteAndOldRecordsDefaultItEmpty() {
+        // v2.8: the user's own note rides the shared serializer —
+        // disk persistence AND backup export — and stays distinct
+        // from the system's note line.
+        val t = TaskRecord(url = "https://a.b/f.bin", note = "系统提示行")
+        t.userNote = "给娃下的课件"
+        val back = TaskStore.deserialize(TaskStore.serialize(listOf(t)))
+        assertEquals("给娃下的课件", back[0].userNote)
+        assertEquals("系统提示行", back[0].note)
+        // A pre-v2.8 record has no userNote key: it defaults to "".
+        val old = """[{"id":"x9","url":"https://a.b/c.bin","status":"PAUSED"}]"""
+        assertEquals("", TaskStore.deserialize(old)[0].userNote)
+    }
+
+    @Test
     fun oldFormatWithoutV14FieldsStillLoads() {
         // A v1.3-era record: none of the v1.4 keys exist.
         val old = """[{"id":"x1","url":"https://a.b/c.bin","fileName":"c.bin","status":"DONE"}]"""

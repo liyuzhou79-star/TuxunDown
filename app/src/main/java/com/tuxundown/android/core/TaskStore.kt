@@ -94,6 +94,15 @@ class TaskRecord(
      *  changes, and it can be restored at any time. Set by
      *  ArchivePolicy's sweep, never by hand in the UI. */
     var archived: Boolean = false,
+    // ---- v2.8 additions ----
+    /** The USER's own note for this task ("给娃下的课件" style),
+     *  edited from the card's details. Deliberately separate
+     *  from [note], which is the SYSTEM's plain-language status
+     *  line written by the engine — neither may clobber the
+     *  other. Travels with the record (disk + backup export use
+     *  the one serializer) and is searchable from the home list.
+     *  Sanitized by LinkSchemes.sanitizeUserNote at write time. */
+    var userNote: String = "",
     // ---- v1.8 additions ----
     /** Daily recurrence: when this task reaches a terminal state,
      *  the service re-queues it for the same wall-clock time next
@@ -368,6 +377,7 @@ class TaskStore(context: Context) {
                 o.put("scheduleDaily", t.scheduleDaily)
                 o.put("taskLimitKBps", t.taskLimitKBps)
                 o.put("archived", t.archived)
+                o.put("userNote", t.userNote)
                 o.put("hlsDone", ChunkPlanner.encodeBitset(t.hlsDone))
                 synchronized(t.hlsSizes) {
                     o.put("hlsSizesCsv", t.hlsSizes.joinToString(","))
@@ -439,6 +449,7 @@ class TaskStore(context: Context) {
                         scheduleDaily = o.optBoolean("scheduleDaily", false),
                         taskLimitKBps = o.optInt("taskLimitKBps", 0).coerceAtLeast(0),
                         archived = o.optBoolean("archived", false),
+                        userNote = o.optString("userNote"),
                     )
                     // A verify never survives a restart: a persisted
                     // "verifying" just means it was interrupted.
