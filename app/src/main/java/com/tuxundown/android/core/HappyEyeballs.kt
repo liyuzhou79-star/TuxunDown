@@ -56,7 +56,10 @@ object HappyEyeballs {
     const val DEADLINE_MS = 12_000L
 
     fun hasBothFamilies(addresses: List<InetAddress>): Boolean =
-        addresses.any { it is Inet6Address } && addresses.any { it is Inet4Address }
+        // NB: no Inet4Address here — it is not public API in
+        // Android's java.net. An address from getAllByName is
+        // one family or the other, so "not v6" IS v4.
+        addresses.any { it is Inet6Address } && addresses.any { it !is Inet6Address }
 
     /**
      * Attempt order: the resolver's first choice stays first
@@ -200,8 +203,11 @@ class RacingSocketFactory(
             InetAddress.getAllByName(host).toList()
         }.getOrNull() ?: return null
         if (!HappyEyeballs.hasBothFamilies(addresses)) return null
-        val plain = try {
-            HappyEyeballs.race(
+        // Explicit <Socket> + a typed dispose lambda: the nested
+        // lambda-in-lambda shape below defeats type inference
+        // otherwise (v2.6 step C's first CI run proved it).
+        val plain: Socket = try {
+            HappyEyeballs.race<Socket>(
                 HappyEyeballs.order(addresses).map { addr ->
                     {
                         val s = Socket()
@@ -212,7 +218,7 @@ class RacingSocketFactory(
                         s
                     }
                 },
-                dispose = { s -> runCatching { s.close() } },
+                dispose = { s: Socket -> runCatching { s.close() } },
             )
         } catch (e: Exception) {
             return null
