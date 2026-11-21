@@ -893,8 +893,15 @@ class DownloadEngine(
         return srcs[(ac.index + attempt - 1).mod(srcs.size)]
     }
 
-    /** Every worker thread ever spawned by this run, so the
-     *  waiter can join them (v2.2) instead of polling a counter. */
+    /** Worker threads of this run still alive or not yet
+     *  reaped, so the waiter can join them (v2.2) instead of
+     *  polling a counter. v2.7 audit round 13: a worker now
+     *  REMOVES itself when it exits — the list used to keep
+     *  every thread ever spawned, so a multi-hour download
+     *  whose scaler grew and shrank the pool for hours
+     *  accumulated dead Thread objects for the whole run.
+     *  The waiter only ever looks for a LIVE thread, so
+     *  self-removal cannot disturb the join. */
     private val workerThreads = mutableListOf<Thread>()
 
     private fun spawnWorker(chunkCount: Int) {
@@ -904,6 +911,9 @@ class DownloadEngine(
                 workerLoop(chunkCount)
             } finally {
                 activeWorkers.decrementAndGet()
+                synchronized(workerThreads) {
+                    workerThreads.remove(Thread.currentThread())
+                }
             }
         }
         t.isDaemon = true
@@ -1082,25 +1092,39 @@ class DownloadEngine(
                 throw IllegalStateException("服务器上的文件在下载途中变了（校验标记对不上），已停下重试")
             }
         }
-        val input: InputStream = c.inputStream
-        val buf = ByteArray(bufferSizeFor(task.threads))
-        var pos = from
-        while (!stopped()) {
-            val limit = ac.end // may shrink when split
-            if (pos >= limit) break
-            val want = minOf(buf.size.toLong(), limit - pos).toInt()
-            val n = input.read(buf, 0, want)
-            if (n < 0) break
-            target.writeAt(pos, buf, 0, n)
-            pos += n
-            ac.pos = pos
-            ac.lastAdvanceMs = System.currentTimeMillis()
-            downloadedBytes.addAndGet(n.toLong())
-            limiter?.throttle(n)
+        // v2.7 audit round 13 (long-run stability): the close /
+        // disconnect used to sit AFTER this loop, so any read()
+        // that threw — connection reset, read timeout, a stall
+        // eviction racing us — skipped them entirely. The caller
+        // retries a chunk up to 3 times and a flaky server can
+        // fail hundreds of chunks over a multi-hour download, so
+        // the unclosed sockets piled up until GC got round to
+        // them: a slow file-descriptor leak on exactly the
+        // workload this app exists for. Now the release is in a
+        // finally and happens on every path out.
+        var input: InputStream? = null
+        try {
+            input = c.inputStream
+            val buf = ByteArray(bufferSizeFor(task.threads))
+            var pos = from
+            while (!stopped()) {
+                val limit = ac.end // may shrink when split
+                if (pos >= limit) break
+                val want = minOf(buf.size.toLong(), limit - pos).toInt()
+                val n = input.read(buf, 0, want)
+                if (n < 0) break
+                target.writeAt(pos, buf, 0, n)
+                pos += n
+                ac.pos = pos
+                ac.lastAdvanceMs = System.currentTimeMillis()
+                downloadedBytes.addAndGet(n.toLong())
+                limiter?.throttle(n)
+            }
+        } finally {
+            runCatching { input?.close() }
+            runCatching { c.disconnect() }
+            if (ac.connection == c) ac.connection = null
         }
-        input.close()
-        c.disconnect()
-        ac.connection = null
     }
 
     // ---------- HLS (m3u8) path (v1.6) ----------
