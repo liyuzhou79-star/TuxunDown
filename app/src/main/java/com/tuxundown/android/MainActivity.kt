@@ -95,6 +95,7 @@ import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import com.tuxundown.android.core.Backup
 import com.tuxundown.android.core.Checksum
+import com.tuxundown.android.core.CrashGuard
 import com.tuxundown.android.core.ChecksumVerifier
 import com.tuxundown.android.core.DownloadCenter
 import com.tuxundown.android.core.DownloadedFiles
@@ -129,6 +130,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // v2.2 crash self-rescue: install FIRST, before anything
+        // that could itself crash, so even a launch-path failure
+        // leaves a report the user can read and forward. Local
+        // only — see CrashGuard.
+        CrashGuard.install(this)
         DownloadCenter.init(this)
         // v2.1 safe-area pass: targetSdk 35 means Android 15 draws
         // this window edge-to-edge whether we ask or not, sliding
@@ -181,7 +187,26 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             ) {
-                DownApp()
+                // v2.2 crash self-rescue: a pending crash report
+                // is shown BEFORE the normal UI — a friendly page
+                // with 复制日志 / 继续打开 (see CrashGuard). The
+                // read inside CrashGuard is fully guarded, and
+                // the page itself uses only the safest widgets.
+                var crashInfo by remember {
+                    mutableStateOf(CrashGuard.pendingCrash(this@MainActivity))
+                }
+                val info = crashInfo
+                if (info != null) {
+                    CrashReportScreen(
+                        info = info,
+                        onContinue = {
+                            CrashGuard.clearPending(this@MainActivity)
+                            crashInfo = null
+                        },
+                    )
+                } else {
+                    DownApp()
+                }
             }
         }
     }
@@ -273,6 +298,13 @@ fun DownApp() {
             delay(1000)
             tick++
         }
+    }
+    // v2.2: the NORMAL UI staying alive for a few seconds ends
+    // any crash streak (CrashGuard). Only this UI runs it — the
+    // crash report page must not clear the streak by itself.
+    LaunchedEffect(Unit) {
+        delay(5_000)
+        CrashGuard.markStable(context)
     }
     @Suppress("UNUSED_EXPRESSION") tick // re-read tasks on every tick
 
@@ -394,13 +426,21 @@ fun DownApp() {
         }.getOrNull() ?: "2.1.0"
     }
     var showGuide by remember {
-        mutableStateOf(DownloadCenter.guideSeenVersion != appVersion)
+        // v2.2 safe mode: after 2+ consecutive crashes, first-
+        // launch extras (this guide, the clipboard prompt below)
+        // are skipped for the launch — a crash inside one of
+        // them must not loop forever.
+        mutableStateOf(
+            !CrashGuard.safeMode && DownloadCenter.guideSeenVersion != appVersion
+        )
     }
     var clipboardLink by remember { mutableStateOf("") }
 
     // Clipboard prompt: if the clipboard holds a link we have not
     // asked about yet, offer a one-tap task when the app opens.
     LaunchedEffect(Unit) {
+        // v2.2 safe mode: skipped after repeated crashes.
+        if (CrashGuard.safeMode) return@LaunchedEffect
         runCatching {
             val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
                 as android.content.ClipboardManager
@@ -3308,6 +3348,85 @@ fun ChipRow(options: List<Pair<Int, String>>, selected: Int, onPick: (Int) -> Un
             } else {
                 OutlinedButton(onClick = { onPick(v) }) { Text(label) }
             }
+        }
+    }
+}
+
+/**
+ * v2.2 crash report page: shown on the launch AFTER a crash,
+ * before the normal UI. Deliberately built from the plainest
+ * widgets and nothing that can fail — this page is the rescue
+ * path, it must always render. The log stays on the phone;
+ * 复制日志 only puts it on the clipboard so the USER can choose
+ * to send it to the developer.
+ */
+@androidx.compose.runtime.Composable
+fun CrashReportScreen(info: CrashGuard.CrashInfo, onContinue: () -> Unit) {
+    val context = LocalContext.current
+    Column(
+        Modifier
+            .fillMaxSize()
+            .windowInsetsPadding(
+                WindowInsets.systemBars.union(WindowInsets.displayCutout)
+            )
+            .background(MaterialTheme.colorScheme.background)
+            .padding(24.dp)
+            .verticalScroll(rememberScrollState()),
+    ) {
+        Spacer(Modifier.height(24.dp))
+        androidx.compose.foundation.Image(
+            // Raster copy, NOT R.mipmap.ic_launcher (adaptive-icon
+            // XML crashes painterResource on API 26+ — the v1.3.0
+            // lesson, and this page above all must not crash).
+            painter = androidx.compose.ui.res.painterResource(R.drawable.app_icon),
+            contentDescription = null,
+            modifier = Modifier
+                .size(64.dp)
+                .clip(RoundedCornerShape(14.dp)),
+        )
+        Spacer(Modifier.height(16.dp))
+        Text(
+            "上次打开时，应用闪退了",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(Modifier.height(12.dp))
+        Text(
+            "大概原因：${info.summary}。\n" +
+                "你的下载任务和文件都没有丢，点「继续打开」就能接着用。\n\n" +
+                "如果这个毛病反复出现，把崩溃日志发给开发者能帮我们尽快修好。" +
+                "日志只存在你的手机里，应用不会自动上传任何东西——发不发、发给谁，都由你决定。",
+            style = MaterialTheme.typography.bodyLarge,
+        )
+        if (info.safeMode) {
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "已经连续闪退 ${info.streak} 次，这次打开进入了安全模式：" +
+                    "新手引导和剪贴板提示先跳过，避免同一个地方反复出问题。",
+                style = MaterialTheme.typography.bodyLarge,
+                color = WinPalette.Red,
+            )
+        }
+        Spacer(Modifier.height(24.dp))
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            OutlinedButton(
+                onClick = {
+                    runCatching {
+                        val cm = context.getSystemService(
+                            android.content.Context.CLIPBOARD_SERVICE
+                        ) as android.content.ClipboardManager
+                        cm.setPrimaryClip(
+                            android.content.ClipData.newPlainText("TuxunDown 崩溃日志", info.detail)
+                        )
+                        Toast.makeText(context, "崩溃日志已复制，去粘贴发送就行", Toast.LENGTH_SHORT)
+                            .show()
+                    }
+                },
+            ) { Text("复制日志") }
+            Button(onClick = onContinue) { Text("继续打开") }
         }
     }
 }

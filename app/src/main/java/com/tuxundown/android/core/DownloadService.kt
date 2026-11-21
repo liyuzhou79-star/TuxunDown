@@ -67,6 +67,9 @@ class DownloadService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        // v2.2: the crash handler also covers the service
+        // process entry (idempotent — see CrashGuard.install).
+        CrashGuard.install(this)
         DownloadCenter.init(this)
         // v1.5 startup audit: channel creation is idempotent, but a
         // ROM quirk here must never take the whole service down.
