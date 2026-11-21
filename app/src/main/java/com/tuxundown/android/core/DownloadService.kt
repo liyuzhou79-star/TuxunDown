@@ -558,6 +558,7 @@ class DownloadService : Service() {
         task.checksumState = Checksum.STATE_NONE
         task.hlsDone = BooleanArray(0)
         task.hlsTotalSegments = 0
+        task.hlsFingerprint = ""
         synchronized(task.hlsSizes) { task.hlsSizes.clear() }
         task.scheduledAt = next
         task.status = TaskStatus.QUEUED

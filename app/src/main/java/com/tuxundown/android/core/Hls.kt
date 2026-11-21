@@ -113,6 +113,26 @@ object Hls {
         return Playlist.Media(segments, hasMap)
     }
 
+    /**
+     * v2.1 audit (round 7, C6): a stable fingerprint of the
+     * playlist's segment URL list, in order. The engine's resume
+     * state is a written PREFIX of the segment list; before this,
+     * the resume check compared only the segment COUNT — a
+     * playlist whose content changed while keeping the same count
+     * (an updated VOD, a slid live window) kept the old prefix
+     * bytes and appended the new playlist's tail, producing a
+     * silently corrupt merged file that reported DONE. The
+     * fingerprint makes "same playlist" mean same segments.
+     * SHA-256 over the newline-joined URLs; "" for an empty list.
+     */
+    fun fingerprint(segmentUrls: List<String>): String {
+        if (segmentUrls.isEmpty()) return ""
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        val joined = segmentUrls.joinToString("\n")
+        return digest.digest(joined.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+    }
+
     fun hexToBytes(hex: String): ByteArray {
         val h = hex.removePrefix("0x").removePrefix("0X")
         val padded = if (h.length % 2 == 1) "0$h" else h

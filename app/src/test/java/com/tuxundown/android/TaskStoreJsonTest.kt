@@ -56,6 +56,7 @@ class TaskStoreJsonTest {
             priority = 1,
             isHls = true,
             hlsTotalSegments = 4,
+            hlsFingerprint = "deadbeefcafe",
         )
         t.sources.addAll(listOf("https://mirror1.example.com/f.bin", "https://mirror2.example.com/f.bin"))
         t.hlsDone = booleanArrayOf(true, true, false, false)
@@ -70,6 +71,8 @@ class TaskStoreJsonTest {
         assertEquals(1, r.priority)
         assertTrue(r.isHls)
         assertEquals(4, r.hlsTotalSegments)
+        // v2.1: the playlist fingerprint round-trips with the state.
+        assertEquals("deadbeefcafe", r.hlsFingerprint)
         assertEquals(listOf(true, true, false, false), r.hlsDone.toList())
         assertEquals(listOf(1000L, 2000L, -1L, -1L), r.hlsSizes.toList())
         // Downloaded bytes are rebuilt from the written segments.

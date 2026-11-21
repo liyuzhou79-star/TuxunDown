@@ -68,6 +68,12 @@ class TaskRecord(
     var isHls: Boolean = false,
     /** HLS: segment count of the playlist the state below belongs to. */
     var hlsTotalSegments: Int = 0,
+    /** v2.1 audit (C6): fingerprint of the segment URL list the HLS
+     *  state belongs to (see Hls.fingerprint). The count alone does
+     *  not identify a playlist — same-count content changes must
+     *  also invalidate the written prefix. "" = unknown (state saved
+     *  before v2.1; adopted on the next run, not judged). */
+    var hlsFingerprint: String = "",
     // ---- v1.7 additions ----
     /** Expected SHA-256 (hex) the finished file must match; "" = none. */
     var expectedSha256: String = "",
@@ -334,6 +340,7 @@ class TaskStore(context: Context) {
                 o.put("priority", t.priority)
                 o.put("isHls", t.isHls)
                 o.put("hlsTotalSegments", t.hlsTotalSegments)
+                o.put("hlsFingerprint", t.hlsFingerprint)
                 o.put("expectedSha256", t.expectedSha256)
                 o.put("expectedMd5", t.expectedMd5)
                 o.put("checksumState", t.checksumState)
@@ -402,6 +409,7 @@ class TaskStore(context: Context) {
                         isHls = o.optBoolean("isHls", false),
                         hlsTotalSegments = o.optInt("hlsTotalSegments", 0)
                             .coerceIn(0, MAX_HLS_SEGMENTS),
+                        hlsFingerprint = o.optString("hlsFingerprint"),
                         expectedSha256 = o.optString("expectedSha256"),
                         expectedMd5 = o.optString("expectedMd5"),
                         checksumState = o.optInt("checksumState", 0),

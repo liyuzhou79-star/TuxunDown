@@ -88,6 +88,22 @@ class HlsTest {
     }
 
     @Test
+    fun fingerprintDistinguishesPlaylists() {
+        // v2.1 audit C6: same count, different content MUST differ —
+        // that is the stale-prefix hole the fingerprint closes.
+        val a = Hls.fingerprint(listOf("https://x/1.ts", "https://x/2.ts"))
+        val b = Hls.fingerprint(listOf("https://x/1.ts", "https://x/CHANGED.ts"))
+        assertTrue(a.isNotBlank())
+        assertTrue("same segment count, different segments must not collide", a != b)
+        // Order is part of the identity (a prefix is positional).
+        val c = Hls.fingerprint(listOf("https://x/2.ts", "https://x/1.ts"))
+        assertTrue("segment order matters", a != c)
+        // Stable for the same list, and empty for no segments.
+        assertEquals(a, Hls.fingerprint(listOf("https://x/1.ts", "https://x/2.ts")))
+        assertEquals("", Hls.fingerprint(emptyList()))
+    }
+
+    @Test
     fun sequenceIvIsBigEndian() {
         val iv = Hls.sequenceIv(0x0102)
         assertEquals(16, iv.size)

@@ -1001,9 +1001,20 @@ class DownloadEngine(
 
         // Resume state: a playlist whose segment count changed is a
         // different stream — old merged bytes are meaningless.
-        if (task.hlsTotalSegments != segments.size) {
+        // v2.1 audit (round 7, C6): the count alone is not identity.
+        // A playlist can change CONTENT at the same count (an
+        // updated VOD, a slid live window); keeping the old written
+        // prefix then would append the new playlist's tail onto the
+        // old file's head — a silently corrupt merge that reports
+        // DONE. The segment-URL fingerprint is the real identity
+        // check. A blank stored fingerprint (state saved before
+        // v2.1) cannot judge, so it is simply adopted this run.
+        val fingerprint = Hls.fingerprint(segments.map { it.url })
+        val playlistChanged = task.hlsTotalSegments != segments.size ||
+            (task.hlsFingerprint.isNotBlank() && task.hlsFingerprint != fingerprint)
+        if (playlistChanged) {
             if (task.hlsTotalSegments > 0) {
-                task.note = "播放列表变了（分片数和上次不一样），已重新开始合并。"
+                task.note = "播放列表变了（内容和上次不一样），已重新开始合并。"
             }
             task.hlsTotalSegments = segments.size
             task.hlsDone = BooleanArray(segments.size)
@@ -1011,6 +1022,7 @@ class DownloadEngine(
             task.downloaded = 0
             downloadedBytes.set(0)
         }
+        task.hlsFingerprint = fingerprint
         synchronized(task.hlsSizes) {
             while (task.hlsSizes.size < segments.size) task.hlsSizes.add(-1)
         }
