@@ -87,6 +87,13 @@ class TaskRecord(
      *  with the global budget via RateCap — the smaller limit wins.
      *  Read live by the engine's limiter on every tick. */
     var taskLimitKBps: Int = 0,
+    // ---- v2.4 additions ----
+    /** Auto-archived completed record: hidden from the normal
+     *  tabs, shown under the 已归档 filter. The downloaded FILE is
+     *  never touched by archiving — only this record's visibility
+     *  changes, and it can be restored at any time. Set by
+     *  ArchivePolicy's sweep, never by hand in the UI. */
+    var archived: Boolean = false,
     // ---- v1.8 additions ----
     /** Daily recurrence: when this task reaches a terminal state,
      *  the service re-queues it for the same wall-clock time next
@@ -351,6 +358,7 @@ class TaskStore(context: Context) {
                 o.put("checksumState", t.checksumState)
                 o.put("scheduleDaily", t.scheduleDaily)
                 o.put("taskLimitKBps", t.taskLimitKBps)
+                o.put("archived", t.archived)
                 o.put("hlsDone", ChunkPlanner.encodeBitset(t.hlsDone))
                 synchronized(t.hlsSizes) {
                     o.put("hlsSizesCsv", t.hlsSizes.joinToString(","))
@@ -421,6 +429,7 @@ class TaskStore(context: Context) {
                         checksumState = o.optInt("checksumState", 0),
                         scheduleDaily = o.optBoolean("scheduleDaily", false),
                         taskLimitKBps = o.optInt("taskLimitKBps", 0).coerceAtLeast(0),
+                        archived = o.optBoolean("archived", false),
                     )
                     // A verify never survives a restart: a persisted
                     // "verifying" just means it was interrupted.

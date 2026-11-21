@@ -143,6 +143,23 @@ object DownloadCenter {
         get() = pBool("amoledBlack", false)
         set(v) { prefs().edit().putBoolean("amoledBlack", v).apply() }
 
+    /** v2.4: auto-archive completed records older than this many
+     *  days into the 已归档 filter (0 = off). Records only — the
+     *  downloaded files are never touched. */
+    var archiveAfterDays: Int
+        get() = pInt("archiveAfterDays", 0).coerceIn(0, 3650)
+        set(v) { prefs().edit().putInt("archiveAfterDays", v.coerceIn(0, 3650)).apply() }
+
+    /** Run the archive sweep against the loaded store; persists
+     *  when anything changed. Returns how many were archived. */
+    fun applyArchiveSweep(): Int {
+        val n = ArchivePolicy.sweep(
+            store.tasks, System.currentTimeMillis(), archiveAfterDays
+        )
+        if (n > 0) store.saveNow()
+        return n
+    }
+
     // ---- v1.9: download proxy (engine + sniffer; ProxySettings) ----
     // Every setter re-syncs the runtime mirror the sniff layer
     // reads (ProxyState) and the SOCKS authenticator.
@@ -224,6 +241,7 @@ object DownloadCenter {
         o.put("completeSound", completeSound)
         o.put("autoInstallApk", autoInstallApk)
         o.put("autoOpenFile", autoOpenFile)
+        o.put("archiveAfterDays", archiveAfterDays)
         o.put("detailsExpanded", detailsExpanded)
         o.put("sniffHistory", org.json.JSONArray(sniffHistory))
         // v1.9: proxy settings travel with the backup EXCEPT the
@@ -256,6 +274,9 @@ object DownloadCenter {
         if (o.has("completeSound")) completeSound = o.optBoolean("completeSound", completeSound)
         if (o.has("autoInstallApk")) autoInstallApk = o.optBoolean("autoInstallApk", autoInstallApk)
         if (o.has("autoOpenFile")) autoOpenFile = o.optBoolean("autoOpenFile", autoOpenFile)
+        if (o.has("archiveAfterDays")) {
+            archiveAfterDays = o.optInt("archiveAfterDays", archiveAfterDays)
+        }
         if (o.has("detailsExpanded")) {
             detailsExpanded = o.optBoolean("detailsExpanded", detailsExpanded)
         }
@@ -425,6 +446,9 @@ object DownloadCenter {
         appContext = context.applicationContext
         store = TaskStore(context.applicationContext)
         store.load()
+        // v2.4: fold long-finished records into the archive once
+        // per launch (cheap; a no-op when the setting is off).
+        runCatching { applyArchiveSweep() }
         syncProxyState()
     }
 

@@ -325,6 +325,7 @@ fun DownApp() {
     var autoRetry by remember { mutableStateOf(DownloadCenter.autoRetryCount) }
     var trafficMB by remember { mutableStateOf(DownloadCenter.trafficThresholdMB) }
     var dualChan by remember { mutableStateOf(DownloadCenter.dualChannel) }
+    var archiveDaysUi by remember { mutableStateOf(DownloadCenter.archiveAfterDays) }
     var userAgentUi by remember { mutableStateOf(DownloadCenter.userAgent) }
     var amoledUi by remember { mutableStateOf(DownloadCenter.amoledBlack) }
     // ---- v1.9: proxy mirrors (DownloadCenter owns persistence) ----
@@ -576,6 +577,7 @@ fun DownApp() {
                             autoRetry = DownloadCenter.autoRetryCount
                             trafficMB = DownloadCenter.trafficThresholdMB
                             dualChan = DownloadCenter.dualChannel
+                            archiveDaysUi = DownloadCenter.archiveAfterDays
                             userAgentUi = DownloadCenter.userAgent
                             amoledUi = DownloadCenter.amoledBlack
                             AmoledState.enabled = DownloadCenter.amoledBlack
@@ -830,6 +832,68 @@ fun DownApp() {
         }.start()
     }
 
+    // ---- v2.4: import links from a .txt file (batch create) ----
+    // Declared AFTER startBatch on purpose: this launcher is a
+    // lambda, and a lambda body cannot forward-reference a local
+    // function declared later in the same scope (it fails with
+    // "Unresolved reference" — a lesson already paid for once).
+    // One link per line is the expected shape; prose with links
+    // buried in it also works (LinkExtract fallback). The read is
+    // bounded like the backup import — a "txt" that is really a
+    // huge file must not be loaded whole into memory.
+    val txtImportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            Thread {
+                var tooBig = false
+                val text = runCatching {
+                    context.contentResolver.openInputStream(uri)?.use { input ->
+                        val out = java.io.ByteArrayOutputStream()
+                        val buf = ByteArray(64 * 1024)
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            out.write(buf, 0, n)
+                            if (out.size() > 4 * 1024 * 1024) {
+                                tooBig = true
+                                break
+                            }
+                        }
+                        if (tooBig) null else out.toByteArray().toString(Charsets.UTF_8)
+                    }
+                }.getOrNull()
+                activity.runOnUiThread {
+                    when {
+                        text == null -> Toast.makeText(
+                            context,
+                            if (tooBig) "导入失败：文件太大了（超过 4 MB），不像链接清单"
+                            else "导入失败：读不到文件",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                        else -> {
+                            val lineLinks = text.lines().map { it.trim() }.filter {
+                                it.startsWith("http") || FtpClient.isFtpUrl(it)
+                            }
+                            val effective = when {
+                                lineLinks.isNotEmpty() -> text
+                                else -> LinkExtract.extract(text).joinToString("\n")
+                            }
+                            if (effective.isBlank()) {
+                                Toast.makeText(
+                                    context, "这个文件里没找到链接",
+                                    Toast.LENGTH_SHORT,
+                                ).show()
+                            } else {
+                                startBatch(effective)
+                            }
+                        }
+                    }
+                }
+            }.start()
+        }
+    }
+
     fun openFile(task: TaskRecord) {
         val name = task.savedName.ifBlank { task.fileName }
         val ext = name.substringAfterLast('.', "").lowercase()
@@ -979,14 +1043,19 @@ fun DownApp() {
         it.status == TaskStatus.RUNNING || it.status == TaskStatus.QUEUED
     }
 
+    // v2.4: archived records live ONLY under the 已归档 tab (4);
+    // every other tab excludes them — including 已完成， which is
+    // the tab they were folded away from.
+    val anyArchived = store.tasks.any { it.archived }
     val displayedTasks = store.tasks
         .filter {
             when (tab) {
-                1 -> it.status == TaskStatus.RUNNING || it.status == TaskStatus.QUEUED ||
-                    it.status == TaskStatus.PAUSED
-                2 -> it.status == TaskStatus.DONE
-                3 -> it.status == TaskStatus.FAILED
-                else -> true
+                4 -> it.archived
+                1 -> !it.archived && (it.status == TaskStatus.RUNNING ||
+                    it.status == TaskStatus.QUEUED || it.status == TaskStatus.PAUSED)
+                2 -> !it.archived && it.status == TaskStatus.DONE
+                3 -> !it.archived && it.status == TaskStatus.FAILED
+                else -> !it.archived
             }
         }
         .filter {
@@ -1035,6 +1104,18 @@ fun DownApp() {
             onTraffic = { trafficMB = it; DownloadCenter.trafficThresholdMB = it },
             dualChan = dualChan,
             onDualChan = { dualChan = it; DownloadCenter.dualChannel = it },
+            archiveDays = archiveDaysUi,
+            onArchiveDays = { days ->
+                archiveDaysUi = days
+                DownloadCenter.archiveAfterDays = days
+                val n = DownloadCenter.applyArchiveSweep()
+                if (n > 0) {
+                    Toast.makeText(
+                        context, "已把 $n 条旧记录收进「已归档」",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            },
             userAgent = userAgentUi,
             onUserAgent = { userAgentUi = it; DownloadCenter.userAgent = it },
             amoled = amoledUi,
@@ -1098,6 +1179,7 @@ fun DownApp() {
             },
             onShowGuide = { showGuide = true },
             onShowHelp = { screen = "help" },
+            onShowDiag = { screen = "diag" },
             onExport = { exportLauncher.launch("tuxundown-backup.json") },
             onImport = { importLauncher.launch(arrayOf("application/json", "text/plain")) },
             onBack = { screen = "home" },
@@ -1111,6 +1193,8 @@ fun DownApp() {
         FilesScreen(onBack = { screen = "home" })
     } else if (screen == "help") {
         HelpScreen(onBack = { screen = "settings" })
+    } else if (screen == "diag") {
+        DiagnosticsScreen(version = appVersion, onBack = { screen = "settings" })
     } else if (screen == "speedtest") {
         SpeedTestScreen(onBack = { screen = "stats" })
     } else {
@@ -1197,7 +1281,10 @@ fun DownApp() {
                         .horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    val tabs = listOf(0 to "全部", 1 to "下载中", 2 to "已完成", 3 to "失败")
+                    // v2.4: the 已归档 tab appears only when at
+                    // least one archived record exists.
+                    val tabs = listOf(0 to "全部", 1 to "下载中", 2 to "已完成", 3 to "失败") +
+                        if (anyArchived) listOf(4 to "已归档") else emptyList()
                     for ((m, label) in tabs) {
                         if (m == tab) {
                             Button(onClick = { }) { Text(label) }
@@ -1238,6 +1325,43 @@ fun DownApp() {
                                     OutlinedButton(onClick = { sortMode = m }) { Text(label) }
                                 }
                             }
+                        }
+                    }
+                }
+            }
+
+            // ---- v2.4: archive restore bar (only on the 已归档 tab) ----
+            if (tab == 4) {
+                item(key = "archbar") {
+                    Card(
+                        Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surface
+                        ),
+                    ) {
+                        Column(Modifier.padding(10.dp)) {
+                            Text(
+                                "这里是自动归档的已完成记录：只是把记录收起来，" +
+                                    "下载好的文件本体没动、还在原来的地方。",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                            OutlinedButton(
+                                onClick = {
+                                    var n = 0
+                                    for (t in store.tasks) {
+                                        if (t.archived) {
+                                            t.archived = false
+                                            n++
+                                        }
+                                    }
+                                    if (n > 0) store.saveNow()
+                                    Toast.makeText(
+                                        context, "已恢复 $n 条记录到「已完成」",
+                                        Toast.LENGTH_SHORT,
+                                    ).show()
+                                },
+                                modifier = Modifier.padding(top = 6.dp),
+                            ) { Text("全部恢复显示") }
                         }
                     }
                 }
@@ -1290,6 +1414,24 @@ fun DownApp() {
                                     }.forEach { DownloadCenter.moveToFrontOfQueue(it) }
                                     Toast.makeText(context, "已把选中的排队任务提到最前", Toast.LENGTH_SHORT).show()
                                 }) { Text("插队") }
+                                if (tab == 4) {
+                                    OutlinedButton(onClick = {
+                                        var n = 0
+                                        for (t in store.tasks) {
+                                            if (t.id in selectedIds && t.archived) {
+                                                t.archived = false
+                                                n++
+                                            }
+                                        }
+                                        if (n > 0) store.saveNow()
+                                        selectedIds = emptySet()
+                                        selecting = false
+                                        Toast.makeText(
+                                            context, "已恢复 $n 条记录",
+                                            Toast.LENGTH_SHORT,
+                                        ).show()
+                                    }) { Text("取消归档") }
+                                }
                                 OutlinedButton(onClick = {
                                     val victims = store.tasks.filter { it.id in selectedIds }
                                     victims.forEach { deleteTask(it) }
@@ -1516,6 +1658,13 @@ fun DownApp() {
                             )
                         }
                     ) { Text("扫二维码添加链接") }
+                    TextButton(
+                        onClick = {
+                            txtImportLauncher.launch(
+                                arrayOf("text/plain", "text/*")
+                            )
+                        }
+                    ) { Text("从 .txt 文件导入链接（批量新建）") }
                 }
             },
             confirmButton = {
@@ -2657,6 +2806,243 @@ fun HelpScreen(onBack: () -> Unit) {
 }
 
 /**
+ * v2.4: 诊断 (self-check) page. One tap runs a LOCAL check-up —
+ * storage writable + a rough write-speed benchmark, DNS and
+ * network state, proxy reachability when one is configured, the
+ * installed version + signing fingerprint, and the task counts /
+ * on-disk footprint — and shows the results in plain words with a
+ * one-tap copy of the whole report (for sending to the developer
+ * when something is wrong). NOTHING is uploaded: the report is
+ * built on the phone and only leaves it if the user pastes it
+ * somewhere themselves.
+ */
+@androidx.compose.runtime.Composable
+fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
+    val context = LocalContext.current
+    var running by remember { mutableStateOf(false) }
+    var lines by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
+    var report by remember { mutableStateOf("") }
+
+    fun runChecks() {
+        if (running) return
+        running = true
+        lines = emptyList()
+        report = ""
+        Thread {
+            val out = mutableListOf<Pair<String, String>>()
+            // ---- app identity: version + signing fingerprint ----
+            val fingerprint = runCatching {
+                val pm = context.packageManager
+                @Suppress("DEPRECATION")
+                val pi = if (android.os.Build.VERSION.SDK_INT >= 28) {
+                    pm.getPackageInfo(
+                        context.packageName,
+                        android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES,
+                    )
+                } else {
+                    pm.getPackageInfo(
+                        context.packageName,
+                        android.content.pm.PackageManager.GET_SIGNATURES,
+                    )
+                }
+                @Suppress("DEPRECATION")
+                val certBytes = if (android.os.Build.VERSION.SDK_INT >= 28) {
+                    pi.signingInfo?.apkContentsSigners?.firstOrNull()?.toByteArray()
+                } else {
+                    pi.signatures?.firstOrNull()?.toByteArray()
+                }
+                val digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(certBytes ?: byteArrayOf())
+                digest.joinToString("") { "%02x".format(it) }
+            }.getOrDefault("")
+            val fp8 = Diagnostics.fingerprint8(fingerprint)
+            out += "签名指纹" to if (fp8.isNotBlank()) {
+                "$fp8…（正式版应为 B73A2080… 开头）"
+            } else {
+                "读不到"
+            }
+            // ---- storage: free space on the download volume ----
+            val avail = PublicStorage.availableBytes(context)
+            out += "存储空间" to if (avail >= 0) {
+                "下载目录可用 ${Format.size(avail)}"
+            } else if (DownloadCenter.downloadDirUri.isNotBlank()) {
+                "用的是自定义文件夹，它的可用空间系统查不到；下载报空间不足时先看手机总空间"
+            } else {
+                "可用空间查不到"
+            }
+            // ---- storage: writable + rough write speed ----
+            // 8 MiB scratch in the app cache dir, 128 KB writes —
+            // the same write granularity the engine uses (one
+            // pwrite per read buffer, fsync once at the end).
+            val bench = runCatching {
+                val f = java.io.File(context.cacheDir, "diag_bench.bin")
+                val bytes = 8L * 1024 * 1024
+                val buf = ByteArray(128 * 1024) { (it % 251).toByte() }
+                val t0 = System.nanoTime()
+                java.io.RandomAccessFile(f, "rw").use { raf ->
+                    raf.setLength(0)
+                    var written = 0L
+                    while (written < bytes) {
+                        raf.write(buf)
+                        written += buf.size
+                    }
+                    val t1 = System.nanoTime()
+                    raf.fd.sync()
+                    val t2 = System.nanoTime()
+                    Triple(
+                        bytes,
+                        (t1 - t0) / 1_000_000,
+                        (t2 - t1) / 1_000_000,
+                    )
+                }.also { runCatching { f.delete() } }
+            }.getOrNull()
+            out += "写盘" to if (bench != null) {
+                Diagnostics.writeBenchLine(bench.first, bench.second, bench.third) +
+                    "。日常下载远达不到这个速度时，瓶颈在网络或服务器，不在手机存储"
+            } else {
+                "写速粗测没跑成（临时目录写不进去）"
+            }
+            // ---- network state ----
+            val netLine = runCatching {
+                val cm = context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE)
+                    as android.net.ConnectivityManager
+                val caps = cm.getNetworkCapabilities(cm.activeNetwork)
+                when {
+                    caps == null -> "当前没有网络连接"
+                    caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) ->
+                        "WiFi 已连接" +
+                            if (cm.isActiveNetworkMetered) "（系统标记为计费网络）" else ""
+                    caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) ->
+                        "正在用流量（移动数据）"
+                    else -> "已连接（其他网络类型）"
+                }
+            }.getOrDefault("网络状态读不到")
+            out += "网络" to netLine
+            // ---- DNS: resolve one domestic + one overseas host ----
+            fun dns(host: String): String {
+                var result: Array<java.net.InetAddress>? = null
+                var failed = false
+                val t = Thread {
+                    runCatching { java.net.InetAddress.getAllByName(host) }
+                        .onSuccess { result = it }
+                        .onFailure { failed = true }
+                }
+                t.isDaemon = true
+                t.start()
+                t.join(4_000)
+                return when {
+                    failed -> "$host 解析失败"
+                    result != null -> "$host 能解析（${result!!.size} 个地址）"
+                    else -> "$host 解析超时"
+                }
+            }
+            out += "域名解析" to (dns("www.baidu.com") + "；" + dns("github.com"))
+            // ---- proxy reachability (only when configured) ----
+            val ps = DownloadCenter.proxySettings()
+            out += "代理" to if (!ps.active) {
+                "未开启（直连）"
+            } else {
+                val reachable = runCatching {
+                    java.net.Socket().use { s ->
+                        s.connect(
+                            java.net.InetSocketAddress(ps.host, ps.port), 5_000,
+                        )
+                        true
+                    }
+                }.getOrDefault(false)
+                if (reachable) {
+                    "已开启，代理服务器 ${ps.host}:${ps.port} 能连上"
+                } else {
+                    "已开启，但代理服务器 ${ps.host}:${ps.port} 连不上——" +
+                        "下载会直接报这个错，不会偷偷直连"
+                }
+            }
+            // ---- tasks: counts + on-disk footprint ----
+            val tasks = DownloadCenter.store.tasks
+            out += "任务数" to Diagnostics.taskCountsLine(tasks)
+            val unfinishedBytes = tasks
+                .filter { it.status != TaskStatus.DONE }
+                .sumOf { it.downloaded.coerceAtLeast(0) }
+            val metaBytes = runCatching {
+                val f = java.io.File(context.filesDir, "tasks.json")
+                if (f.exists()) f.length() else 0L
+            }.getOrDefault(0L)
+            out += "占用" to "未完成任务已写入约 ${Format.size(unfinishedBytes)}" +
+                "（按任务记录口径）；任务记录文件 ${Format.size(metaBytes)}"
+            val text = Diagnostics.buildReport("v$version", out)
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                lines = out
+                report = text
+                running = false
+            }
+        }.start()
+    }
+
+    LazyColumn(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item(key = "d-head") {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onBack) { Text("← 返回") }
+                Text(
+                    "诊断",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
+        item(key = "d-intro") {
+            Text(
+                "一键给 App 做个本地体检：存储、网络、代理、版本和任务状态。" +
+                    "结果只显示在这台手机上，不上传；下载出了问题要找人看时，" +
+                    "把结果复制全文发过去就行。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        item(key = "d-run") {
+            Button(
+                onClick = { runChecks() },
+                enabled = !running,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(if (running) "正在自检…" else "开始自检") }
+        }
+        if (lines.isNotEmpty()) {
+            item(key = "d-results") {
+                SettingsGroup("自检结果") {
+                    for ((label, value) in lines) {
+                        InfoRow(label, value)
+                    }
+                }
+            }
+            item(key = "d-copy") {
+                OutlinedButton(
+                    onClick = {
+                        runCatching {
+                            val cm = context.getSystemService(
+                                android.content.Context.CLIPBOARD_SERVICE
+                            ) as android.content.ClipboardManager
+                            cm.setPrimaryClip(
+                                android.content.ClipData.newPlainText("诊断报告", report)
+                            )
+                        }
+                        Toast.makeText(
+                            context, "诊断结果已复制，去粘贴发送就行",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("复制诊断结果全文") }
+            }
+        }
+    }
+}
+
+/**
  * Settings screen (v1.4 item 20): grouped sections on their own
  * scrolling page — 下载 / 提示 / 引导与数据 / 关于 — instead of one
  * giant card squeezed onto the home page.
@@ -2679,6 +3065,8 @@ fun SettingsScreen(
     onTraffic: (Int) -> Unit,
     dualChan: Boolean,
     onDualChan: (Boolean) -> Unit,
+    archiveDays: Int,
+    onArchiveDays: (Int) -> Unit,
     userAgent: String,
     onUserAgent: (String) -> Unit,
     amoled: Boolean,
@@ -2707,6 +3095,7 @@ fun SettingsScreen(
     onOpenBattery: () -> Unit,
     onShowGuide: () -> Unit,
     onShowHelp: () -> Unit,
+    onShowDiag: () -> Unit,
     onExport: () -> Unit,
     onImport: () -> Unit,
     onBack: () -> Unit,
@@ -2726,7 +3115,7 @@ fun SettingsScreen(
         "s-notify" to "提示 震动 声音 响铃 完成 自动安装 安装 自动打开 打开",
         "s-power" to "后台运行 后台 保活 电池 白名单 省电 冻结",
         "s-data" to "引导与数据 引导 新手引导 帮助 常见问题 备份 导出 导入 " +
-            "恢复 孤儿 清理 part 数据",
+            "恢复 孤儿 清理 part 数据 诊断 自检 体检 归档",
         "s-about" to "关于 版本 检查更新 更新 github 开源 gpl 许可",
     )
     fun groupVisible(key: String): Boolean {
@@ -3175,6 +3564,22 @@ fun SettingsScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
+                        Text("诊断（本地自检）")
+                        Text(
+                            "存储、网络、代理、版本一次查清；结果只在本机，可复制全文发给开发者报障",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    OutlinedButton(onClick = onShowDiag) { Text("打开") }
+                }
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
                         Text("帮助中心")
                         Text(
                             "常见问题：为什么快、文件在哪、续传怎么回事，都在这儿（离线可看）",
@@ -3235,6 +3640,21 @@ fun SettingsScreen(
                         enabled = !orphanScanning,
                     ) { Text(if (orphanScanning) "扫描中…" else "扫描") }
                 }
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Text("已完成任务自动归档")
+                Text(
+                    "超过这个天数的已完成记录会自动收进主页的「已归档」分类，列表更清爽。" +
+                        "只收记录：下载好的文件本体不动、不删，归档的记录随时能在「已归档」里恢复显示。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                ChipRow(
+                    options = listOf(
+                        0 to "关", 7 to "7 天", 30 to "30 天", 90 to "90 天",
+                    ),
+                    selected = archiveDays,
+                    onPick = onArchiveDays,
+                )
             }
         }
         if (groupVisible("s-about")) item(key = "s-about") {
