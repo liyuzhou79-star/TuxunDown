@@ -46,7 +46,17 @@ android {
             signingConfig = signingConfigs.getByName("testPin")
         }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+            // Release ships only the two ABIs real devices use; debug
+            // builds keep every ABI for emulators.
+            ndk {
+                abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+            }
             if (System.getenv("TUXUNDOWN_KEYSTORE_PATH") != null) {
                 signingConfig = signingConfigs.getByName("release")
             }
