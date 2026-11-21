@@ -27,7 +27,7 @@ class DownloadService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIF_ID, buildNotification("准备下载…", 0))
+        startForeground(NOTIF_ID, buildNotification("准备下载…", "", 0))
         if (worker?.isAlive != true) {
             worker = Thread { drainQueue() }.apply { isDaemon = true; start() }
         }
@@ -45,19 +45,25 @@ class DownloadService : Service() {
             }
             task.status = TaskStatus.RUNNING
             store.save()
+            val legacy = store.fileOf(task)
             val engine = DownloadEngine(
                 task = task,
-                file = store.fileOf(task),
-                onProgress = { t ->
-                    val pct = (t.progress * 100).toInt()
-                    notifyUpdate("${t.fileName} · ${formatSpeed(t.speedBps)}", pct)
+                targetProvider = {
+                    val obtained = PublicStorage.obtainTarget(this, task)
+                    // One-time copy of any <= v1.1 private partial into
+                    // the new public .part; afterwards the private
+                    // directory is never used for downloads again.
+                    PublicStorage.migrateLegacyIfNeeded(task, obtained, legacy)
+                    store.save()
+                    obtained.target
                 },
+                onProgress = { notifyAggregate() },
                 onSave = { store.save() },
             )
             DownloadCenter.registerEngine(task, engine)
             try {
                 engine.run()
-                if (task.status == TaskStatus.DONE) exportFinished(task)
+                if (task.status == TaskStatus.DONE) finalizeFinished(task)
             } finally {
                 DownloadCenter.unregisterEngine(task)
                 store.save()
@@ -68,58 +74,83 @@ class DownloadService : Service() {
     }
 
     /**
-     * Move a finished file out of the private scratch area into the
-     * user's download folder under its real name. On failure the file
-     * stays inside the app and the task note says why.
+     * The bytes are already in the public folder as "<name>.part";
+     * finishing is just an in-place rename to the real name.
      */
-    private fun exportFinished(task: TaskRecord) {
+    private fun finalizeFinished(task: TaskRecord) {
         val store = DownloadCenter.store
-        val src = store.fileOf(task)
-        if (!src.exists()) return
-        val name = store.finalName(task)
         try {
-            val out = FileExporter.export(this, src, name)
-            task.savedUri = out.uri.toString()
-            task.savedName = out.displayName
-            task.note = "已保存到${out.where}：${out.displayName}"
-            src.delete()
-            notifyUpdate("下载完成：${out.displayName}", 100)
+            val displayName = PublicStorage.finalizeTarget(this, task)
+            val where = if (DownloadCenter.downloadDirUri.isNotBlank()) {
+                "已保存到你选择的文件夹"
+            } else {
+                "已保存到公共「下载」目录"
+            }
+            task.note = "$where：$displayName"
+            notifyUpdate("下载完成", displayName, 100)
         } catch (e: Exception) {
-            task.note = "下载完成，但保存到目标文件夹失败（${e.message ?: "未知错误"}），" +
-                "文件暂存在应用内，可用「打开/分享」取出，或在设置里重选下载文件夹后重试。"
+            task.note = "下载完成，但改名失败（${e.message ?: "未知错误"}），" +
+                "文件在下载目录里，名字带 .part 后缀，去掉后缀即可使用。"
+            notifyAggregate()
         }
         store.save()
     }
 
-    private fun buildNotification(text: String, pct: Int): Notification {
+    // ---------- notification: same Windows-style wording as the UI ----------
+
+    private fun notifyAggregate() {
+        val store = DownloadCenter.store
+        val active = store.tasks.filter {
+            it.status == TaskStatus.RUNNING || it.status == TaskStatus.QUEUED
+        }
+        val running = store.tasks.firstOrNull { it.status == TaskStatus.RUNNING }
+        if (running == null) {
+            notifyUpdate("TuxunDown", "准备下载…", 0)
+            return
+        }
+        val totalAll = active.filter { it.totalSize > 0 }.sumOf { it.totalSize }
+        val doneAll = active.filter { it.totalSize > 0 }.sumOf { it.downloaded }
+        val totalPct = if (totalAll > 0) (doneAll * 100 / totalAll).toInt() else 0
+        val eta = running.etaSeconds
+        val text = buildString {
+            append(Format.speed(running.speedBps))
+            if (eta > 0) append(" · 还剩 ${Format.eta(eta)}")
+            append(" · 已完成 ${(running.progress * 100).toInt()}%")
+        }
+        if (active.size > 1) {
+            // Multi-task: the notification shows the OVERALL progress.
+            notifyUpdate(
+                "正在下载 ${active.size} 个任务 · ${running.fileName}",
+                text,
+                totalPct,
+            )
+        } else {
+            notifyUpdate("正在下载 · ${running.fileName}", text, (running.progress * 100).toInt())
+        }
+    }
+
+    private fun buildNotification(title: String, text: String, pct: Int): Notification {
         val pi = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         return NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle("TuxunDown 正在下载")
+            .setContentTitle(title)
             .setContentText(text)
             .setContentIntent(pi)
             .setOngoing(true)
-            .setProgress(100, pct, pct == 0)
+            .setProgress(100, pct, false)
             .build()
     }
 
-    private fun notifyUpdate(text: String, pct: Int) {
+    private fun notifyUpdate(title: String, text: String, pct: Int) {
         getSystemService(NotificationManager::class.java)
-            .notify(NOTIF_ID, buildNotification(text, pct))
+            .notify(NOTIF_ID, buildNotification(title, text, pct))
     }
 
     companion object {
         private const val CHANNEL = "downloads"
         private const val NOTIF_ID = 1
-
-        fun formatSpeed(bps: Long): String = when {
-            bps <= 0 -> "—"
-            bps >= 1024 * 1024 -> "%.1f MB/s".format(bps / 1024.0 / 1024.0)
-            bps >= 1024 -> "%.0f KB/s".format(bps / 1024.0)
-            else -> "$bps B/s"
-        }
     }
 }

@@ -27,9 +27,16 @@ class TaskRecord(
     var savedUri: String = "",
     /** Display name of the exported file (real file name, not the internal id). */
     var savedName: String = "",
+    /**
+     * Uri of the in-progress ".part" file in the PUBLIC download
+     * folder (v1.2: downloads are written there directly, never
+     * staged in the app's private directory).
+     */
+    var targetUri: String = "",
     // Live-only fields (not persisted):
     @Transient var downloaded: Long = 0,
     @Transient var speedBps: Long = 0,
+    @Transient var peakBps: Long = 0,
     @Transient val speedHistory: MutableList<Long> = mutableListOf(),
 ) {
     val progress: Float
@@ -40,7 +47,13 @@ class TaskRecord(
             (totalSize - downloaded) / speedBps else -1
 }
 
-/** JSON-file persistence for tasks; partial files live in filesDir/downloads. */
+/**
+ * JSON-file persistence for tasks. The task metadata (incl. chunk
+ * bitmaps) lives in the app's data area; the downloaded BYTES live
+ * in the public Download folder as ".part" files (see PublicStorage).
+ * [fileOf] is only the legacy private scratch path from <= v1.1,
+ * kept so old partials can be migrated and cleaned up.
+ */
 class TaskStore(context: Context) {
     private val dir = File(context.filesDir, "downloads").apply { mkdirs() }
     private val metaFile = File(context.filesDir, "tasks.json")
@@ -72,6 +85,7 @@ class TaskStore(context: Context) {
                     createdAt = o.optLong("createdAt", 0),
                     savedUri = o.optString("savedUri"),
                     savedName = o.optString("savedName"),
+                    targetUri = o.optString("targetUri"),
                 )
                 val h = o.optJSONObject("headers")
                 if (h != null) {
@@ -111,6 +125,7 @@ class TaskStore(context: Context) {
             o.put("createdAt", t.createdAt)
             o.put("savedUri", t.savedUri)
             o.put("savedName", t.savedName)
+            o.put("targetUri", t.targetUri)
             val h = JSONObject()
             for ((k, v) in t.headers) h.put(k, v)
             o.put("headers", h)

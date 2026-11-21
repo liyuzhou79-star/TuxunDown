@@ -1,8 +1,6 @@
 package com.tuxundown.android.core
 
-import java.io.File
 import java.io.InputStream
-import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.atomic.AtomicInteger
@@ -29,10 +27,12 @@ import kotlin.math.max
  */
 class DownloadEngine(
     private val task: TaskRecord,
-    private val file: File,
+    private val targetProvider: () -> DownloadTarget,
     private val onProgress: (TaskRecord) -> Unit,
     private val onSave: () -> Unit,
 ) {
+    /** Seekable destination in the public download folder, opened after probing. */
+    private lateinit var target: DownloadTarget
     @Volatile var paused = false
         private set
     @Volatile private var running = false
@@ -58,6 +58,7 @@ class DownloadEngine(
 
     /** Append one per-second sample for the speed curve (keeps ~90 s). */
     private fun recordSpeed(bps: Long) {
+        if (bps > task.peakBps) task.peakBps = bps
         synchronized(task.speedHistory) {
             task.speedHistory.add(bps)
             while (task.speedHistory.size > 90) task.speedHistory.removeAt(0)
@@ -71,10 +72,15 @@ class DownloadEngine(
         paused = false
         try {
             if (task.totalSize <= 0 || task.fileName.isBlank()) probe()
-            if (task.singleThreadOnly || task.totalSize <= 0) {
-                return runSingleStream()
+            target = targetProvider()
+            try {
+                if (task.singleThreadOnly || task.totalSize <= 0) {
+                    return runSingleStream()
+                }
+                return runSegmented()
+            } finally {
+                runCatching { target.close() }
             }
-            return runSegmented()
         } catch (e: Exception) {
             task.error = e.message ?: e.javaClass.simpleName
             task.status = if (paused) TaskStatus.PAUSED else TaskStatus.FAILED
@@ -146,7 +152,7 @@ class DownloadEngine(
         downloadedBytes.set(ChunkPlanner.downloadedOf(task.chunkDone, total, task.chunkSize))
         task.downloaded = downloadedBytes.get()
 
-        RandomAccessFile(file, "rw").use { it.setLength(total) }
+        target.truncate(total)
 
         // Speed sampler + auto thread probing controller.
         val stopSampler = AtomicInteger(0)
@@ -328,21 +334,18 @@ class DownloadEngine(
             throw IllegalStateException("分片请求返回 HTTP $code")
         }
         val input: InputStream = c.inputStream
-        RandomAccessFile(file, "rw").use { raf ->
-            raf.seek(ac.start)
-            val buf = ByteArray(64 * 1024)
-            var pos = ac.start
-            while (!paused) {
-                val limit = ac.end // may shrink when split
-                if (pos >= limit) break
-                val want = minOf(buf.size.toLong(), limit - pos).toInt()
-                val n = input.read(buf, 0, want)
-                if (n < 0) break
-                raf.write(buf, 0, n)
-                pos += n
-                ac.pos = pos
-                downloadedBytes.addAndGet(n.toLong())
-            }
+        val buf = ByteArray(64 * 1024)
+        var pos = ac.start
+        while (!paused) {
+            val limit = ac.end // may shrink when split
+            if (pos >= limit) break
+            val want = minOf(buf.size.toLong(), limit - pos).toInt()
+            val n = input.read(buf, 0, want)
+            if (n < 0) break
+            target.writeAt(pos, buf, 0, n)
+            pos += n
+            ac.pos = pos
+            downloadedBytes.addAndGet(n.toLong())
         }
         input.close()
         c.disconnect()
@@ -382,7 +385,7 @@ class DownloadEngine(
             }
             if (task.totalSize <= 0) task.totalSize = c.contentLengthLong
             c.inputStream.use { input ->
-                file.outputStream().use { out ->
+                target.openStream().use { out ->
                     val buf = ByteArray(64 * 1024)
                     while (!paused) {
                         val n = input.read(buf)

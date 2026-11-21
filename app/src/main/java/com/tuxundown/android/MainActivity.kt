@@ -10,10 +10,18 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -21,36 +29,50 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
-import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import com.tuxundown.android.core.DownloadCenter
-import com.tuxundown.android.core.DownloadService
+import com.tuxundown.android.core.Format
+import com.tuxundown.android.core.PublicStorage
 import com.tuxundown.android.core.TaskRecord
 import com.tuxundown.android.core.TaskStatus
 import com.tuxundown.android.sniff.LinkRouter
@@ -73,11 +95,36 @@ class MainActivity : ComponentActivity() {
         } else ""
 
         setContent {
-            MaterialTheme {
+            val dark = isSystemInDarkTheme()
+            MaterialTheme(
+                colorScheme = if (dark) {
+                    darkColorScheme(
+                        background = Color(0xFF1B1B1B),
+                        surface = Color(0xFF242424),
+                    )
+                } else {
+                    lightColorScheme(
+                        background = Color(0xFFF7F7F7),
+                        surface = Color(0xFFFFFFFF),
+                    )
+                }
+            ) {
                 DownApp(sharedUrl)
             }
         }
     }
+}
+
+/** Windows file-transfer palette. */
+object WinPalette {
+    val Green = Color(0xFF06B025)        // Windows transfer green
+    val GreenLight = Color(0xFF7BD88A)   // moving highlight on the bar
+    val ChartGreen = Color(0xFF1F9D2C)
+    val Yellow = Color(0xFFF7B500)       // paused
+    val Red = Color(0xFFE81123)          // error
+    val TrackLight = Color(0xFFE1E1E1)
+    val TrackDark = Color(0xFF3F3F3F)
+    val GrayText = Color(0xFF767676)
 }
 
 @androidx.compose.runtime.Composable
@@ -233,57 +280,110 @@ fun DownApp(sharedUrl: String) {
         context.startActivity(Intent.createChooser(intent, "分享文件"))
     }
 
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
+    fun deleteTask(task: TaskRecord) {
+        if (task.status == TaskStatus.RUNNING) DownloadCenter.pauseTask(task)
+        // Unfinished tasks: also remove the public .part file.
+        // Finished tasks: only the record goes away, the file stays
+        // in the Download folder (it belongs to the user now).
+        if (task.status != TaskStatus.DONE) {
+            PublicStorage.deleteTarget(context, task)
+        }
+        store.remove(task)
+    }
+
+    val activeTasks = store.tasks.filter {
+        it.status == TaskStatus.RUNNING || it.status == TaskStatus.QUEUED
+    }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(16.dp)
+    ) {
         Text("TuxunDown", style = MaterialTheme.typography.headlineMedium)
-        Text("极速多线程下载器", style = MaterialTheme.typography.bodyMedium)
-        Spacer(Modifier.height(8.dp))
-        Row(
+        Text(
+            "极速多线程下载器",
+            style = MaterialTheme.typography.bodyMedium,
+            color = WinPalette.GrayText,
+        )
+        Spacer(Modifier.height(12.dp))
+
+        // ---- settings card ----
+        Card(
             Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surface
+            ),
         ) {
-            Column(Modifier.weight(1f)) {
-                Text("仅 WiFi 下载")
+            Column(Modifier.padding(14.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("仅 WiFi 下载")
+                        Text(
+                            "开启后流量网络下任务只排队不下载",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = WinPalette.GrayText,
+                        )
+                    }
+                    Switch(checked = wifiOnly, onCheckedChange = {
+                        wifiOnly = it
+                        DownloadCenter.wifiOnly = it
+                    })
+                }
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("下载目录")
+                        Text(
+                            if (dirName.isBlank()) "公共「下载」目录（手机下载文件夹第一层）"
+                            else "自定义：$dirName",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = WinPalette.GrayText,
+                        )
+                    }
+                    OutlinedButton(onClick = { dirPicker.launch(null) }) { Text("更改") }
+                    if (dirName.isNotBlank()) {
+                        OutlinedButton(onClick = {
+                            DownloadCenter.downloadDirUri = ""
+                            DownloadCenter.downloadDirName = ""
+                            dirName = ""
+                        }) { Text("默认") }
+                    }
+                }
                 Text(
-                    "开启后流量网络下任务只排队不下载",
+                    "文件直接保存在公共「下载」目录里，文件管理器第一层就能看到；" +
+                        "没下完的 .part 文件也在那里。想换地方，点「更改」选任意文件夹授权一次即可。",
                     style = MaterialTheme.typography.bodySmall,
+                    color = WinPalette.GrayText,
+                    modifier = Modifier.padding(top = 8.dp),
                 )
             }
-            Switch(checked = wifiOnly, onCheckedChange = {
-                wifiOnly = it
-                DownloadCenter.wifiOnly = it
-            })
         }
-        Spacer(Modifier.height(4.dp))
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("下载目录")
-                Text(
-                    if (dirName.isBlank()) "手机「下载/TuxunDown」文件夹"
-                    else "自定义：$dirName",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-            OutlinedButton(onClick = { dirPicker.launch(null) }) { Text("更改") }
-            if (dirName.isNotBlank()) {
-                OutlinedButton(onClick = {
-                    DownloadCenter.downloadDirUri = ""
-                    DownloadCenter.downloadDirName = ""
-                    dirName = ""
-                }) { Text("默认") }
-            }
-        }
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(12.dp))
         Button(onClick = { showAdd = true }, modifier = Modifier.fillMaxWidth()) {
             Text("＋ 新建下载")
         }
         Spacer(Modifier.height(12.dp))
+
+        // ---- multi-task summary (Windows multi-file transfer style) ----
+        if (activeTasks.size >= 2) {
+            SummaryCard(activeTasks)
+            Spacer(Modifier.height(12.dp))
+        }
+
         if (store.tasks.isEmpty()) {
             Text("还没有任务。点「新建下载」，粘贴文件直链或网页链接即可：直链会直接开下，网页会自动嗅探里面的资源。")
         }
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             items(store.tasks, key = { it.id }) { task ->
                 TaskCard(
                     task = task,
@@ -291,7 +391,7 @@ fun DownApp(sharedUrl: String) {
                     onResume = { DownloadCenter.enqueue(task) },
                     onOpen = { openFile(task) },
                     onShare = { shareFile(task) },
-                    onDelete = { store.remove(task) },
+                    onDelete = { deleteTask(task) },
                 )
             }
         }
@@ -312,10 +412,15 @@ fun DownApp(sharedUrl: String) {
                     Text(
                         "直链自动直接下载；网页自动嗅探里面的资源。",
                         style = MaterialTheme.typography.bodySmall,
+                        color = WinPalette.GrayText,
                     )
                     if (message.isNotBlank()) {
                         Spacer(Modifier.height(8.dp))
-                        Text(message, style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = WinPalette.Red,
+                        )
                     }
                     if (sniffing) {
                         Spacer(Modifier.height(8.dp))
@@ -365,15 +470,28 @@ fun DownApp(sharedUrl: String) {
                                     createTask(res.url, sniffPage)
                                     sniffList = emptyList()
                                 }
-                                .padding(vertical = 8.dp)
+                                .padding(vertical = 10.dp)
                         ) {
-                            Text(res.name, style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                res.name,
+                                style = MaterialTheme.typography.bodyLarge,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                             Text(
                                 "${res.kind}${if (res.looksLikeDownloadEntry) " · 疑似下载入口" else ""}",
                                 style = MaterialTheme.typography.bodySmall,
+                                color = WinPalette.GrayText,
                             )
-                            Text(res.url, style = MaterialTheme.typography.bodySmall)
+                            Text(
+                                res.url,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = WinPalette.GrayText,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         }
+                        HorizontalDivider()
                     }
                 }
             },
@@ -381,6 +499,181 @@ fun DownApp(sharedUrl: String) {
                 TextButton(onClick = { sniffList = emptyList() }) { Text("关闭") }
             },
         )
+    }
+}
+
+/** Aggregate card shown while several tasks are active, like the
+ *  Windows multi-file transfer summary. */
+@androidx.compose.runtime.Composable
+fun SummaryCard(active: List<TaskRecord>) {
+    val withSize = active.filter { it.totalSize > 0 }
+    val totalSize = withSize.sumOf { it.totalSize }
+    val totalDone = withSize.sumOf { it.downloaded }
+    val totalProgress = if (totalSize > 0) (totalDone.toFloat() / totalSize).coerceIn(0f, 1f) else 0f
+    val totalSpeed = active.filter { it.status == TaskStatus.RUNNING }.sumOf { it.speedBps }
+    Card(
+        Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    ) {
+        Column(Modifier.padding(14.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "共 ${active.size} 个任务",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    "已完成 ${Format.percent(totalProgress)}%",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            WinProgressBar(
+                progress = totalProgress,
+                state = BarState.RUNNING,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "总速度：${Format.speed(totalSpeed)} · ${Format.size(totalDone)} / ${Format.size(totalSize)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = WinPalette.GrayText,
+            )
+        }
+    }
+}
+
+enum class BarState { RUNNING, PAUSED, ERROR, DONE, IDLE }
+
+/**
+ * The Windows file-transfer progress bar: bright green fill with a
+ * lighter highlight band sweeping across it, on a light gray track.
+ * Paused turns yellow, error red — same state colors as Windows.
+ */
+@androidx.compose.runtime.Composable
+fun WinProgressBar(progress: Float, state: BarState, modifier: Modifier = Modifier) {
+    val dark = isSystemInDarkTheme()
+    val track = if (dark) WinPalette.TrackDark else WinPalette.TrackLight
+    val fill = when (state) {
+        BarState.PAUSED -> WinPalette.Yellow
+        BarState.ERROR -> WinPalette.Red
+        else -> WinPalette.Green
+    }
+    val transition = rememberInfiniteTransition(label = "winbar")
+    val phase by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1800, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "shine",
+    )
+    val p = progress.coerceIn(0f, 1f)
+    Canvas(
+        modifier
+            .height(18.dp)
+            .clip(RoundedCornerShape(2.dp))
+    ) {
+        val w = size.width
+        val h = size.height
+        drawRoundRect(track, cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx()))
+        val fillW = w * p
+        if (fillW > 0f) {
+            clipRect(left = 0f, top = 0f, right = fillW, bottom = h) {
+                drawRect(fill, size = Size(fillW, h))
+                if (state == BarState.RUNNING) {
+                    // Sweeping lighter band, like the Windows shine.
+                    val bandW = 56.dp.toPx()
+                    val cx = phase * (fillW + bandW) - bandW / 2
+                    drawRect(
+                        WinPalette.GreenLight.copy(alpha = 0.55f),
+                        topLeft = Offset(cx - bandW / 2, 0f),
+                        size = Size(bandW, h),
+                    )
+                }
+                // Subtle top gloss.
+                drawRect(
+                    Color.White.copy(alpha = 0.18f),
+                    size = Size(fillW, h / 2),
+                )
+            }
+        }
+    }
+}
+
+// ---- small Windows-style glyphs (pause / play / close / check) ----
+
+@androidx.compose.runtime.Composable
+fun PauseGlyph(color: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier.size(16.dp)) {
+        val barW = size.width * 0.28f
+        val gap = size.width * 0.16f
+        val x0 = (size.width - 2 * barW - gap) / 2
+        drawRoundRect(
+            color,
+            topLeft = Offset(x0, 0f),
+            size = Size(barW, size.height),
+            cornerRadius = CornerRadius(1.dp.toPx(), 1.dp.toPx()),
+        )
+        drawRoundRect(
+            color,
+            topLeft = Offset(x0 + barW + gap, 0f),
+            size = Size(barW, size.height),
+            cornerRadius = CornerRadius(1.dp.toPx(), 1.dp.toPx()),
+        )
+    }
+}
+
+@androidx.compose.runtime.Composable
+fun PlayGlyph(color: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier.size(16.dp)) {
+        val path = Path().apply {
+            moveTo(size.width * 0.22f, size.height * 0.08f)
+            lineTo(size.width * 0.88f, size.height * 0.5f)
+            lineTo(size.width * 0.22f, size.height * 0.92f)
+            close()
+        }
+        drawPath(path, color)
+    }
+}
+
+@androidx.compose.runtime.Composable
+fun CloseGlyph(color: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier.size(14.dp)) {
+        val sw = 1.8.dp.toPx()
+        drawLine(color, Offset(0f, 0f), Offset(size.width, size.height), strokeWidth = sw)
+        drawLine(color, Offset(size.width, 0f), Offset(0f, size.height), strokeWidth = sw)
+    }
+}
+
+@androidx.compose.runtime.Composable
+fun CheckGlyph(color: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier.size(16.dp)) {
+        val path = Path().apply {
+            moveTo(size.width * 0.08f, size.height * 0.55f)
+            lineTo(size.width * 0.38f, size.height * 0.85f)
+            lineTo(size.width * 0.92f, size.height * 0.18f)
+        }
+        drawPath(path, color, style = Stroke(width = 2.2.dp.toPx()))
+    }
+}
+
+@androidx.compose.runtime.Composable
+fun InfoRow(label: String, value: String) {
+    Row(Modifier.fillMaxWidth()) {
+        Text(
+            label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = WinPalette.GrayText,
+            modifier = Modifier.size(width = 76.dp, height = 20.dp),
+        )
+        Text(value, style = MaterialTheme.typography.bodyMedium)
     }
 }
 
@@ -393,147 +686,268 @@ fun TaskCard(
     onShare: () -> Unit,
     onDelete: () -> Unit,
 ) {
-    var expanded by remember { mutableStateOf(false) }
-    val showChart = task.status == TaskStatus.RUNNING || expanded
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp)) {
-            Text(
-                task.fileName.ifBlank { task.url },
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.clickable { expanded = !expanded },
-            )
-            val statusText = when (task.status) {
-                TaskStatus.QUEUED -> "排队中"
-                TaskStatus.RUNNING -> "下载中 · ${task.threads} 线程（点文件名看详情）"
-                TaskStatus.PAUSED -> "已暂停"
-                TaskStatus.DONE -> "已完成"
-                TaskStatus.FAILED -> "失败"
-            }
-            Text(statusText, style = MaterialTheme.typography.bodySmall)
-            if (task.status == TaskStatus.RUNNING || task.status == TaskStatus.PAUSED) {
-                Spacer(Modifier.height(6.dp))
-                LinearProgressIndicator(
-                    progress = { task.progress },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                val eta = task.etaSeconds
-                Text(
-                    "${formatSize(task.downloaded)} / ${formatSize(task.totalSize)}" +
-                        " · ${DownloadService.formatSpeed(task.speedBps)}" +
-                        if (eta > 0) " · 还剩 ${eta} 秒" else "",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-            if (showChart && task.speedHistory.isNotEmpty()) {
-                Spacer(Modifier.height(8.dp))
-                // Big current speed, Windows-transfer style.
-                Text(
-                    DownloadService.formatSpeed(task.speedBps),
-                    color = Color(0xFF1F9D2C),
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.Bold,
-                )
-                SpeedChart(
-                    history = synchronized(task.speedHistory) { task.speedHistory.toList() },
-                    modifier = Modifier.fillMaxWidth().height(96.dp),
-                )
-                Text(
-                    "速度曲线 · 最近 90 秒",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-            if (expanded) {
-                Spacer(Modifier.height(6.dp))
-                Text("链接：${task.url}", style = MaterialTheme.typography.bodySmall)
-                if (task.chunkSize > 0 && task.totalSize > 0) {
-                    val total = (task.totalSize + task.chunkSize - 1) / task.chunkSize
+    var expanded by remember(task.id) {
+        mutableStateOf(DownloadCenter.detailsExpanded)
+    }
+    val pct = Format.percent(task.progress)
+    val barState = when (task.status) {
+        TaskStatus.RUNNING -> BarState.RUNNING
+        TaskStatus.PAUSED -> BarState.PAUSED
+        TaskStatus.FAILED -> BarState.ERROR
+        TaskStatus.DONE -> BarState.DONE
+        TaskStatus.QUEUED -> BarState.IDLE
+    }
+    Card(
+        Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    ) {
+        Column(Modifier.padding(14.dp)) {
+            // ---- header: name + percent, Windows-style buttons top-right ----
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Top,
+            ) {
+                Column(Modifier.weight(1f)) {
                     Text(
-                        "分片：已完成 ${task.chunkDone.count { it }}/$total 块 · ${task.threads} 线程",
-                        style = MaterialTheme.typography.bodySmall,
+                        task.fileName.ifBlank { task.url },
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    val headline = when (task.status) {
+                        TaskStatus.RUNNING -> "已完成 $pct%"
+                        TaskStatus.PAUSED -> "已暂停 · 已完成 $pct%"
+                        TaskStatus.QUEUED -> "排队中，等待开始"
+                        TaskStatus.DONE -> "已完成"
+                        TaskStatus.FAILED -> "下载失败"
+                    }
+                    Text(
+                        headline,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = when (task.status) {
+                            TaskStatus.FAILED -> WinPalette.Red
+                            TaskStatus.DONE -> WinPalette.ChartGreen
+                            else -> WinPalette.GrayText
+                        },
                     )
                 }
-                if (task.savedName.isNotBlank()) {
-                    Text(
-                        "已保存为：${task.savedName}",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-            }
-            if (task.status == TaskStatus.DONE && task.savedName.isBlank()) {
-                Text(formatSize(task.totalSize), style = MaterialTheme.typography.bodySmall)
-            }
-            if (task.note.isNotBlank()) {
-                Text(task.note, style = MaterialTheme.typography.bodySmall)
-            }
-            if (task.error.isNotBlank() && task.status == TaskStatus.FAILED) {
-                Text("错误：${task.error}", style = MaterialTheme.typography.bodySmall)
-            }
-            Spacer(Modifier.height(6.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 when (task.status) {
-                    TaskStatus.RUNNING -> OutlinedButton(onClick = onPause) { Text("暂停") }
+                    TaskStatus.RUNNING ->
+                        IconButton(onClick = onPause) {
+                            PauseGlyph(MaterialTheme.colorScheme.onSurface)
+                        }
                     TaskStatus.PAUSED, TaskStatus.FAILED ->
-                        OutlinedButton(onClick = onResume) { Text("继续") }
+                        IconButton(onClick = onResume) {
+                            PlayGlyph(MaterialTheme.colorScheme.onSurface)
+                        }
+                    TaskStatus.DONE ->
+                        Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                            CheckGlyph(WinPalette.ChartGreen)
+                        }
+                    TaskStatus.QUEUED -> Spacer(Modifier.size(48.dp))
+                }
+                IconButton(onClick = onDelete) {
+                    CloseGlyph(MaterialTheme.colorScheme.onSurface)
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+            WinProgressBar(
+                progress = if (task.status == TaskStatus.DONE) 1f else task.progress,
+                state = barState,
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            if (!expanded) {
+                // ---- collapsed ("较少详细信息"): one status line ----
+                Spacer(Modifier.height(6.dp))
+                val line = when (task.status) {
+                    TaskStatus.RUNNING -> {
+                        val eta = Format.eta(task.etaSeconds)
+                        Format.speed(task.speedBps) +
+                            if (eta.isNotBlank()) " · 还剩 $eta" else ""
+                    }
+                    TaskStatus.PAUSED -> "已下载 ${Format.size(task.downloaded)} / ${Format.size(task.totalSize)}"
+                    TaskStatus.QUEUED -> "等待前面的任务完成"
+                    TaskStatus.DONE -> Format.size(task.totalSize)
+                    TaskStatus.FAILED -> task.error.ifBlank { "下载失败" }
+                }
+                Text(
+                    line,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (task.status == TaskStatus.FAILED) WinPalette.Red
+                    else WinPalette.GrayText,
+                )
+            } else {
+                // ---- expanded ("详细信息"): chart + all info rows ----
+                if (task.speedHistory.isNotEmpty() &&
+                    (task.status == TaskStatus.RUNNING || task.status == TaskStatus.PAUSED)
+                ) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        Format.speed(task.speedBps),
+                        color = WinPalette.ChartGreen,
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    SpeedChart(
+                        history = synchronized(task.speedHistory) { task.speedHistory.toList() },
+                        modifier = Modifier.fillMaxWidth().height(110.dp),
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                when (task.status) {
+                    TaskStatus.RUNNING -> {
+                        InfoRow("速度：", Format.speed(task.speedBps))
+                        if (task.peakBps > 0) InfoRow("峰值速度：", Format.speed(task.peakBps))
+                        val eta = Format.eta(task.etaSeconds)
+                        InfoRow("剩余时间：", eta.ifBlank { "计算中…" })
+                        InfoRow(
+                            "已下载：",
+                            "${Format.size(task.downloaded)} / ${Format.size(task.totalSize)}",
+                        )
+                        if (task.totalSize > 0) {
+                            InfoRow("剩余：", Format.size(task.totalSize - task.downloaded))
+                        }
+                    }
+                    TaskStatus.PAUSED -> {
+                        InfoRow(
+                            "已下载：",
+                            "${Format.size(task.downloaded)} / ${Format.size(task.totalSize)}",
+                        )
+                        if (task.peakBps > 0) InfoRow("峰值速度：", Format.speed(task.peakBps))
+                    }
                     TaskStatus.DONE -> {
+                        InfoRow("大小：", Format.size(task.totalSize))
+                        if (task.savedName.isNotBlank()) {
+                            InfoRow("保存位置：", PublicStorage.locationLabel(LocalContext.current))
+                            InfoRow("文件名：", task.savedName)
+                        }
+                    }
+                    TaskStatus.FAILED -> {
+                        if (task.error.isNotBlank()) {
+                            Text(
+                                task.error,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = WinPalette.Red,
+                            )
+                        }
+                        InfoRow(
+                            "已下载：",
+                            "${Format.size(task.downloaded)} / ${Format.size(task.totalSize)}",
+                        )
+                    }
+                    TaskStatus.QUEUED -> {
+                        Text(
+                            "等待前面的任务完成",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = WinPalette.GrayText,
+                        )
+                    }
+                }
+                if (task.chunkSize > 0 && task.totalSize > 0 && task.status != TaskStatus.DONE) {
+                    val total = (task.totalSize + task.chunkSize - 1) / task.chunkSize
+                    InfoRow(
+                        "分片：",
+                        "已完成 ${task.chunkDone.count { it }}/$total 块 · ${task.threads} 线程",
+                    )
+                }
+                if (task.note.isNotBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        task.note,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = WinPalette.GrayText,
+                    )
+                }
+                if (task.status == TaskStatus.DONE) {
+                    Spacer(Modifier.height(6.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(onClick = onOpen) { Text("打开") }
                         OutlinedButton(onClick = onShare) { Text("分享") }
                     }
-                    TaskStatus.QUEUED -> OutlinedButton(onClick = onPause) { Text("取消排队") }
                 }
-                OutlinedButton(onClick = onDelete) { Text("删除") }
+            }
+
+            // ---- Windows-style details toggle ----
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                TextButton(onClick = {
+                    expanded = !expanded
+                    DownloadCenter.detailsExpanded = expanded
+                }) {
+                    Text(if (expanded) "较少详细信息 ▴" else "详细信息 ▾")
+                }
             }
         }
     }
 }
 
 /**
- * Speed history chart modelled on the Windows file-transfer graph:
- * light background, thin grid lines, a green line with a translucent
- * green fill under it. History is right-aligned in a 90-second window.
+ * Speed history chart modelled on the Windows file-transfer /
+ * Task Manager graph: plain background, thin grid lines, a green
+ * line with a translucent green fill under it, the Y axis scaled
+ * to a clean ceiling whose value is labelled at the top left, and
+ * the time window labelled along the bottom. History is
+ * right-aligned in a 90-second window.
  */
 @androidx.compose.runtime.Composable
 fun SpeedChart(history: List<Long>, modifier: Modifier = Modifier) {
-    val lineColor = Color(0xFF1F9D2C)
-    val fillColor = Color(0xFF35B93F)
-    val gridColor = Color(0xFFDDDDDD)
-    val borderColor = Color(0xFFBDBDBD)
-    Canvas(modifier.background(Color(0xFFFCFEFC))) {
+    val dark = isSystemInDarkTheme()
+    val lineColor = WinPalette.ChartGreen
+    val gridColor = if (dark) Color(0xFF3A3A3A) else Color(0xFFDDDDDD)
+    val borderColor = if (dark) Color(0xFF4A4A4A) else Color(0xFFBDBDBD)
+    val bg = if (dark) Color(0xFF202020) else Color(0xFFFCFEFC)
+    val ceiling = Format.chartCeiling(history.maxOrNull() ?: 0)
+    val topLabel = Format.speed(ceiling) + " 峰值刻度"
+    val labelColor = if (dark) 0xFFAAAAAA.toInt() else 0xFF767676.toInt()
+    Canvas(modifier.background(bg)) {
         val w = size.width
         val h = size.height
+        val labelH = 14.dp.toPx()
+        val bottomH = 12.dp.toPx()
+        val plotTop = labelH
+        val plotH = h - labelH - bottomH
         // Grid: horizontal quarters + verticals every ~15 s of window.
-        for (i in 1..3) {
-            val y = h * i / 4f
+        for (i in 0..4) {
+            val y = plotTop + plotH * i / 4f
             drawLine(gridColor, Offset(0f, y), Offset(w, y), strokeWidth = 1f)
         }
         for (i in 1..5) {
             val x = w * i / 6f
-            drawLine(gridColor, Offset(x, 0f), Offset(x, h), strokeWidth = 1f)
+            drawLine(gridColor, Offset(x, plotTop), Offset(x, plotTop + plotH), strokeWidth = 1f)
         }
-        drawRect(borderColor, style = Stroke(width = 1f))
+        drawRect(borderColor, topLeft = Offset(0f, plotTop), size = Size(w, plotH), style = Stroke(width = 1f))
+        // Axis labels via the native canvas.
+        val paint = android.graphics.Paint().apply {
+            color = labelColor
+            textSize = 10.dp.toPx()
+            isAntiAlias = true
+        }
+        drawContext.canvas.nativeCanvas.drawText(topLabel, 4.dp.toPx(), 11.dp.toPx(), paint)
+        drawContext.canvas.nativeCanvas.drawText("90 秒前", 4.dp.toPx(), h - 2.dp.toPx(), paint)
+        val nowText = "现在"
+        val nowW = paint.measureText(nowText)
+        drawContext.canvas.nativeCanvas.drawText(nowText, w - nowW - 4.dp.toPx(), h - 2.dp.toPx(), paint)
         if (history.size < 2) return@Canvas
-        val maxF = (history.maxOrNull() ?: 0).toFloat().coerceAtLeast(1f) * 1.15f
+        val maxF = ceiling.toFloat().coerceAtLeast(1f)
         val stepX = w / 89f
         val startX = w - stepX * (history.size - 1)
         val line = Path()
         history.forEachIndexed { i, v ->
             val x = startX + stepX * i
-            val y = h - (v / maxF) * (h - 4f) - 2f
+            val y = plotTop + plotH - (v / maxF) * (plotH - 4f) - 2f
             if (i == 0) line.moveTo(x, y) else line.lineTo(x, y)
         }
         val fill = Path()
         fill.addPath(line)
-        fill.lineTo(w, h)
-        fill.lineTo(startX, h)
+        fill.lineTo(w, plotTop + plotH)
+        fill.lineTo(startX, plotTop + plotH)
         fill.close()
-        drawPath(fill, fillColor.copy(alpha = 0.30f))
+        drawPath(fill, lineColor.copy(alpha = 0.25f))
         drawPath(line, lineColor, style = Stroke(width = 2.dp.toPx()))
     }
-}
-
-fun formatSize(bytes: Long): String = when {
-    bytes < 0 -> "未知大小"
-    bytes >= 1024L * 1024 * 1024 -> "%.2f GB".format(bytes / 1024.0 / 1024.0 / 1024.0)
-    bytes >= 1024 * 1024 -> "%.1f MB".format(bytes / 1024.0 / 1024.0)
-    bytes >= 1024 -> "%.0f KB".format(bytes / 1024.0)
-    else -> "$bytes B"
 }

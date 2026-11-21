@@ -17,7 +17,7 @@ object DownloadCenter {
         get() = prefs().getBoolean("wifiOnly", false)
         set(v) { prefs().edit().putBoolean("wifiOnly", v).apply() }
 
-    /** Custom download folder (SAF tree Uri string); "" = public Download/TuxunDown. */
+    /** Custom download folder (SAF tree Uri string); "" = the public Download folder root itself. */
     var downloadDirUri: String
         get() = prefs().getString("downloadDirUri", "") ?: ""
         set(v) { prefs().edit().putString("downloadDirUri", v).apply() }
@@ -25,6 +25,11 @@ object DownloadCenter {
     var downloadDirName: String
         get() = prefs().getString("downloadDirName", "") ?: ""
         set(v) { prefs().edit().putString("downloadDirName", v).apply() }
+
+    /** Windows-style "详细信息" expanded state for task cards; remembered globally. */
+    var detailsExpanded: Boolean
+        get() = prefs().getBoolean("detailsExpanded", true)
+        set(v) { prefs().edit().putBoolean("detailsExpanded", v).apply() }
 
     private fun prefs() = appContext!!.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
