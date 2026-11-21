@@ -54,17 +54,14 @@ object Format {
 
     /**
      * Nice chart ceiling for a speed graph: the smallest
-     * 1/2/5 × 10^n value that is >= maxBps * 1.1, at least 1 KB/s,
-     * so the Y axis gets a clean labelled top like Windows graphs.
+     * power-of-two multiple of 1 KB/s that is >= maxBps * 1.1,
+     * so the Y axis gets a clean labelled top (4 MB/秒, 8 MB/秒…)
+     * like Windows graphs, and the label always formats exactly.
      */
     fun chartCeiling(maxBps: Long): Long {
         val target = maxOf(1024.0, maxBps * 1.1)
-        var step = 1024.0
-        while (true) {
-            for (m in doubleArrayOf(1.0, 2.0, 5.0, 10.0)) {
-                if (step * m >= target) return (step * m).toLong()
-            }
-            step *= 10
-        }
+        var step = 1024L
+        while (step < target) step *= 2
+        return step
     }
 }

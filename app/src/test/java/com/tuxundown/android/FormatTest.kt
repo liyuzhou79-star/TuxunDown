@@ -39,12 +39,14 @@ class FormatTest {
     fun chartCeilingIsNiceNumber() {
         assertEquals(1024L, Format.chartCeiling(0))
         assertEquals(1024L, Format.chartCeiling(500))
-        // 3 MB/s * 1.1 = 3.3 MB/s -> next 1/2/5 step is 5 MB/s.
-        assertEquals(5L * 1024 * 1024, Format.chartCeiling(3L * 1024 * 1024))
-        // 9 MB/s * 1.1 = 9.9 MB/s -> 10 MB/s.
-        assertEquals(10L * 1024 * 1024, Format.chartCeiling(9L * 1024 * 1024))
-        // 12 MB/s * 1.1 = 13.2 MB/s -> 20 MB/s.
-        assertEquals(20L * 1024 * 1024, Format.chartCeiling(12L * 1024 * 1024))
+        // 3 MB/s * 1.1 = 3.3 MB/s -> next power-of-two step is 4 MB/s.
+        assertEquals(4L * 1024 * 1024, Format.chartCeiling(3L * 1024 * 1024))
+        // 9 MB/s * 1.1 = 9.9 MB/s -> 16 MB/s.
+        assertEquals(16L * 1024 * 1024, Format.chartCeiling(9L * 1024 * 1024))
+        // 12 MB/s * 1.1 = 13.2 MB/s -> 16 MB/s.
+        assertEquals(16L * 1024 * 1024, Format.chartCeiling(12L * 1024 * 1024))
+        // The labelled ceiling always formats back to a clean value.
+        assertEquals("16.0 MB/秒", Format.speed(Format.chartCeiling(12L * 1024 * 1024)))
     }
 
     @Test
