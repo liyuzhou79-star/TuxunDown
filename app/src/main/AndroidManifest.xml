@@ -11,6 +11,10 @@
          system's battery-whitelist page for the user; the app never
          changes any system setting itself. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- v1.6: only for the scan-to-add screen; the camera is opened
+         solely while that screen is in front of the user. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <application
         android:allowBackup="true"
@@ -37,6 +41,10 @@
             android:name=".SniffActivity"
             android:exported="false"
             android:label="嗅探浏览器" />
+        <activity
+            android:name=".ScanActivity"
+            android:exported="false"
+            android:label="扫码添加" />
         <service
             android:name=".core.DownloadService"
             android:exported="false"

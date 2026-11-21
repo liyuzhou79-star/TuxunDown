@@ -123,7 +123,8 @@ class SniffActivity : Activity() {
             it.url == url && it.status != TaskStatus.DONE && it.status != TaskStatus.FAILED
         }
         if (dup) return false
-        val task = TaskRecord(url = url, headers = headers.toMutableMap())
+        // v1.6: newTask also flags .m3u8 links as HLS tasks.
+        val task = DownloadCenter.newTask(url, headers)
         DownloadCenter.store.add(task)
         DownloadCenter.enqueue(task)
         return true

@@ -84,6 +84,11 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.material3:material3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    // v1.6 QR scan: zxing CORE only (the decoder) — deliberately NOT
+    // the embedded scanner/CameraX/ML-Kit stacks. R8 shrinks it to
+    // the QR subset actually used; the release-size red line is
+    // re-measured every version.
+    implementation("com.google.zxing:core:3.5.3")
     debugImplementation("androidx.compose.ui:ui-tooling")
     implementation("androidx.compose.ui:ui-tooling-preview")
     testImplementation("junit:junit:4.13.2")

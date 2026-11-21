@@ -81,7 +81,9 @@ import com.tuxundown.android.core.PublicStorage
 import com.tuxundown.android.core.TaskRecord
 import com.tuxundown.android.core.TaskStatus
 import com.tuxundown.android.sniff.LinkRouter
+import com.tuxundown.android.sniff.SizeProbe
 import com.tuxundown.android.sniff.SniffResult
+import com.tuxundown.android.sniff.SniffSort
 import com.tuxundown.android.sniff.SniffedResource
 import com.tuxundown.android.sniff.Sniffer
 import kotlinx.coroutines.delay
@@ -176,6 +178,7 @@ fun DownApp(sharedUrl: String) {
     var maxConc by remember { mutableStateOf(DownloadCenter.maxConcurrent) }
     var autoRetry by remember { mutableStateOf(DownloadCenter.autoRetryCount) }
     var trafficMB by remember { mutableStateOf(DownloadCenter.trafficThresholdMB) }
+    var dualChan by remember { mutableStateOf(DownloadCenter.dualChannel) }
 
     // ---- v1.5: battery-optimisation whitelist status for the
     // settings keep-alive card. Refreshed every time the settings
@@ -195,6 +198,7 @@ fun DownApp(sharedUrl: String) {
     var showAdd by remember { mutableStateOf(sharedUrl.isNotBlank()) }
     var urlText by remember { mutableStateOf(sharedUrl) }
     var nameText by remember { mutableStateOf("") }
+    var mirrorsText by remember { mutableStateOf("") }
     var scheduleMin by remember { mutableStateOf(0) }
     var pendingScheduleAt by remember { mutableStateOf(0L) }
     var sniffing by remember { mutableStateOf(false) }
@@ -206,7 +210,12 @@ fun DownApp(sharedUrl: String) {
     var sniffPage by remember { mutableStateOf("") }
     var sniffChecked by remember { mutableStateOf<Set<String>>(emptySet()) }
     var sniffKind by remember { mutableStateOf("") } // "" = all kinds
-    var sniffSort by remember { mutableStateOf(0) } // 0 默认 1 名称 2 类型
+    var sniffSort by remember { mutableStateOf(0) } // 0 默认 1 名称 2 类型 3 大小
+    var sniffProbing by remember { mutableStateOf(false) } // v1.6 size probe phase
+
+    // ---- mirror-sources dialog (v1.6 item 4) ----
+    var sourcesTask by remember { mutableStateOf<TaskRecord?>(null) }
+    var sourceText by remember { mutableStateOf("") }
 
     // ---- home list state (v1.4: tabs, search, sort, multi-select) ----
     var tab by remember { mutableStateOf(0) } // 0 全部 1 下载中 2 已完成 3 失败
@@ -223,7 +232,7 @@ fun DownApp(sharedUrl: String) {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "1.5.0"
+        }.getOrNull() ?: "1.6.0"
     }
     var showGuide by remember {
         mutableStateOf(DownloadCenter.guideSeenVersion != appVersion)
@@ -317,7 +326,12 @@ fun DownApp(sharedUrl: String) {
     }
 
     /** Returns false when the same link is already an active task. */
-    fun createTask(url: String, referer: String = "", fileName: String = ""): Boolean {
+    fun createTask(
+        url: String,
+        referer: String = "",
+        fileName: String = "",
+        mirrors: List<String> = emptyList(),
+    ): Boolean {
         // Audit A2 (UI side): the same URL twice would produce two
         // records fighting over one file name — refuse politely.
         val dup = store.tasks.any {
@@ -327,9 +341,15 @@ fun DownApp(sharedUrl: String) {
             Toast.makeText(context, "这个链接已经在任务列表里了", Toast.LENGTH_SHORT).show()
             return false
         }
-        val t = TaskRecord(url = url)
+        // v1.6: newTask flags .m3u8 links as HLS stream tasks.
+        val t = DownloadCenter.newTask(url)
         if (referer.isNotBlank()) t.headers["Referer"] = referer
         if (fileName.isNotBlank()) t.fileName = fileName.trim()
+        // v1.6 multi-source: mirrors of the SAME file (validated by
+        // the engine before a single byte is taken from them).
+        t.sources = mirrors.map { it.trim() }
+            .filter { it.startsWith("http") && it != url }
+            .distinct().toMutableList()
         if (pendingScheduleAt > System.currentTimeMillis()) {
             t.scheduledAt = pendingScheduleAt
             t.note = "预约下载：将在 ${Format.clockTime(pendingScheduleAt)} 开始。"
@@ -362,6 +382,18 @@ fun DownApp(sharedUrl: String) {
                 sniffKind = ""
                 sniffSort = 0
                 showAdd = false
+                // v1.6: second phase — measure sizes in the
+                // background (limited, see SizeProbe) and swap the
+                // list in when they land; unknown stays unknown.
+                sniffProbing = true
+                Thread {
+                    val sized = runCatching { Sniffer().probeSizes(result.resources) }
+                        .getOrDefault(result.resources)
+                    activity.runOnUiThread {
+                        sniffProbing = false
+                        if (sniffList.isNotEmpty()) sniffList = sized
+                    }
+                }.start()
             }
             is SniffResult.Failure -> message = result.reason
         }
@@ -438,11 +470,13 @@ fun DownApp(sharedUrl: String) {
             startBatch(u)
             return
         }
+        val mirrors = mirrorsText.lines()
         if (LinkRouter.looksLikeFileUrl(u)) {
-            createTask(u, fileName = nameText)
+            createTask(u, fileName = nameText, mirrors = mirrors)
             showAdd = false
             urlText = ""
             nameText = ""
+            mirrorsText = ""
             return
         }
         sniffing = true
@@ -452,10 +486,11 @@ fun DownApp(sharedUrl: String) {
             activity.runOnUiThread {
                 if (route == LinkRouter.Route.DIRECT_FILE) {
                     sniffing = false
-                    createTask(u, fileName = nameText)
+                    createTask(u, fileName = nameText, mirrors = mirrors)
                     showAdd = false
                     urlText = ""
                     nameText = ""
+                    mirrorsText = ""
                 } else {
                     startSniff(u)
                 }
@@ -545,6 +580,50 @@ fun DownApp(sharedUrl: String) {
         store.remove(task)
     }
 
+    // One card wiring, reused by the narrow list and the wide
+    // two-column rows (v1.6 item 7).
+    val TaskCardFor: @androidx.compose.runtime.Composable (TaskRecord) -> Unit = { task ->
+        TaskCard(
+            task = task,
+            selecting = selecting,
+            selected = task.id in selectedIds,
+            onToggleSelect = {
+                selecting = true
+                selectedIds = if (task.id in selectedIds) {
+                    selectedIds - task.id
+                } else {
+                    selectedIds + task.id
+                }
+            },
+            onPause = { DownloadCenter.pauseTask(task) },
+            onResume = { DownloadCenter.enqueue(task) },
+            onOpen = { openFile(task) },
+            onInstall = { installApk(task) },
+            onShare = { shareFile(task) },
+            onDelete = { deleteTask(task) },
+            onJumpQueue = {
+                if (DownloadCenter.moveToFrontOfQueue(task)) {
+                    Toast.makeText(context, "已插队到队列最前", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "它已经是队列里第一个了", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onRename = {
+                renameTask = task
+                renameText = task.fileName
+            },
+            onSources = {
+                sourcesTask = task
+                sourceText = task.sources.joinToString("\n")
+            },
+        )
+    }
+
+    // v1.6 item 7: wide screens get two task columns (read here, in
+    // composable scope — the LazyColumn content lambda is not one).
+    val wideScreen =
+        androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp >= 600
+
     val activeTasks = store.tasks.filter {
         it.status == TaskStatus.RUNNING || it.status == TaskStatus.QUEUED
     }
@@ -591,6 +670,8 @@ fun DownApp(sharedUrl: String) {
             onAutoRetry = { autoRetry = it; DownloadCenter.autoRetryCount = it },
             trafficMB = trafficMB,
             onTraffic = { trafficMB = it; DownloadCenter.trafficThresholdMB = it },
+            dualChan = dualChan,
+            onDualChan = { dualChan = it; DownloadCenter.dualChannel = it },
             vibrateOn = vibrateOn,
             onVibrate = { vibrateOn = it; DownloadCenter.completeVibrate = it },
             soundOn = soundOn,
@@ -629,6 +710,8 @@ fun DownApp(sharedUrl: String) {
             onImport = { importLauncher.launch(arrayOf("application/json", "text/plain")) },
             onBack = { screen = "home" },
         )
+    } else if (screen == "stats") {
+        StatsScreen(onBack = { screen = "home" })
     } else {
         // ================= HOME — ONE scrolling LazyColumn (v1.4 fix) =================
         // Root cause of "主页不能向下滑动": the home used to be a plain
@@ -670,6 +753,8 @@ fun DownApp(sharedUrl: String) {
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
+                    OutlinedButton(onClick = { screen = "stats" }) { Text("统计") }
+                    Spacer(Modifier.size(6.dp))
                     OutlinedButton(onClick = { screen = "settings" }) { Text("设置") }
                 }
             }
@@ -850,37 +935,23 @@ fun DownApp(sharedUrl: String) {
                 }
             }
 
-            items(displayedTasks, key = { it.id }) { task ->
-                TaskCard(
-                    task = task,
-                    selecting = selecting,
-                    selected = task.id in selectedIds,
-                    onToggleSelect = {
-                        selecting = true
-                        selectedIds = if (task.id in selectedIds) {
-                            selectedIds - task.id
-                        } else {
-                            selectedIds + task.id
+            // v1.6 item 7: on wide screens (landscape / tablet /
+            // unfolded foldable) the tasks flow in TWO columns
+            // inside the same single scrolling LazyColumn — cards
+            // keep their natural height, nothing is stretched.
+            if (wideScreen) {
+                items(displayedTasks.chunked(2), key = { "row-" + it.first().id }) { pair ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        for (t in pair) {
+                            Box(Modifier.weight(1f)) { TaskCardFor(t) }
                         }
-                    },
-                    onPause = { DownloadCenter.pauseTask(task) },
-                    onResume = { DownloadCenter.enqueue(task) },
-                    onOpen = { openFile(task) },
-                    onInstall = { installApk(task) },
-                    onShare = { shareFile(task) },
-                    onDelete = { deleteTask(task) },
-                    onJumpQueue = {
-                        if (DownloadCenter.moveToFrontOfQueue(task)) {
-                            Toast.makeText(context, "已插队到队列最前", Toast.LENGTH_SHORT).show()
-                        } else {
-                            Toast.makeText(context, "它已经是队列里第一个了", Toast.LENGTH_SHORT).show()
-                        }
-                    },
-                    onRename = {
-                        renameTask = task
-                        renameText = task.fileName
-                    },
-                )
+                        if (pair.size == 1) Spacer(Modifier.weight(1f))
+                    }
+                }
+            } else {
+                items(displayedTasks, key = { it.id }) { task ->
+                    TaskCardFor(task)
+                }
             }
         }
     }
@@ -904,6 +975,12 @@ fun DownApp(sharedUrl: String) {
                         onValueChange = { nameText = it },
                         label = { Text("保存文件名（可不填，留空自动识别）") },
                         singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedTextField(
+                        value = mirrorsText,
+                        onValueChange = { mirrorsText = it },
+                        label = { Text("镜像地址（可不填，一行一个，必须是同一个文件）") },
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Spacer(Modifier.height(8.dp))
@@ -975,6 +1052,14 @@ fun DownApp(sharedUrl: String) {
                             }
                         }
                     ) { Text("用内置浏览器打开（手动点下载）") }
+                    TextButton(
+                        onClick = {
+                            showAdd = false
+                            context.startActivity(
+                                Intent(context, ScanActivity::class.java)
+                            )
+                        }
+                    ) { Text("扫二维码添加链接") }
                 }
             },
             confirmButton = {
@@ -994,6 +1079,7 @@ fun DownApp(sharedUrl: String) {
                 when (sniffSort) {
                     1 -> list.sortedBy { it.name.lowercase() }
                     2 -> list.sortedBy { it.kind }
+                    3 -> SniffSort.bySizeDesc(list)
                     else -> list
                 }
             }
@@ -1033,7 +1119,7 @@ fun DownApp(sharedUrl: String) {
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        val modes = listOf(0 to "默认", 1 to "名称", 2 to "类型")
+                        val modes = listOf(0 to "默认", 1 to "名称", 2 to "类型", 3 to "大小")
                         for ((m, label) in modes) {
                             if (m == sniffSort) {
                                 Button(onClick = { }) { Text(label) }
@@ -1050,6 +1136,14 @@ fun DownApp(sharedUrl: String) {
                                 sniffChecked + all
                             }
                         }) { Text("全选/取消") }
+                    }
+                    if (sniffProbing) {
+                        Text(
+                            "正在测每个文件的大小（最多测前 ${SizeProbe.MAX_PROBED} 个，测不到的会写大小未知）…",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
                     }
                     LazyColumn(Modifier.heightIn(max = 360.dp)) {
                         items(shownSniff, key = { it.url }) { res ->
@@ -1086,7 +1180,10 @@ fun DownApp(sharedUrl: String) {
                                         overflow = TextOverflow.Ellipsis,
                                     )
                                     Text(
-                                        "${kindLabel(res.kind)}${if (res.looksLikeDownloadEntry) " · 疑似下载入口" else ""}",
+                                        "${kindLabel(res.kind)}" +
+                                            (if (res.looksLikeDownloadEntry) " · 疑似下载入口" else "") +
+                                            (if (res.size >= 0) " · ${Format.size(res.size)}"
+                                            else " · 大小未知"),
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
@@ -1155,6 +1252,64 @@ fun DownApp(sharedUrl: String) {
             },
             dismissButton = {
                 TextButton(onClick = { renameTask = null }) { Text("取消") }
+            },
+        )
+    }
+
+    // ---- mirror sources dialog (v1.6 item 4) ----
+    if (sourcesTask != null) {
+        val st = sourcesTask!!
+        AlertDialog(
+            onDismissRequest = { sourcesTask = null },
+            title = { Text("镜像源（多源并下）") },
+            text = {
+                Column {
+                    Text(
+                        "主地址：${st.url}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = sourceText,
+                        onValueChange = { sourceText = it },
+                        label = { Text("镜像地址，一行一个") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "所有地址必须是同一个文件：下载前会逐个校验大小和内容抽样，" +
+                            "对不上的会被拒绝并在卡片上说明。某个源中途挂了，它的分片会由其他源接管。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (st.status == TaskStatus.RUNNING) {
+                        Text(
+                            "任务正在下载：改动会在下次继续时生效。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    st.sources = sourceText.lines().map { it.trim() }
+                        .filter { it.startsWith("http") && it != st.url }
+                        .distinct().toMutableList()
+                    store.save()
+                    Toast.makeText(
+                        context,
+                        if (st.sources.isEmpty()) "已清空镜像源" else "已保存 ${st.sources.size} 个镜像源",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                    sourcesTask = null
+                }) { Text("保存") }
+            },
+            dismissButton = {
+                TextButton(onClick = { sourcesTask = null }) { Text("取消") }
             },
         )
     }
@@ -1246,6 +1401,58 @@ fun FileTypeBadge(kind: String, name: String) {
 }
 
 /**
+ * Statistics screen (v1.6 item 6): local download totals — 累计 /
+ * 今日 / 完成数 / 平均速度. Everything is counted on-device from
+ * completed tasks; nothing is uploaded anywhere.
+ */
+@androidx.compose.runtime.Composable
+fun StatsScreen(onBack: () -> Unit) {
+    var refresh by remember { mutableStateOf(0) }
+    @Suppress("UNUSED_EXPRESSION") refresh // re-read counters after a clear
+    LazyColumn(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item(key = "st-head") {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onBack) { Text("← 返回") }
+                Text(
+                    "下载统计",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
+        item(key = "st-main") {
+            SettingsGroup("总览（从本版开始统计）") {
+                InfoRow("累计下载：", Format.size(DownloadCenter.statsTotalBytes()))
+                InfoRow("今日下载：", Format.size(DownloadCenter.statsTodayBytes()))
+                InfoRow("完成任务：", "${DownloadCenter.statsDoneCount()} 个")
+                val avg = DownloadCenter.statsAvgBps()
+                InfoRow(
+                    "平均速度：",
+                    if (avg > 0) Format.speed(avg) else "还没有完成的任务",
+                )
+                Spacer(Modifier.height(10.dp))
+                OutlinedButton(onClick = {
+                    DownloadCenter.clearStats()
+                    refresh++
+                }) { Text("清除统计") }
+                Text(
+                    "统计只存在这台手机里，不上传、不分享；清除后从零开始重新计。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+            }
+        }
+    }
+}
+
+/**
  * Settings screen (v1.4 item 20): grouped sections on their own
  * scrolling page — 下载 / 提示 / 引导与数据 / 关于 — instead of one
  * giant card squeezed onto the home page.
@@ -1266,6 +1473,8 @@ fun SettingsScreen(
     onAutoRetry: (Int) -> Unit,
     trafficMB: Int,
     onTraffic: (Int) -> Unit,
+    dualChan: Boolean,
+    onDualChan: (Boolean) -> Unit,
     vibrateOn: Boolean,
     onVibrate: (Boolean) -> Unit,
     soundOn: Boolean,
@@ -1320,7 +1529,31 @@ fun SettingsScreen(
                     onPick = onMaxConc,
                 )
                 HorizontalDivider(Modifier.padding(vertical = 10.dp))
-                Text("全局限速（每个任务的最高速度，改了立即生效）")
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("WiFi＋流量双通道")
+                        Text(
+                            "开启后向系统申请流量网络，和 WiFi 一起下载同一个文件；" +
+                                "当前环境拿不到流量网络时，任务卡片上会明说用不了，不会假装。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = dualChan, onCheckedChange = onDualChan)
+                }
+                Text(
+                    "注意：开双通道等于你同意用流量下载，流量保护不会再拦；" +
+                        "和「仅 WiFi 下载」同时开时，以「仅 WiFi」为准（双通道不启用）。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Text("全局限速（所有任务合计的上限，多任务时按优先级分配，改了立即生效）")
                 ChipRow(
                     options = listOf(
                         0 to "不限", 512 to "512KB", 1024 to "1MB",
@@ -1529,10 +1762,13 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 更快：同一个服务器第二次下载会记住上次的最佳线程数，直接满速开下，不再慢慢试探\n" +
-            "· 更稳：下载中途断网不再直接失败——任务会排队等网络恢复，回来后自动接着下\n" +
-            "· 设置里新增「后台运行」卡：照着把电池设为不限制，锁屏下大文件不容易被系统冻住\n" +
-            "· 速度数字和曲线图对齐到同一秒的节拍，看到的数字更可信",
+            "· 嗅探能测大小了：结果列表会显示每个文件的大小（测不到的会写明未知），还能按大小排序\n" +
+            "· 能下流媒体了：m3u8 链接会自动把分片合并成一个 .ts 文件，可直接播放\n" +
+            "· 多源并下：同一个文件填几个镜像地址一起下，下载前会校验是不是同一个文件，对不上会拒绝\n" +
+            "· 设置里可开「WiFi＋流量双通道」（默认关）：两条网络一起下，环境不支持时会明说\n" +
+            "· 新增「下载统计」页（主页右上角）：累计下了多少、今日多少、平均速度一目了然\n" +
+            "· 新建下载里能扫二维码加链接；横屏和大屏上任务列表变双列\n" +
+            "· 全局限速改成所有任务合计：多任务一起下时按优先级分配，不会互相抢到都慢",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
             "· 文件直链 → 直接开始多线程下载，还能预先改好保存文件名\n" +
@@ -1805,6 +2041,7 @@ fun TaskCard(
     onDelete: () -> Unit,
     onJumpQueue: () -> Unit,
     onRename: () -> Unit,
+    onSources: () -> Unit,
 ) {
     var expanded by remember(task.id) {
         mutableStateOf(DownloadCenter.detailsExpanded)
@@ -2013,6 +2250,22 @@ fun TaskCard(
                         "分片：",
                         "已完成 ${task.chunkDone.count { it }}/$total 块 · ${task.threads} 线程",
                     )
+                }
+                // v1.6: HLS merge progress + multi-source state.
+                if (task.isHls && task.hlsTotalSegments > 0) {
+                    InfoRow(
+                        "流媒体分片：",
+                        "已合并 ${task.hlsDone.count { it }}/${task.hlsTotalSegments} 段",
+                    )
+                }
+                if (task.sources.isNotEmpty()) {
+                    InfoRow("下载源：", "${1 + task.sources.size} 个地址（含镜像）")
+                }
+                if (task.status != TaskStatus.DONE) {
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedButton(onClick = onSources) {
+                        Text(if (task.sources.isEmpty()) "加镜像源（多源并下）" else "管理镜像源")
+                    }
                 }
                 if (task.retryCount > 0) {
                     InfoRow("重试次数：", "${task.retryCount} 次（分片级）")
