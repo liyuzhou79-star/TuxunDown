@@ -661,8 +661,13 @@ class DownloadService : Service() {
         val store = DownloadCenter.store
         try {
             val displayName = PublicStorage.finalizeTarget(this, task)
+            // v2.6: with 按类型分文件夹 on, the note names the
+            // category subfolder the file actually landed in.
+            val subFolder = PublicStorage.categoryFolderOf(this, task)
             val where = if (DownloadCenter.downloadDirUri.isNotBlank()) {
                 "已保存到你选择的文件夹"
+            } else if (subFolder != null) {
+                "已保存到公共「下载」目录的「$subFolder」文件夹"
             } else {
                 "已保存到公共「下载」目录"
             }

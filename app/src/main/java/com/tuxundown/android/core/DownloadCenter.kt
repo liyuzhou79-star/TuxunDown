@@ -180,6 +180,19 @@ object DownloadCenter {
         get() = pBool("bootResume", false)
         set(v) { prefs().edit().putBoolean("bootResume", v).apply() }
 
+    /**
+     * v2.6: sort NEW finished files into category subfolders of
+     * the public Download folder （视频/音频/图片/文档/压缩包/APK，
+     * see FileCategory). Default OFF — with it off, files land in
+     * the Download root itself, the standing rule the user set;
+     * turning it on never moves files that are already down, and
+     * it does not apply inside a custom SAF folder (the user
+     * picked that folder themselves; the settings copy says so).
+     */
+    var sortSubfolders: Boolean
+        get() = pBool("sortSubfolders", false)
+        set(v) { prefs().edit().putBoolean("sortSubfolders", v).apply() }
+
     /** v2.4: auto-archive completed records older than this many
      *  days into the 已归档 filter (0 = off). Records only — the
      *  downloaded files are never touched. */
@@ -282,6 +295,7 @@ object DownloadCenter {
         o.put("autoInstallApk", autoInstallApk)
         o.put("autoOpenFile", autoOpenFile)
         o.put("bootResume", bootResume)
+        o.put("sortSubfolders", sortSubfolders)
         o.put("archiveAfterDays", archiveAfterDays)
         o.put("detailsExpanded", detailsExpanded)
         o.put("sniffHistory", org.json.JSONArray(sniffHistory))
@@ -325,6 +339,9 @@ object DownloadCenter {
         if (o.has("autoInstallApk")) autoInstallApk = o.optBoolean("autoInstallApk", autoInstallApk)
         if (o.has("autoOpenFile")) autoOpenFile = o.optBoolean("autoOpenFile", autoOpenFile)
         if (o.has("bootResume")) bootResume = o.optBoolean("bootResume", bootResume)
+        if (o.has("sortSubfolders")) {
+            sortSubfolders = o.optBoolean("sortSubfolders", sortSubfolders)
+        }
         if (o.has("archiveAfterDays")) {
             archiveAfterDays = o.optInt("archiveAfterDays", archiveAfterDays)
         }

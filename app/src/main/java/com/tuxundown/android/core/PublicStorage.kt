@@ -62,6 +62,82 @@ object PublicStorage {
         }.getOrDefault(-1)
     }
 
+    // ---------- v2.6: category subfolders (setting-gated) ----------
+
+    /** MediaStore root path downloads have always used. */
+    private fun rootPath(): String = Environment.DIRECTORY_DOWNLOADS + "/"
+
+    /**
+     * The RELATIVE_PATH a NEW file called [fileName] belongs in:
+     * the Download root itself, unless the 按类型分文件夹 switch
+     * is on AND the name maps to a known category — then that
+     * category's subfolder. Decided once, when the target is
+     * created; the .part and the finished file share the folder,
+     * and a resume reuses the persisted target Uri, so toggling
+     * the switch mid-download never splits one file across two
+     * folders.
+     */
+    fun relativePathFor(fileName: String): String {
+        if (!DownloadCenter.sortSubfolders) return rootPath()
+        val cat = FileCategory.folderFor(fileName) ?: return rootPath()
+        return rootPath() + cat + "/"
+    }
+
+    /** The RELATIVE_PATH an existing MediaStore entry lives in. */
+    fun relativePathOf(context: Context, uri: Uri): String {
+        val cursor = runCatching {
+            context.contentResolver.query(
+                uri, arrayOf(MediaStore.Downloads.RELATIVE_PATH), null, null, null
+            )
+        }.getOrNull()
+        cursor?.use {
+            if (it.moveToFirst()) {
+                val v = runCatching { it.getString(0) }.getOrNull()
+                if (!v.isNullOrBlank()) return v
+            }
+        }
+        return rootPath()
+    }
+
+    /** The category subfolder a finished task landed in (for the
+     *  completion note), or null for the Download root / a custom
+     *  SAF folder. */
+    fun categoryFolderOf(context: Context, task: TaskRecord): String? {
+        if (DownloadCenter.downloadDirUri.isNotBlank()) return null
+        val uriText = task.savedUri.ifBlank { task.targetUri }
+        if (uriText.isBlank()) return null
+        val uri = runCatching { Uri.parse(uriText) }.getOrNull() ?: return null
+        return FileCategory.categoryOfPath(relativePathOf(context, uri))
+    }
+
+    /** Every RELATIVE_PATH the file scans must look in: the root,
+     *  plus the category subfolders while the switch is on (files
+     *  sorted there must stay visible to the files page and the
+     *  orphan cleanup — a sorted file is not a lost file). */
+    private fun scanPaths(): List<String> {
+        if (!DownloadCenter.sortSubfolders) return listOf(rootPath())
+        return listOf(rootPath()) + FileCategory.ALL.map { rootPath() + it + "/" }
+    }
+
+    /** SAF equivalent of [scanPaths]: the tree root's files plus,
+     *  while the switch is on, the files inside any category
+     *  subfolder the tree happens to contain. */
+    private fun listScanFiles(tree: DocumentFile): List<DocumentFile> {
+        val out = mutableListOf<DocumentFile>()
+        for (f in tree.listFiles()) {
+            if (f.isFile) {
+                out.add(f)
+            } else if (DownloadCenter.sortSubfolders && f.isDirectory &&
+                f.name in FileCategory.ALL
+            ) {
+                for (inner in f.listFiles()) {
+                    if (inner.isFile) out.add(inner)
+                }
+            }
+        }
+        return out
+    }
+
     /** Human-readable name of the current download location, for the UI. */
     fun locationLabel(context: Context): String {
         val custom = DownloadCenter.downloadDirName
@@ -120,7 +196,11 @@ object PublicStorage {
                 ?: throw IllegalStateException("在自定义文件夹里建不了文件")
             doc.uri
         } else {
-            findDownloadsEntry(context, part) ?: insertDownloadsEntry(context, part)
+            // v2.6: with 按类型分文件夹 on, the .part is born in
+            // the category subfolder and never moves afterwards.
+            val relPath = relativePathFor(name)
+            findDownloadsEntry(context, part, relPath)
+                ?: insertDownloadsEntry(context, part, relPath)
         }
         task.targetUri = uri.toString()
         val pfd = resolver.openFileDescriptor(uri, "rw")
@@ -192,9 +272,14 @@ object PublicStorage {
             // different entry already owns the final name, ours is
             // renamed to the first free "name (n).ext" instead (the
             // Uri/id stays stable either way).
+            // v2.6: the collision search stays inside the folder
+            // THIS file actually lives in (root or a category
+            // subfolder) — same names in different folders are
+            // different files and never collide.
+            val relPath = relativePathOf(context, uri)
             val finalName = freeName(name) { candidate ->
-                findDownloadsEntry(context, candidate) != null &&
-                    findDownloadsEntry(context, candidate) != uri
+                findDownloadsEntry(context, candidate, relPath) != null &&
+                    findDownloadsEntry(context, candidate, relPath) != uri
             }
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, finalName)
@@ -247,7 +332,7 @@ object PublicStorage {
                 DocumentFile.fromTreeUri(context, Uri.parse(custom))
             }.getOrNull()
             if (tree != null && tree.canRead()) {
-                for (f in tree.listFiles()) {
+                for (f in listScanFiles(tree)) {
                     val name = f.name ?: continue
                     if (!name.endsWith(".part", ignoreCase = true)) continue
                     if (f.uri.toString() in referenced) continue
@@ -269,8 +354,9 @@ object PublicStorage {
                         MediaStore.Downloads.SIZE,
                     ),
                     "${MediaStore.Downloads.DISPLAY_NAME} LIKE ? AND " +
-                        "${MediaStore.Downloads.RELATIVE_PATH} = ?",
-                    arrayOf("%.part", Environment.DIRECTORY_DOWNLOADS + "/"),
+                        "${MediaStore.Downloads.RELATIVE_PATH} IN " +
+                        "(${scanPaths().joinToString(",") { "?" }})",
+                    arrayOf("%.part", *scanPaths().toTypedArray()),
                     "${MediaStore.Downloads.DISPLAY_NAME} ASC",
                 )
             }.getOrNull()
@@ -316,7 +402,7 @@ object PublicStorage {
                 DocumentFile.fromTreeUri(context, Uri.parse(custom))
             }.getOrNull()
             if (tree != null && tree.canRead()) {
-                for (f in tree.listFiles()) {
+                for (f in listScanFiles(tree)) {
                     val name = f.name ?: continue
                     if (!f.isFile) continue
                     if (name.endsWith(".part", ignoreCase = true)) continue
@@ -339,8 +425,9 @@ object PublicStorage {
                         MediaStore.Downloads.SIZE,
                         MediaStore.Downloads.DATE_MODIFIED,
                     ),
-                    "${MediaStore.Downloads.RELATIVE_PATH} = ?",
-                    arrayOf(Environment.DIRECTORY_DOWNLOADS + "/"),
+                    "${MediaStore.Downloads.RELATIVE_PATH} IN " +
+                        "(${scanPaths().joinToString(",") { "?" }})",
+                    scanPaths().toTypedArray(),
                     "${MediaStore.Downloads.DISPLAY_NAME} ASC",
                 )
             }.getOrNull()
@@ -414,13 +501,17 @@ object PublicStorage {
     private fun downloadsCollection(): Uri =
         MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
 
-    private fun findDownloadsEntry(context: Context, displayName: String): Uri? {
+    private fun findDownloadsEntry(
+        context: Context,
+        displayName: String,
+        relPath: String = rootPath(),
+    ): Uri? {
         val resolver = context.contentResolver
         val cursor = resolver.query(
             downloadsCollection(),
             arrayOf(MediaStore.Downloads._ID),
             "${MediaStore.Downloads.DISPLAY_NAME} = ? AND ${MediaStore.Downloads.RELATIVE_PATH} = ?",
-            arrayOf(displayName, Environment.DIRECTORY_DOWNLOADS + "/"),
+            arrayOf(displayName, relPath),
             null,
         )
         cursor?.use {
@@ -431,12 +522,18 @@ object PublicStorage {
         return null
     }
 
-    private fun insertDownloadsEntry(context: Context, displayName: String): Uri {
+    private fun insertDownloadsEntry(
+        context: Context,
+        displayName: String,
+        relPath: String = rootPath(),
+    ): Uri {
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, displayName)
             put(MediaStore.Downloads.MIME_TYPE, "application/octet-stream")
-            // The public Download folder ROOT — no subfolder.
-            put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/")
+            // The public Download folder ROOT by default; a
+            // category subfolder only when the v2.6 switch is on
+            // (see relativePathFor).
+            put(MediaStore.Downloads.RELATIVE_PATH, relPath)
             put(MediaStore.Downloads.IS_PENDING, 0)
         }
         return context.contentResolver.insert(downloadsCollection(), values)
