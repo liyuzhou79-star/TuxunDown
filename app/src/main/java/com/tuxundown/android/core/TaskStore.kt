@@ -139,8 +139,47 @@ class TaskStore(context: Context) {
         }
     }
 
-    @Synchronized
+    // ---- v1.7 perf: coalesced saves ----
+    // save() used to serialize EVERY task + write tmp + copy .bak on
+    // every call — and callers call it constantly (engine sampler
+    // ticks, pause/delete taps, progress milestones). The write side,
+    // not the load side, was the real first-frame/jank cost with a
+    // long task list. Now save() only marks the store dirty and
+    // schedules ONE flush up to SAVE_DELAY_MS later; further calls
+    // inside the window are no-ops, so a burst collapses into a
+    // single write (at most one flush per window). Structural
+    // changes — add / remove / import — flush IMMEDIATELY via
+    // saveNow(): losing a whole task record to a crash inside the
+    // window would be far worse than losing 1.5 s of progress.
+    private val saveExecutor =
+        java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
+            Thread(r, "taskstore-save").apply { isDaemon = true }
+        }
+    @Volatile private var pendingSave: java.util.concurrent.ScheduledFuture<*>? = null
+
+    /** Coalesced save: at most one disk flush per [SAVE_DELAY_MS]. */
     fun save() {
+        val p = pendingSave
+        if (p != null && !p.isDone) return
+        synchronized(this) {
+            val p2 = pendingSave
+            if (p2 != null && !p2.isDone) return
+            pendingSave = saveExecutor.schedule(
+                { runCatching { writeToDisk() } },
+                SAVE_DELAY_MS, java.util.concurrent.TimeUnit.MILLISECONDS,
+            )
+        }
+    }
+
+    /** Flush right now, cancelling any scheduled coalesced flush. */
+    fun saveNow() {
+        pendingSave?.cancel(false)
+        pendingSave = null
+        writeToDisk()
+    }
+
+    @Synchronized
+    private fun writeToDisk() {
         val text = serialize(tasks)
         // v1.3 (audit A11): atomic save — write a temp file, keep the
         // previous good file as .bak, then rename over. A crash or
@@ -181,25 +220,28 @@ class TaskStore(context: Context) {
             tasks.add(t)
             added++
         }
-        if (added > 0) save()
+        if (added > 0) saveNow()
         return added
     }
 
     fun add(t: TaskRecord): TaskRecord {
         tasks.add(0, t)
-        save()
+        saveNow()
         return t
     }
 
     fun remove(t: TaskRecord) {
         tasks.remove(t)
         fileOf(t).delete()
-        save()
+        saveNow()
     }
 
     fun byId(id: String): TaskRecord? = tasks.firstOrNull { it.id == id }
 
     companion object {
+        /** v1.7: coalesced-save window — at most one flush per 1.5 s. */
+        const val SAVE_DELAY_MS = 1500L
+
         /** Pure serialization — same format on disk and for export. */
         fun serialize(list: List<TaskRecord>): String {
             val arr = JSONArray()

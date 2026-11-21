@@ -997,17 +997,33 @@ class DownloadEngine(
         val pool = java.util.concurrent.Executors.newFixedThreadPool(HLS_PARALLEL) { r ->
             Thread(r).apply { isDaemon = true }
         }
+        // v1.7 perf: in-flight BYTE budget. The window alone (6
+        // segments) does not bound memory: each segment may be up to
+        // MAX_SEGMENT_BYTES (64 MB), so six finished-but-unwritten
+        // segments could theoretically pin ~384 MB. Fetched bytes now
+        // count against a ~48 MB budget; prefetch pauses while the
+        // buffer is over budget and resumes as the writer drains it.
+        // The segment AT the write cursor is always submittable, so
+        // the writer can never starve waiting for a fetch the budget
+        // refused to start.
+        val bufferedBytes = AtomicLong(0)
         var failure: Exception? = null
         try {
             val futures = HashMap<Int, java.util.concurrent.Future<ByteArray>>()
             var submitIndex = writeIndex
             while (writeIndex < segments.size && !stopped()) {
                 while (submitIndex < segments.size &&
-                    submitIndex < writeIndex + HLS_WINDOW && !stopped()
+                    submitIndex < writeIndex + HLS_WINDOW && !stopped() &&
+                    (submitIndex == writeIndex ||
+                        bufferedBytes.get() < HLS_BUFFER_BUDGET_BYTES)
                 ) {
                     val idx = submitIndex
                     futures[idx] = pool.submit(
-                        java.util.concurrent.Callable { segmentBytes(segments[idx]) }
+                        java.util.concurrent.Callable {
+                            val data = segmentBytes(segments[idx])
+                            bufferedBytes.addAndGet(data.size.toLong())
+                            data
+                        }
                     )
                     submitIndex++
                 }
@@ -1018,6 +1034,7 @@ class DownloadEngine(
                     throw (e.cause as? Exception) ?: e
                 }
                 target.writeAt(offset, data, 0, data.size)
+                bufferedBytes.addAndGet(-data.size.toLong())
                 offset += data.size
                 synchronized(task.hlsSizes) { task.hlsSizes[writeIndex] = data.size.toLong() }
                 task.hlsDone[writeIndex] = true
@@ -1185,6 +1202,8 @@ class DownloadEngine(
         const val HLS_PARALLEL = 4
         const val HLS_WINDOW = 6
         const val MAX_SEGMENT_BYTES = 64 * 1024 * 1024
+        /** v1.7: cap on fetched-but-unwritten HLS segment bytes. */
+        const val HLS_BUFFER_BUDGET_BYTES = 48L * 1024 * 1024
 
         /** True when the URL path ends in .m3u8 (query/fragment aside). */
         fun isHlsUrl(url: String): Boolean =

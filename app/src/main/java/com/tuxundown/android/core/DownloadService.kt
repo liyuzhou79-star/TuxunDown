@@ -178,6 +178,25 @@ class DownloadService : Service() {
             }
             val anyQueued = store.tasks.any { it.status == TaskStatus.QUEUED }
             if (running.isEmpty()) {
+                // v1.7 audit (B2): tasks that are eligible but blocked
+                // ONLY by the 仅 WiFi switch keep the service alive on
+                // a 5 s poll — when WiFi returns they start on their
+                // own instead of waiting for the user to reopen the
+                // app (enqueue now starts the service in this case).
+                val wifiBlocked = DownloadCenter.wifiOnly && !DownloadCenter.isOnWifi() &&
+                    store.tasks.any {
+                        it.status == TaskStatus.QUEUED && !it.netDeferred &&
+                            it.scheduledAt <= System.currentTimeMillis()
+                    }
+                if (wifiBlocked) {
+                    notifyUpdate(
+                        "等待 WiFi",
+                        "已开启「仅 WiFi 下载」，连上 WiFi 后自动开始",
+                        0,
+                    )
+                    try { Thread.sleep(5000) } catch (e: InterruptedException) { break }
+                    continue
+                }
                 // v1.5: tasks parked by a network outage keep the
                 // service (and its network callback) alive until
                 // connectivity returns — they are QUEUED but not
@@ -320,7 +339,10 @@ class DownloadService : Service() {
                 }
             } finally {
                 DownloadCenter.unregisterEngine(task)
-                store.save()
+                // v1.7: an engine run reaching its end is a milestone
+                // (done / paused / failed with full progress state) —
+                // flush NOW instead of riding the coalesced window.
+                store.saveNow()
             }
             // v1.5: a failure caused by the network going away is not
             // the server's fault and must not burn the v1.4 retry
@@ -408,7 +430,7 @@ class DownloadService : Service() {
                 "文件在下载目录里，名字带 .part 后缀，去掉后缀即可使用。"
             notifyAggregate()
         }
-        store.save()
+        store.saveNow()
     }
 
     /** Completion vibration / sound, per the user's switches. */

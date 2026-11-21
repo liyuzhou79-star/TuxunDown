@@ -268,6 +268,15 @@ object DownloadCenter {
             task.note = "已开启「仅 WiFi 下载」，当前不在 WiFi 网络，任务已排队等待。"
             task.status = TaskStatus.QUEUED
             store.save()
+            // v1.7 audit (B2): STILL start the service. It used to
+            // return here without starting anything, and the drain
+            // loop exited when the only queued tasks were
+            // wifi-blocked — so the task sat forever until the user
+            // reopened the app, even after WiFi came back. Now the
+            // service's drain loop waits on WiFi (5 s poll) and the
+            // task starts by itself when WiFi returns.
+            val ctx = appContext!!
+            ContextCompat.startForegroundService(ctx, Intent(ctx, DownloadService::class.java))
             return false
         }
         task.status = TaskStatus.QUEUED
