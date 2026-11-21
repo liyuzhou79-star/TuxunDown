@@ -329,11 +329,20 @@ class DownloadEngine(
      */
     private fun openDefault(url: URL): HttpURLConnection {
         val p = proxySettings.javaProxy()
-        return if (p != null) {
-            url.openConnection(p) as HttpURLConnection
-        } else {
-            url.openConnection() as HttpURLConnection
+        if (p != null) {
+            return url.openConnection(p) as HttpURLConnection
         }
+        val c = url.openConnection() as HttpURLConnection
+        // v2.6 Happy Eyeballs: on the direct HTTPS path, race
+        // the TCP connect across IPv6/IPv4 inside the TLS
+        // socket factory (see HappyEyeballs for the honest
+        // scope — plain HTTP has no public socket hook and
+        // keeps the platform path; a proxy or the dual-channel
+        // opener never comes through here).
+        if (c is javax.net.ssl.HttpsURLConnection) {
+            runCatching { c.sslSocketFactory = RacingSocketFactory.shared }
+        }
+        return c
     }
 
     /**
