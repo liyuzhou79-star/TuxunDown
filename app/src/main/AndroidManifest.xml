@@ -43,6 +43,12 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="text/plain" />
             </intent-filter>
+            <!-- v2.7: long-press icon shortcuts （新建下载 /
+                 打开嗅探）; the intents land on the actions
+                 MainActivity handles via ShortcutState. -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
         </activity>
         <activity
             android:name=".SniffActivity"
@@ -56,6 +62,20 @@
             android:name=".core.DownloadService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <!-- v2.7: quick-settings tile （全部暂停 / 全部继续）.
+             exported=true is required — the system binds the
+             tile — and the BIND_QUICK_SETTINGS_TILE permission
+             is what keeps anything else from binding it. -->
+        <service
+            android:name=".core.DownloadTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile_download"
+            android:label="TuxunDown 下载"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
         <!-- v2.6: boot entry for the 开机恢复 switch (default off).
              exported=false: only the system may deliver the boot
              broadcast to it. -->

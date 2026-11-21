@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- v2.7: long-press-the-icon shortcuts. Static (declared here,
+     handled by MainActivity via ShortcutState) — the two entries
+     a downloader is actually opened for. -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="new_download"
+        android:enabled="true"
+        android:icon="@drawable/app_icon"
+        android:shortcutShortLabel="@string/shortcut_new_download"
+        android:shortcutLongLabel="@string/shortcut_new_download_long">
+        <intent
+            android:action="com.tuxundown.android.action.NEW_DOWNLOAD"
+            android:targetPackage="com.tuxundown.android"
+            android:targetClass="com.tuxundown.android.MainActivity" />
+        <categories android:name="android.shortcut.conversation" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="open_sniff"
+        android:enabled="true"
+        android:icon="@drawable/app_icon"
+        android:shortcutShortLabel="@string/shortcut_open_sniff"
+        android:shortcutLongLabel="@string/shortcut_open_sniff_long">
+        <intent
+            android:action="com.tuxundown.android.action.OPEN_SNIFF"
+            android:targetPackage="com.tuxundown.android"
+            android:targetClass="com.tuxundown.android.MainActivity" />
+        <categories android:name="android.shortcut.conversation" />
+    </shortcut>
+</shortcuts>

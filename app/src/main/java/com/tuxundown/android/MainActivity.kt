@@ -94,6 +94,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import com.tuxundown.android.core.Backup
+import com.tuxundown.android.core.BulkControl
 import com.tuxundown.android.core.Checksum
 import com.tuxundown.android.core.CrashGuard
 import com.tuxundown.android.core.Errors
@@ -158,6 +159,14 @@ class MainActivity : ComponentActivity() {
         }
         if (intent?.action == Intent.ACTION_SEND) {
             SharedLinkState.text = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim() ?: ""
+        }
+        // v2.7: long-press icon shortcuts land here (and in
+        // onNewIntent while running); DownApp consumes the
+        // pending action once it is composed.
+        if (intent?.action == ShortcutActions.NEW_DOWNLOAD ||
+            intent?.action == ShortcutActions.OPEN_SNIFF
+        ) {
+            ShortcutState.action = intent.action!!
         }
         AmoledState.enabled = DownloadCenter.amoledBlack
 
@@ -230,6 +239,11 @@ class MainActivity : ComponentActivity() {
             SharedLinkState.text =
                 intent.getStringExtra(Intent.EXTRA_TEXT)?.trim() ?: ""
         }
+        if (intent.action == ShortcutActions.NEW_DOWNLOAD ||
+            intent.action == ShortcutActions.OPEN_SNIFF
+        ) {
+            ShortcutState.action = intent.action!!
+        }
     }
 }
 
@@ -240,6 +254,22 @@ class MainActivity : ComponentActivity() {
  */
 object SharedLinkState {
     var text by mutableStateOf("")
+}
+
+/** v2.7: long-press icon shortcut actions (res/xml/shortcuts.xml). */
+object ShortcutActions {
+    const val NEW_DOWNLOAD = "com.tuxundown.android.action.NEW_DOWNLOAD"
+    const val OPEN_SNIFF = "com.tuxundown.android.action.OPEN_SNIFF"
+}
+
+/**
+ * v2.7: a pending icon-shortcut action, seeded by MainActivity
+ * (onCreate / onNewIntent) and consumed by DownApp — the same
+ * shape as [SharedLinkState], for the same reason: the activity
+ * may already be running when the shortcut fires.
+ */
+object ShortcutState {
+    var action by mutableStateOf("")
 }
 
 /**
@@ -381,6 +411,28 @@ fun DownApp() {
             urlText = incomingLink
             showAdd = true
             SharedLinkState.text = ""
+        }
+    }
+    // v2.7: consume a long-press icon shortcut. 新建下载 opens
+    // the add dialog; 打开嗅探 opens the sniff browser (blank
+    // page — the user navigates to the page they want, exactly
+    // like opening it from the add dialog with nothing typed).
+    val pendingShortcut = ShortcutState.action
+    LaunchedEffect(pendingShortcut) {
+        when (pendingShortcut) {
+            ShortcutActions.NEW_DOWNLOAD -> {
+                ShortcutState.action = ""
+                showAdd = true
+            }
+            ShortcutActions.OPEN_SNIFF -> {
+                ShortcutState.action = ""
+                runCatching {
+                    context.startActivity(
+                        Intent(context, SniffActivity::class.java)
+                            .putExtra(SniffActivity.EXTRA_URL, "")
+                    )
+                }
+            }
         }
     }
     var nameText by remember { mutableStateOf("") }
@@ -1369,8 +1421,13 @@ fun DownApp() {
                 }
             }
 
-            if (activeTasks.size >= 2) {
-                item(key = "summary") { SummaryCard(activeTasks) }
+            // v2.7: the summary card also appears when everything
+            // is paused (2+ resumable) — that is exactly when its
+            // new 全部继续 button is the point of the card.
+            if (activeTasks.size >= 2 ||
+                BulkControl.resumeTargets(store.tasks).size >= 2
+            ) {
+                item(key = "summary") { SummaryCard(activeTasks, store.tasks) }
             }
 
             // ---- tabs (v1.4 item 2) ----
@@ -4226,47 +4283,73 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
  *  large files could put its percent one point off the other
  *  two surfaces; now all three print the identical number. */
 @androidx.compose.runtime.Composable
-fun SummaryCard(active: List<TaskRecord>) {
+fun SummaryCard(active: List<TaskRecord>, all: List<TaskRecord>) {
     val agg = WidgetState.summary(active)
     val totalSize = agg.totalBytes
     val totalDone = agg.doneBytes
     val totalProgress = agg.totalPct / 100f
     val totalSpeed = active.filter { it.status == TaskStatus.RUNNING }.sumOf { it.speedBps }
+    // v2.7: 全部暂停 / 全部继续 — the same pure BulkControl
+    // decision (and the same DownloadCenter calls) as the
+    // quick-settings tile, so the two surfaces never disagree.
+    val bulk = BulkControl.action(all)
     Card(
         Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
     ) {
         Column(Modifier.padding(14.dp)) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    "共 ${active.size} 个任务",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
+            if (active.isNotEmpty()) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "共 ${active.size} 个任务",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        // The integer percent itself — never a Float
+                        // round-trip of it (0.29f × 100 truncates to 28).
+                        "已完成 ${agg.totalPct}%",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                WinProgressBar(
+                    progress = totalProgress,
+                    state = BarState.RUNNING,
+                    modifier = Modifier.fillMaxWidth(),
                 )
+                Spacer(Modifier.height(6.dp))
                 Text(
-                    // The integer percent itself — never a Float
-                    // round-trip of it (0.29f × 100 truncates to 28).
-                    "已完成 ${agg.totalPct}%",
+                    "总速度：${Format.speed(totalSpeed)} · ${Format.size(totalDone)} / ${Format.size(totalSize)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                // Shown only for the resume-all case (see the call
+                // site): an aggregate over zero active tasks would
+                // print a meaningless 0% — say the true thing.
+                Text(
+                    "任务都暂停了",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
             }
-            Spacer(Modifier.height(8.dp))
-            WinProgressBar(
-                progress = totalProgress,
-                state = BarState.RUNNING,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "总速度：${Format.speed(totalSpeed)} · ${Format.size(totalDone)} / ${Format.size(totalSize)}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            if (bulk == BulkControl.Action.PAUSE_ALL) {
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(onClick = { DownloadCenter.pauseAll() }) {
+                    Text("全部暂停")
+                }
+            } else if (bulk == BulkControl.Action.RESUME_ALL) {
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(onClick = { DownloadCenter.resumeAll() }) {
+                    Text("全部继续")
+                }
+            }
         }
     }
 }

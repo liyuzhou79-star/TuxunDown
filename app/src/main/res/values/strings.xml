@@ -4,4 +4,9 @@
          for resources that must reference a string (the widget
          description shown in the launcher's widget picker). -->
     <string name="widget_description">看正在下载的任务数和总进度，点一下打开 TuxunDown</string>
+    <!-- v2.7: long-press icon shortcuts (res/xml/shortcuts.xml). -->
+    <string name="shortcut_new_download">新建下载</string>
+    <string name="shortcut_new_download_long">粘贴链接，新建一个下载任务</string>
+    <string name="shortcut_open_sniff">打开嗅探</string>
+    <string name="shortcut_open_sniff_long">打开嗅探浏览器，从网页里抓下载地址</string>
 </resources>

@@ -640,6 +640,30 @@ object DownloadCenter {
     }
 
     /**
+     * v2.7: 全部暂停 / 全部继续 — the bulk counterparts of
+     * [pauseTask] / [enqueue], driven by the pure [BulkControl]
+     * target filters (the same semantics as the multi-select
+     * bar). Shared by the home summary card and the
+     * quick-settings tile. Each resume is guarded individually:
+     * starting the foreground service can be refused when the
+     * caller is a background-bound tile, and one refusal must
+     * not stop the rest — the task is already marked QUEUED
+     * and saved by then, so it drains the next time the
+     * service runs.
+     */
+    fun pauseAll(): Int {
+        val targets = BulkControl.pauseTargets(store.tasks)
+        for (t in targets) pauseTask(t)
+        return targets.size
+    }
+
+    fun resumeAll(): Int {
+        val targets = BulkControl.resumeTargets(store.tasks)
+        for (t in targets) runCatching { enqueue(t) }
+        return targets.size
+    }
+
+    /**
      * v2.1: keep the home-screen widget honest after changes that
      * may not wake the service (a pause of the last task, an
      * enqueue that returns early). Best-effort — the updater
