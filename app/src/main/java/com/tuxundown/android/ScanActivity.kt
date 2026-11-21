@@ -41,6 +41,14 @@ class ScanActivity : Activity() {
     private var surfaceView: SurfaceView? = null
     @Volatile private var finished = false
     @Volatile private var lastAttemptMs = 0L
+    // v1.7 audit (B3): decoding runs on ONE daemon thread, and the
+    // preview buffer is COPIED before hand-off — the camera reuses
+    // its buffer for the next frame, so decoding the original array
+    // races the next frame and can read a torn image.
+    private val decodeExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r).apply { isDaemon = true }
+    }
+    @Volatile private var decodeBusy = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -172,22 +180,35 @@ class ScanActivity : Activity() {
     }
 
     private fun onPreviewFrame(data: ByteArray, cam: Camera) {
-        if (finished) return
+        if (finished || decodeBusy) return
         val now = System.currentTimeMillis()
         if (now - lastAttemptMs < DECODE_INTERVAL_MS) return
         lastAttemptMs = now
         val size = runCatching { cam.parameters.previewSize }.getOrNull() ?: return
-        Thread {
-            val text = runCatching {
-                val src = PlanarYUVLuminanceSource(
-                    data, size.width, size.height, 0, 0, size.width, size.height, false
-                )
-                // Portrait phones deliver a sideways sensor image;
-                // try both orientations.
-                decode(src) ?: decode(src.rotateCounterClockwise())
-            }.getOrNull()
-            if (text != null) runOnUiThread { onDecoded(text) }
-        }.start()
+        val frame = data.copyOf()
+        val w = size.width
+        val h = size.height
+        decodeBusy = true
+        decodeExecutor.execute {
+            try {
+                val text = runCatching {
+                    val src = PlanarYUVLuminanceSource(
+                        frame, w, h, 0, 0, w, h, false
+                    )
+                    // Portrait phones deliver a sideways sensor image;
+                    // try both orientations.
+                    decode(src) ?: decode(src.rotateCounterClockwise())
+                }.getOrNull()
+                if (text != null) runOnUiThread { onDecoded(text) }
+            } finally {
+                decodeBusy = false
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        decodeExecutor.shutdownNow()
+        super.onDestroy()
     }
 
     private fun decode(source: com.google.zxing.LuminanceSource): String? =

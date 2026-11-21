@@ -35,7 +35,10 @@ object Hls {
 
     sealed class Playlist {
         data class Master(val variants: List<Variant>) : Playlist()
-        data class Media(val segments: List<Segment>) : Playlist()
+        /** [hasMap]: the playlist uses #EXT-X-MAP (fragmented MP4) —
+         *  the merged bytes would lack the init segment and not
+         *  play; the engine refuses plainly instead (v1.7 audit). */
+        data class Media(val segments: List<Segment>, val hasMap: Boolean = false) : Playlist()
     }
 
     private fun attr(line: String, name: String): String? {
@@ -64,6 +67,7 @@ object Hls {
             return Playlist.Master(variants)
         }
         var mediaSeq = 0L
+        var hasMap = false
         var keyMethod: String? = null
         var keyUri: String? = null
         var keyIv: ByteArray? = null
@@ -72,6 +76,7 @@ object Hls {
         val segments = mutableListOf<Segment>()
         for (line in lines) {
             when {
+                line.startsWith("#EXT-X-MAP:") -> hasMap = true
                 line.startsWith("#EXT-X-MEDIA-SEQUENCE:") ->
                     mediaSeq = line.substringAfter(':').trim().toLongOrNull() ?: 0L
                 line.startsWith("#EXT-X-KEY:") -> {
@@ -105,7 +110,7 @@ object Hls {
                 }
             }
         }
-        return Playlist.Media(segments)
+        return Playlist.Media(segments, hasMap)
     }
 
     fun hexToBytes(hex: String): ByteArray {

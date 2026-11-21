@@ -65,6 +65,9 @@ class DownloadEngine(
      *  connections alternate between the default network and this
      *  one, so WiFi and mobile data carry the download together. */
     private val extraOpener: ((URL) -> HttpURLConnection)? = null,
+    /** v1.7: the user's custom User-Agent setting ("" = default).
+     *  A UA captured for THIS task (sniffer/browser) still wins. */
+    private val customUserAgent: String = "",
 ) {
     /** False once the thread count is settled (hint used, plateau
      *  reached or ceiling hit): the sampler stops growing workers. */
@@ -209,7 +212,13 @@ class DownloadEngine(
         apply: (HttpURLConnection) -> Unit,
     ): HttpURLConnection {
         var current = startUrl
+        // v1.7 compat: detect redirect LOOPS (the same URL twice)
+        // instead of burning the whole hop budget on them.
+        val visited = mutableSetOf<String>()
         repeat(MAX_REDIRECTS + 1) {
+            if (!visited.add(current)) {
+                throw IllegalStateException("服务器跳转成了一个圈（来回跳），已停下")
+            }
             val hopUrl = URL(current)
             val extra = extraOpener
             val c = if (extra != null && openerFlip.getAndIncrement() % 2 == 1) {
@@ -223,7 +232,27 @@ class DownloadEngine(
             c.connectTimeout = 15_000
             c.readTimeout = 30_000
             c.instanceFollowRedirects = false
-            c.setRequestProperty("User-Agent", task.headers["User-Agent"] ?: DEFAULT_UA)
+            c.setRequestProperty(
+                "User-Agent",
+                UserAgents.resolve(task.headers["User-Agent"], customUserAgent),
+            )
+            // v1.7 compat: Basic authentication embedded in the URL
+            // itself (http://user:pass@host/file). HttpURLConnection
+            // never turns userInfo into an Authorization header on
+            // its own, so credentialed links used to die with a 401.
+            // Taken from THIS hop's URL only — a redirect target
+            // without userInfo never receives the credentials. An
+            // explicit Authorization header (e.g. captured by the
+            // sniffer) always wins.
+            val userInfo = hopUrl.userInfo
+            if (!userInfo.isNullOrEmpty() && task.headers["Authorization"] == null) {
+                runCatching {
+                    val decoded = java.net.URLDecoder.decode(userInfo, "UTF-8")
+                    val b64 = java.util.Base64.getEncoder()
+                        .encodeToString(decoded.toByteArray(Charsets.UTF_8))
+                    c.setRequestProperty("Authorization", "Basic $b64")
+                }
+            }
             task.headers["Cookie"]?.let { c.setRequestProperty("Cookie", it) }
             task.headers["Referer"]?.let { c.setRequestProperty("Referer", it) }
             apply(c)
@@ -240,7 +269,7 @@ class DownloadEngine(
             }
             return c
         }
-        throw IllegalStateException("跳转次数太多，已停下")
+        throw IllegalStateException("跳转次数太多（超过 $MAX_REDIRECTS 次），已停下")
     }
 
     private fun probe() {
@@ -821,8 +850,24 @@ class DownloadEngine(
             ?: throw IllegalStateException("播放列表格式不对，可能不是有效的 m3u8")
         val segments = media.segments
         if (segments.isEmpty()) throw IllegalStateException("播放列表里没有分片")
-        val badKey = segments.firstOrNull {
-            it.keyUri != null && it.keyMethod != "AES-128"
+        if (media.hasMap) {
+            // v1.7 audit: #EXT-X-MAP means fragmented MP4 — the
+            // merged bytes would be missing the init segment and
+            // would not play. Refuse plainly instead of producing
+            // a broken file that claims to be done.
+            throw IllegalStateException(
+                "这个流媒体用的是分片 MP4（fMP4）格式，暂不支持合并，下不了"
+            )
+        }
+        // v1.7 audit (B1): the old check required keyUri != null, so
+        // a segment with an unsupported METHOD but no URI (or an
+        // AES-128 tag with no URI) slipped through and was merged
+        // still-encrypted while the task reported DONE. Any key
+        // method that is not NONE and not a usable AES-128 now
+        // stops the download with a plain reason.
+        val badKey = segments.firstOrNull { seg ->
+            val m = seg.keyMethod
+            m != null && m != "NONE" && !(m == "AES-128" && seg.keyUri != null)
         }
         if (badKey != null) {
             throw IllegalStateException(
@@ -1132,7 +1177,9 @@ class DownloadEngine(
         const val MAX_THREADS = 32
         const val MIN_SPLIT = 256L * 1024
         const val BUFFER_SIZE = 128 * 1024
-        const val MAX_REDIRECTS = 6
+        /** v1.7: was 6 — long CDN redirect chains hit it; loops are
+         *  detected separately, so a higher budget is safe. */
+        const val MAX_REDIRECTS = 10
         const val STALL_EVICT_MS = 12_000L
         /** v1.6 HLS: segments in flight / prefetch window / size cap. */
         const val HLS_PARALLEL = 4
@@ -1166,14 +1213,31 @@ class DownloadEngine(
 
         fun fileNameFrom(contentDisposition: String?, url: String): String {
             if (!contentDisposition.isNullOrBlank()) {
-                val star = Regex("filename\\*=UTF-8''([^;]+)").find(contentDisposition)
+                // RFC 5987: filename*=charset'lang'percent-encoded —
+                // v1.7: the charset is whatever the server says
+                // (GBK''… is common on older Chinese sites), not
+                // always UTF-8.
+                val star = Regex("filename\\*=([^']*)'[^']*'([^;]+)")
+                    .find(contentDisposition)
                 if (star != null) {
-                    return runCatching {
-                        java.net.URLDecoder.decode(star.groupValues[1], "UTF-8")
-                    }.getOrDefault(star.groupValues[1]).trim('"')
+                    val charsetName = star.groupValues[1].ifBlank { "UTF-8" }
+                    val raw = star.groupValues[2]
+                    val decoded = runCatching {
+                        val cs = runCatching {
+                            java.nio.charset.Charset.forName(charsetName)
+                        }.getOrDefault(Charsets.UTF_8)
+                        java.net.URLDecoder.decode(raw, cs.name())
+                    }.getOrDefault(raw)
+                    return sanitizeFileName(decoded)
                 }
                 val plain = Regex("filename=\"?([^\";]+)\"?").find(contentDisposition)
-                if (plain != null) return plain.groupValues[1].trim()
+                if (plain != null) {
+                    // Servers that put RAW (non-encoded) UTF-8 or GBK
+                    // bytes into the header reach us as ISO-8859-1
+                    // mojibake through HttpURLConnection — recover
+                    // the original text before using it as a name.
+                    return sanitizeFileName(decodeRawHeader(plain.groupValues[1].trim()))
+                }
             }
             val path = runCatching { URL(url).path }.getOrDefault(url)
             var name = path.substringAfterLast('/').substringBefore('?')
@@ -1184,8 +1248,41 @@ class DownloadEngine(
                 val prev = path.substringBeforeLast('/').substringAfterLast('/')
                 if (prev.contains('.')) name = prev
             }
-            val decoded = runCatching { java.net.URLDecoder.decode(name, "UTF-8") }.getOrDefault(name)
-            return decoded.ifBlank { "download.bin" }
+            // A literal '+' in a URL path is a plus, not a space —
+            // protect it before URLDecoder gets to translate it.
+            val decoded = runCatching {
+                java.net.URLDecoder.decode(name.replace("+", "%2B"), "UTF-8")
+            }.getOrDefault(name)
+            return sanitizeFileName(decoded)
+        }
+
+        /**
+         * A file NAME must never carry path separators: a hostile
+         * or sloppy Content-Disposition ("../../x", "a/b.zip")
+         * would otherwise leak directory structure into the public
+         * Download folder naming. Keeps the last segment only.
+         */
+        fun sanitizeFileName(name: String): String =
+            name.substringAfterLast('/').substringAfterLast('\\')
+                .trim().trim('"').trim()
+                .ifBlank { "download.bin" }
+
+        /**
+         * Undo the ISO-8859-1 decoding HttpURLConnection applies to
+         * header bytes: if the text is non-ASCII but every char fits
+         * in a byte, re-encode to the original bytes and try UTF-8
+         * first, then GBK (the two encodings real servers use for
+         * raw filename bytes). Anything else is returned untouched.
+         */
+        fun decodeRawHeader(value: String): String {
+            if (value.all { it.code < 0x80 }) return value
+            if (value.any { it.code > 0xFF }) return value
+            val bytes = value.toByteArray(Charsets.ISO_8859_1)
+            val utf8 = runCatching { String(bytes, Charsets.UTF_8) }.getOrNull()
+            if (utf8 != null && !utf8.contains('\uFFFD')) return utf8
+            return runCatching {
+                String(bytes, java.nio.charset.Charset.forName("GBK"))
+            }.getOrDefault(value)
         }
     }
 }

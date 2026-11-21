@@ -1905,7 +1905,15 @@ enum class BarState { RUNNING, PAUSED, ERROR, DONE, IDLE }
  * Paused turns yellow, error red — same state colors as Windows.
  */
 @androidx.compose.runtime.Composable
-fun WinProgressBar(progress: Float, state: BarState, modifier: Modifier = Modifier) {
+fun WinProgressBar(
+    progress: Float,
+    state: BarState,
+    modifier: Modifier = Modifier,
+    // v1.7 (audit B4): the server never told us the total size
+    // (chunked response) — show a sweeping band instead of a
+    // forever-empty 0% bar.
+    indeterminate: Boolean = false,
+) {
     val dark = isSystemInDarkTheme()
     val track = if (dark) WinPalette.TrackDark else WinPalette.TrackLight
     val fill = when (state) {
@@ -1932,6 +1940,20 @@ fun WinProgressBar(progress: Float, state: BarState, modifier: Modifier = Modifi
         val w = size.width
         val h = size.height
         drawRoundRect(track, cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx()))
+        if (indeterminate) {
+            // A green band sweeping the full track, Windows style.
+            val bandW = w * 0.35f
+            val cx = phase * (w + bandW) - bandW
+            clipRect(left = 0f, top = 0f, right = w, bottom = h) {
+                drawRect(fill, topLeft = Offset(cx, 0f), size = Size(bandW, h))
+                drawRect(
+                    Color.White.copy(alpha = 0.18f),
+                    topLeft = Offset(cx, 0f),
+                    size = Size(bandW, h / 2),
+                )
+            }
+            return@Canvas
+        }
         val fillW = w * p
         if (fillW > 0f) {
             clipRect(left = 0f, top = 0f, right = fillW, bottom = h) {
@@ -2084,9 +2106,15 @@ fun TaskCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    // v1.7 (audit B4): unknown total (chunked
+                    // response) must not read as "已完成 0%" while
+                    // bytes are flowing — say what we know.
+                    val unknownSize = task.totalSize <= 0 && !task.isHls
                     val headline = when (task.status) {
-                        TaskStatus.RUNNING -> "已完成 $pct%"
-                        TaskStatus.PAUSED -> "已暂停 · 已完成 $pct%"
+                        TaskStatus.RUNNING ->
+                            if (unknownSize) "正在下载 · 大小未知" else "已完成 $pct%"
+                        TaskStatus.PAUSED ->
+                            if (unknownSize) "已暂停 · 大小未知" else "已暂停 · 已完成 $pct%"
                         TaskStatus.QUEUED ->
                             if (task.scheduledAt > System.currentTimeMillis())
                                 "预约 ${Format.clockTime(task.scheduledAt)} 开始"
@@ -2129,6 +2157,8 @@ fun TaskCard(
                 progress = if (task.status == TaskStatus.DONE) 1f else task.progress,
                 state = barState,
                 modifier = Modifier.fillMaxWidth(),
+                indeterminate = task.totalSize <= 0 && !task.isHls &&
+                    task.status == TaskStatus.RUNNING,
             )
 
             if (!expanded) {
