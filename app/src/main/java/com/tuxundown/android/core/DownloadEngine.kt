@@ -15,8 +15,10 @@ import kotlin.math.max
  * - Splits the file into small chunks; workers pull chunk indexes from a
  *   shared atomic queue, so a worker that finishes early automatically
  *   takes the next unfinished chunk (dynamic chunking / work stealing).
- *   On top of that, an idle worker may split the unfinished tail of the
- *   slowest in-flight chunk and take half of it.
+ *   On top of that, the v2.2 endgame: once every chunk has been
+ *   started, idle workers cut the largest in-flight remainder into
+ *   equal pieces and take them over (see [Endgame] for the plan and
+ *   for how split parts share the chunk's single bitset bit).
  * - Auto thread probing: starts low, then doubles 4 -> 8 -> 16 -> 32
  *   every 2 s while the measured speed keeps growing by more than 10%;
  *   stops at the first plateau.
@@ -768,12 +770,19 @@ class DownloadEngine(
         t.start()
     }
 
+    /** v2.2 endgame: tail pieces already cut by a split plan,
+     *  waiting for an idle worker to pick them up. Guarded by
+     *  [activeLock]; pieces are also in [active] from the moment
+     *  they are cut, so later plans can see (and re-split) them. */
+    private val pendingTails = ArrayDeque<ActiveChunk>()
+
     private fun workerLoop(chunkCount: Int) {
         while (!stopped()) {
             var index = nextChunk.getAndIncrement()
             if (index >= chunkCount) {
-                // No fresh chunks: try to steal the tail of the slowest
-                // in-flight chunk before giving up.
+                // No fresh chunks: endgame. Take a pre-cut tail if
+                // one is waiting, else plan a fresh split of the
+                // largest in-flight remainder (see Endgame).
                 val stolen = stealTail() ?: return
                 downloadActive(stolen)
                 continue
@@ -787,25 +796,43 @@ class DownloadEngine(
         }
     }
 
-    /** Split the largest remaining in-flight chunk; returns the tail half. */
+    /**
+     * Endgame split (v2.2): cut the largest in-flight remainder
+     * into roughly equal pieces — one stays with its owner, the
+     * others go to idle workers. The decision itself is the pure
+     * [Endgame.planSplit]; this method only applies it to the
+     * live chunks. One piece is returned for the calling worker,
+     * the rest wait in [pendingTails]. Returns null when nothing
+     * is worth splitting (the caller then exits).
+     *
+     * The plan is computed from a snapshot, then RE-planned
+     * against the chosen chunk's live position before cutting:
+     * the owner keeps writing while we decide, and a cut placed
+     * behind its current position would make two workers write
+     * (and double-count) the same bytes.
+     */
     private fun stealTail(): ActiveChunk? {
         synchronized(activeLock) {
-            var best: ActiveChunk? = null
-            var bestRemaining = MIN_SPLIT
-            for (ac in active) {
-                val remaining = ac.end - ac.pos
-                if (remaining > bestRemaining) {
-                    bestRemaining = remaining
-                    best = ac
-                }
+            if (pendingTails.isNotEmpty()) return pendingTails.removeFirst()
+            val idle = (activeWorkers.get() - active.size).coerceAtLeast(1)
+            val snapshot = active.map { Endgame.Range(it.index, it.pos, it.end) }
+            val plan = Endgame.planSplit(snapshot, idle, MIN_SPLIT) ?: return null
+            val owner = active.firstOrNull { it.index == plan.index } ?: return null
+            val live = Endgame.planSplit(
+                listOf(Endgame.Range(owner.index, owner.pos, owner.end)),
+                idle, MIN_SPLIT,
+            ) ?: return null
+            val origEnd = owner.end
+            owner.end = live.cuts.first()
+            val bounds = live.cuts + origEnd
+            val tails = ArrayList<ActiveChunk>(bounds.size - 1)
+            for (i in 0 until bounds.size - 1) {
+                tails.add(ActiveChunk(owner.index, bounds[i], bounds[i + 1]))
             }
-            val target = best ?: return null
-            val mid = target.pos + bestRemaining / 2
-            val tail = ActiveChunk(target.index, mid, target.end)
-            target.end = mid
-            chunkParts[target.index] = (chunkParts[target.index] ?: 1) + 1
-            active.add(tail)
-            return tail
+            chunkParts[owner.index] = (chunkParts[owner.index] ?: 1) + tails.size
+            active.addAll(tails)
+            for (t in tails.drop(1)) pendingTails.addLast(t)
+            return tails.first()
         }
     }
 
