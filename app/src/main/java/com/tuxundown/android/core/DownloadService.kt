@@ -311,6 +311,9 @@ class DownloadService : Service() {
                         }
                     }
                 } else null,
+                // v1.7: the user's custom User-Agent setting; a UA
+                // captured for THIS task still wins (UserAgents).
+                customUserAgent = DownloadCenter.userAgent,
                 // v1.5: per-host thread memory — start known hosts at
                 // their remembered optimum, remember new optima, and
                 // age the memory out when a host starts failing.

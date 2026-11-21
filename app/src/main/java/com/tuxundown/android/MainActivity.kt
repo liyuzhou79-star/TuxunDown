@@ -83,6 +83,7 @@ import com.tuxundown.android.core.FtpClient
 import com.tuxundown.android.core.PublicStorage
 import com.tuxundown.android.core.TaskRecord
 import com.tuxundown.android.core.TaskStatus
+import com.tuxundown.android.core.UserAgents
 import com.tuxundown.android.sniff.LinkRouter
 import com.tuxundown.android.sniff.SizeProbe
 import com.tuxundown.android.sniff.SniffResult
@@ -107,17 +108,24 @@ class MainActivity : ComponentActivity() {
         val sharedUrl = if (intent?.action == Intent.ACTION_SEND) {
             intent.getStringExtra(Intent.EXTRA_TEXT)?.trim() ?: ""
         } else ""
+        AmoledState.enabled = DownloadCenter.amoledBlack
 
         setContent {
             val dark = isSystemInDarkTheme()
             MaterialTheme(
-                colorScheme = if (dark) {
-                    darkColorScheme(
+                colorScheme = when {
+                    // v1.7: AMOLED pure black — background and cards
+                    // go fully black on OLED screens (dark mode only).
+                    dark && AmoledState.enabled -> darkColorScheme(
+                        background = Color.Black,
+                        surface = Color.Black,
+                        surfaceVariant = Color(0xFF1C1C1C),
+                    )
+                    dark -> darkColorScheme(
                         background = Color(0xFF1B1B1B),
                         surface = Color(0xFF242424),
                     )
-                } else {
-                    lightColorScheme(
+                    else -> lightColorScheme(
                         background = Color(0xFFF7F7F7),
                         surface = Color(0xFFFFFFFF),
                     )
@@ -127,6 +135,15 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+}
+
+/**
+ * v1.7: AMOLED pure-black switch as snapshot state, so flipping it
+ * in settings re-themes the app immediately (the persisted value
+ * lives in DownloadCenter.amoledBlack; this is its UI mirror).
+ */
+object AmoledState {
+    var enabled by mutableStateOf(false)
 }
 
 /** Windows file-transfer palette. */
@@ -182,6 +199,8 @@ fun DownApp(sharedUrl: String) {
     var autoRetry by remember { mutableStateOf(DownloadCenter.autoRetryCount) }
     var trafficMB by remember { mutableStateOf(DownloadCenter.trafficThresholdMB) }
     var dualChan by remember { mutableStateOf(DownloadCenter.dualChannel) }
+    var userAgentUi by remember { mutableStateOf(DownloadCenter.userAgent) }
+    var amoledUi by remember { mutableStateOf(DownloadCenter.amoledBlack) }
 
     // ---- v1.5: battery-optimisation whitelist status for the
     // settings keep-alive card. Refreshed every time the settings
@@ -239,7 +258,7 @@ fun DownApp(sharedUrl: String) {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "1.6.0"
+        }.getOrNull() ?: "1.7.0"
     }
     var showGuide by remember {
         mutableStateOf(DownloadCenter.guideSeenVersion != appVersion)
@@ -696,6 +715,14 @@ fun DownApp(sharedUrl: String) {
             onTraffic = { trafficMB = it; DownloadCenter.trafficThresholdMB = it },
             dualChan = dualChan,
             onDualChan = { dualChan = it; DownloadCenter.dualChannel = it },
+            userAgent = userAgentUi,
+            onUserAgent = { userAgentUi = it; DownloadCenter.userAgent = it },
+            amoled = amoledUi,
+            onAmoled = {
+                amoledUi = it
+                DownloadCenter.amoledBlack = it
+                AmoledState.enabled = it
+            },
             vibrateOn = vibrateOn,
             onVibrate = { vibrateOn = it; DownloadCenter.completeVibrate = it },
             soundOn = soundOn,
@@ -1597,6 +1624,10 @@ fun SettingsScreen(
     onTraffic: (Int) -> Unit,
     dualChan: Boolean,
     onDualChan: (Boolean) -> Unit,
+    userAgent: String,
+    onUserAgent: (String) -> Unit,
+    amoled: Boolean,
+    onAmoled: (Boolean) -> Unit,
     vibrateOn: Boolean,
     onVibrate: (Boolean) -> Unit,
     soundOn: Boolean,
@@ -1609,6 +1640,21 @@ fun SettingsScreen(
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
+    // v1.7: custom-UA text field + orphan .part scan state.
+    var uaCustom by remember(userAgent) { mutableStateOf(userAgent) }
+    var orphanScan by remember { mutableStateOf<List<PublicStorage.OrphanPart>?>(null) }
+    var orphanScanning by remember { mutableStateOf(false) }
+    fun startOrphanScan() {
+        orphanScanning = true
+        Thread {
+            val found = runCatching { PublicStorage.scanOrphanParts(context) }
+                .getOrDefault(emptyList())
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                orphanScanning = false
+                orphanScan = found
+            }
+        }.start()
+    }
     LazyColumn(
         Modifier
             .fillMaxSize()
@@ -1725,6 +1771,64 @@ fun SettingsScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 8.dp),
                 )
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Text("User-Agent（服务器看到的浏览器标识）")
+                Text(
+                    "有些服务器会按这个标识给不同的内容。选预置或自己填；" +
+                        "从嗅探、内置浏览器抓到的任务用的是抓到时那个标识，不受这里影响。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                for (row in UserAgents.PRESETS.chunked(2)) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        for ((label, value) in row) {
+                            if (userAgent == value) {
+                                Button(
+                                    onClick = { },
+                                    modifier = Modifier.weight(1f),
+                                ) { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                            } else {
+                                OutlinedButton(
+                                    onClick = { onUserAgent(value); uaCustom = value },
+                                    modifier = Modifier.weight(1f),
+                                ) { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                            }
+                        }
+                    }
+                }
+                OutlinedTextField(
+                    value = uaCustom,
+                    onValueChange = { uaCustom = it },
+                    label = { Text("自定义 User-Agent") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                )
+                OutlinedButton(
+                    onClick = { onUserAgent(uaCustom.trim()) },
+                    modifier = Modifier.padding(top = 6.dp),
+                ) { Text("用这个自定义 UA") }
+            }
+        }
+        item(key = "s-look") {
+            SettingsGroup("外观") {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("AMOLED 纯黑")
+                        Text(
+                            "深色模式下背景和卡片变成纯黑，OLED 屏幕更省电、晚上看不刺眼",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = amoled, onCheckedChange = onAmoled)
+                }
             }
         }
         item(key = "s-notify") {
@@ -1809,6 +1913,26 @@ fun SettingsScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 6.dp),
                 )
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("清理孤儿 .part 文件")
+                        Text(
+                            "下载目录里没有任务认领的半成品（删任务、异常退出留下的），" +
+                                "扫出来确认后删除，腾出空间",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = { startOrphanScan() },
+                        enabled = !orphanScanning,
+                    ) { Text(if (orphanScanning) "扫描中…" else "扫描") }
+                }
             }
         }
         item(key = "s-about") {
@@ -1833,6 +1957,71 @@ fun SettingsScreen(
                 }) { Text("检查更新（打开 GitHub 发布页）") }
             }
         }
+    }
+    // v1.7: orphan .part scan results — list with sizes, delete on confirm.
+    if (orphanScan != null) {
+        val list = orphanScan!!
+        AlertDialog(
+            onDismissRequest = { orphanScan = null },
+            title = { Text("孤儿 .part 文件") },
+            text = {
+                if (list.isEmpty()) {
+                    Text("没有发现孤儿文件：下载目录里的 .part 都还有任务认领。")
+                } else {
+                    Column {
+                        Text(
+                            "找到 ${list.size} 个没有任务认领的半成品文件，" +
+                                "合计 ${Format.size(list.sumOf { it.size.coerceAtLeast(0) })}：",
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        for (o in list.take(20)) {
+                            Text(
+                                "· ${o.name}（${Format.size(o.size)}）",
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        if (list.size > 20) {
+                            Text(
+                                "…还有 ${list.size - 20} 个",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "删除后不能恢复；正在下载或暂停中的任务文件不会出现在这里。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                if (list.isNotEmpty()) {
+                    TextButton(onClick = {
+                        val targets = list
+                        orphanScan = null
+                        Thread {
+                            var ok = 0
+                            for (o in targets) {
+                                if (PublicStorage.deleteOrphan(context, o)) ok++
+                            }
+                            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                Toast.makeText(
+                                    context,
+                                    "已删除 $ok/${targets.size} 个孤儿文件",
+                                    Toast.LENGTH_SHORT,
+                                ).show()
+                            }
+                        }.start()
+                    }) { Text("全部删除") }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { orphanScan = null }) { Text("关闭") }
+            },
+        )
     }
 }
 
@@ -1884,13 +2073,13 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 嗅探能测大小了：结果列表会显示每个文件的大小（测不到的会写明未知），还能按大小排序\n" +
-            "· 能下流媒体了：m3u8 链接会自动把分片合并成一个 .ts 文件，可直接播放\n" +
-            "· 多源并下：同一个文件填几个镜像地址一起下，下载前会校验是不是同一个文件，对不上会拒绝\n" +
-            "· 设置里可开「WiFi＋流量双通道」（默认关）：两条网络一起下，环境不支持时会明说\n" +
-            "· 新增「下载统计」页（主页右上角）：累计下了多少、今日多少、平均速度一目了然\n" +
-            "· 新建下载里能扫二维码加链接；横屏和大屏上任务列表变双列\n" +
-            "· 全局限速改成所有任务合计：多任务一起下时按优先级分配，不会互相抢到都慢",
+            "· 能下 FTP 了：ftp:// 链接直接粘贴或批量粘贴就能下，服务器支持时还能断点续传\n" +
+            "· 下载后能验真：给任务填上发布页给的 SHA-256 / MD5，下完自动算一遍，卡片上写明对上没对上\n" +
+            "· 修了一个排队坑：开了「仅 WiFi」排队的任务，连上 WiFi 后会自己开始，不用再打开 App 戳它\n" +
+            "· 设置里能改 User-Agent 了：预置几种常用标识，也能自己填\n" +
+            "· 设置里多了「清理孤儿 .part 文件」：把没任务认领的半成品扫出来删掉，腾空间\n" +
+            "· 深色模式多了 AMOLED 纯黑开关，OLED 屏幕更省电\n" +
+            "· 任务保存更省了：频繁保存合并成最多 1.5 秒写一次，长列表更顺；流媒体合并时的内存占用也压住了",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
             "· 文件直链 → 直接开始多线程下载，还能预先改好保存文件名\n" +

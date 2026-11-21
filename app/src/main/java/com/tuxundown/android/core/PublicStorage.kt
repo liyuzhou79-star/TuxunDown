@@ -203,6 +203,93 @@ object PublicStorage {
         }
     }
 
+    // ---------- v1.7: orphan .part cleanup ----------
+
+    /** A ".part" entry in the download location that NO task references. */
+    data class OrphanPart(val uri: Uri, val name: String, val size: Long)
+
+    /**
+     * Scan the CURRENT download location (public Download root, or
+     * the user's SAF folder) for ".part" files that no task in the
+     * store points at — leftovers from deleted tasks, crashed runs
+     * or manual file-manager shuffles. Referenced .part files (any
+     * live or paused task's target) are never reported.
+     */
+    fun scanOrphanParts(context: Context): List<OrphanPart> {
+        val referenced = HashSet<String>()
+        for (t in DownloadCenter.store.tasks) {
+            if (t.targetUri.isNotBlank()) referenced.add(t.targetUri)
+            if (t.savedUri.isNotBlank()) referenced.add(t.savedUri)
+        }
+        val out = mutableListOf<OrphanPart>()
+        val custom = DownloadCenter.downloadDirUri
+        if (custom.isNotBlank()) {
+            val tree = runCatching {
+                DocumentFile.fromTreeUri(context, Uri.parse(custom))
+            }.getOrNull()
+            if (tree != null && tree.canRead()) {
+                for (f in tree.listFiles()) {
+                    val name = f.name ?: continue
+                    if (!name.endsWith(".part", ignoreCase = true)) continue
+                    if (f.uri.toString() in referenced) continue
+                    out.add(
+                        OrphanPart(
+                            f.uri, name,
+                            runCatching { f.length() }.getOrDefault(-1),
+                        )
+                    )
+                }
+            }
+        } else {
+            val cursor = runCatching {
+                context.contentResolver.query(
+                    downloadsCollection(),
+                    arrayOf(
+                        MediaStore.Downloads._ID,
+                        MediaStore.Downloads.DISPLAY_NAME,
+                        MediaStore.Downloads.SIZE,
+                    ),
+                    "${MediaStore.Downloads.DISPLAY_NAME} LIKE ? AND " +
+                        "${MediaStore.Downloads.RELATIVE_PATH} = ?",
+                    arrayOf("%.part", Environment.DIRECTORY_DOWNLOADS + "/"),
+                    "${MediaStore.Downloads.DISPLAY_NAME} ASC",
+                )
+            }.getOrNull()
+            cursor?.use {
+                val idIdx = it.getColumnIndexOrThrow(MediaStore.Downloads._ID)
+                val nameIdx = it.getColumnIndexOrThrow(MediaStore.Downloads.DISPLAY_NAME)
+                val sizeIdx = it.getColumnIndexOrThrow(MediaStore.Downloads.SIZE)
+                while (it.moveToNext()) {
+                    val uri = Uri.withAppendedPath(
+                        downloadsCollection(), it.getLong(idIdx).toString()
+                    )
+                    if (uri.toString() in referenced) continue
+                    out.add(
+                        OrphanPart(
+                            uri,
+                            it.getString(nameIdx) ?: "",
+                            runCatching { it.getLong(sizeIdx) }.getOrDefault(-1),
+                        )
+                    )
+                }
+            }
+        }
+        return out
+    }
+
+    /** Delete one orphan .part; false when the system refused. */
+    fun deleteOrphan(context: Context, orphan: OrphanPart): Boolean {
+        val doc = runCatching {
+            DocumentFile.fromSingleUri(context, orphan.uri)
+        }.getOrNull()
+        if (doc != null && doc.exists()) {
+            return runCatching { doc.delete() }.getOrDefault(false)
+        }
+        return runCatching {
+            context.contentResolver.delete(orphan.uri, null, null) > 0
+        }.getOrDefault(false)
+    }
+
     /** Delete the task's public file (.part or finished). Best effort. */
     fun deleteTarget(context: Context, task: TaskRecord) {
         val resolver = context.contentResolver

@@ -99,6 +99,20 @@ object DownloadCenter {
         get() = pBool("dualChannel", false)
         set(v) { prefs().edit().putBoolean("dualChannel", v).apply() }
 
+    /**
+     * v1.7: the user's custom User-Agent setting ("" = built-in
+     * default). A UA captured for a specific task (sniffer /
+     * browser) still wins over this — see UserAgents.resolve.
+     */
+    var userAgent: String
+        get() = pString("userAgent", "")
+        set(v) { prefs().edit().putString("userAgent", v).apply() }
+
+    /** v1.7: AMOLED pure-black dark theme (OLED screens). */
+    var amoledBlack: Boolean
+        get() = pBool("amoledBlack", false)
+        set(v) { prefs().edit().putBoolean("amoledBlack", v).apply() }
+
     /** Build a task record, flagging HLS (.m3u8) links automatically. */
     fun newTask(url: String, headers: Map<String, String> = emptyMap()): TaskRecord {
         val t = TaskRecord(url = url, headers = headers.toMutableMap())
