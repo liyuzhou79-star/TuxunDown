@@ -64,6 +64,14 @@ class TaskRecord(
     var isHls: Boolean = false,
     /** HLS: segment count of the playlist the state below belongs to. */
     var hlsTotalSegments: Int = 0,
+    // ---- v1.7 additions ----
+    /** Expected SHA-256 (hex) the finished file must match; "" = none. */
+    var expectedSha256: String = "",
+    /** Expected MD5 (hex); used only when no SHA-256 is set. */
+    var expectedMd5: String = "",
+    /** Checksum verdict: see Checksum.STATE_* (0 none, 1 verifying,
+     *  2 matched 对上， 3 mismatched 对不上）. */
+    var checksumState: Int = 0,
     /**
      * HLS: segments already written to the target file. Writes are
      * strictly in playlist order, so the done set is always a prefix.
@@ -275,6 +283,9 @@ class TaskStore(context: Context) {
                 o.put("priority", t.priority)
                 o.put("isHls", t.isHls)
                 o.put("hlsTotalSegments", t.hlsTotalSegments)
+                o.put("expectedSha256", t.expectedSha256)
+                o.put("expectedMd5", t.expectedMd5)
+                o.put("checksumState", t.checksumState)
                 o.put("hlsDone", ChunkPlanner.encodeBitset(t.hlsDone))
                 synchronized(t.hlsSizes) {
                     o.put("hlsSizesCsv", t.hlsSizes.joinToString(","))
@@ -326,7 +337,15 @@ class TaskStore(context: Context) {
                         priority = o.optInt("priority", 0),
                         isHls = o.optBoolean("isHls", false),
                         hlsTotalSegments = o.optInt("hlsTotalSegments", 0),
+                        expectedSha256 = o.optString("expectedSha256"),
+                        expectedMd5 = o.optString("expectedMd5"),
+                        checksumState = o.optInt("checksumState", 0),
                     )
+                    // A verify never survives a restart: a persisted
+                    // "verifying" just means it was interrupted.
+                    if (t.checksumState == Checksum.STATE_VERIFYING) {
+                        t.checksumState = Checksum.STATE_NONE
+                    }
                     val srcArr = o.optJSONArray("sources")
                     if (srcArr != null) {
                         for (j in 0 until srcArr.length()) {

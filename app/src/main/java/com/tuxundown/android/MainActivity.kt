@@ -75,6 +75,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
+import com.tuxundown.android.core.Checksum
+import com.tuxundown.android.core.ChecksumVerifier
 import com.tuxundown.android.core.DownloadCenter
 import com.tuxundown.android.core.Format
 import com.tuxundown.android.core.FtpClient
@@ -217,6 +219,10 @@ fun DownApp(sharedUrl: String) {
     // ---- mirror-sources dialog (v1.6 item 4) ----
     var sourcesTask by remember { mutableStateOf<TaskRecord?>(null) }
     var sourceText by remember { mutableStateOf("") }
+
+    // ---- checksum dialog (v1.7) ----
+    var hashTask by remember { mutableStateOf<TaskRecord?>(null) }
+    var hashText by remember { mutableStateOf("") }
 
     // ---- home list state (v1.4: tabs, search, sort, multi-select) ----
     var tab by remember { mutableStateOf(0) } // 0 全部 1 下载中 2 已完成 3 失败
@@ -629,6 +635,10 @@ fun DownApp(sharedUrl: String) {
             onSources = {
                 sourcesTask = task
                 sourceText = task.sources.joinToString("\n")
+            },
+            onChecksum = {
+                hashTask = task
+                hashText = task.expectedSha256.ifBlank { task.expectedMd5 }
             },
         )
     }
@@ -1324,6 +1334,104 @@ fun DownApp(sharedUrl: String) {
             },
             dismissButton = {
                 TextButton(onClick = { sourcesTask = null }) { Text("取消") }
+            },
+        )
+    }
+
+    // ---- checksum hash dialog (v1.7) ----
+    if (hashTask != null) {
+        val ht = hashTask!!
+        val detected = Checksum.detectKind(hashText)
+        AlertDialog(
+            onDismissRequest = { hashTask = null },
+            title = { Text("设置校验哈希") },
+            text = {
+                Column {
+                    Text(
+                        "把发布页给的哈希值粘进来：64 位自动认成 SHA-256，32 位认成 MD5。" +
+                            "下载完成时会自动算一遍对不对得上，卡片上会写明结果。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = hashText,
+                        onValueChange = { hashText = it },
+                        label = { Text("SHA-256 或 MD5（十六进制）") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        when {
+                            hashText.isBlank() -> "未填写"
+                            detected != null -> "识别为：$detected ✓"
+                            else -> "没认出来：长度不对或含有非十六进制字符"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (detected != null) WinPalette.ChartGreen
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val kind = Checksum.detectKind(hashText)
+                    if (kind == null) {
+                        Toast.makeText(
+                            context,
+                            "没认出来：要填 32 位（MD5）或 64 位（SHA-256）的十六进制哈希",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                        return@TextButton
+                    }
+                    val hex = Checksum.normalize(hashText)
+                    if (kind == Checksum.SHA256) {
+                        ht.expectedSha256 = hex
+                        ht.expectedMd5 = ""
+                    } else {
+                        ht.expectedMd5 = hex
+                        ht.expectedSha256 = ""
+                    }
+                    ht.checksumState = Checksum.STATE_NONE
+                    store.saveNow()
+                    hashTask = null
+                    if (ht.status == TaskStatus.DONE) {
+                        // Hash arrived after the download: verify the
+                        // finished file right away, off the UI thread.
+                        Toast.makeText(context, "开始校验…", Toast.LENGTH_SHORT).show()
+                        Thread {
+                            val verdict = runCatching {
+                                ChecksumVerifier.verify(context, ht)
+                            }.getOrDefault("")
+                            activity.runOnUiThread {
+                                store.saveNow()
+                                if (verdict.isNotBlank()) {
+                                    Toast.makeText(context, verdict, Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        }.start()
+                    } else {
+                        Toast.makeText(
+                            context,
+                            "已保存，下完会自动校验",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    }
+                }) { Text("保存") }
+            },
+            dismissButton = {
+                Row {
+                    if (ht.expectedSha256.isNotBlank() || ht.expectedMd5.isNotBlank()) {
+                        TextButton(onClick = {
+                            ht.expectedSha256 = ""
+                            ht.expectedMd5 = ""
+                            ht.checksumState = Checksum.STATE_NONE
+                            store.saveNow()
+                            hashTask = null
+                        }) { Text("清除") }
+                    }
+                    TextButton(onClick = { hashTask = null }) { Text("取消") }
+                }
             },
         )
     }
@@ -2078,6 +2186,7 @@ fun TaskCard(
     onJumpQueue: () -> Unit,
     onRename: () -> Unit,
     onSources: () -> Unit,
+    onChecksum: () -> Unit,
 ) {
     var expanded by remember(task.id) {
         mutableStateOf(DownloadCenter.detailsExpanded)
@@ -2309,6 +2418,21 @@ fun TaskCard(
                     Spacer(Modifier.height(6.dp))
                     OutlinedButton(onClick = onSources) {
                         Text(if (task.sources.isEmpty()) "加镜像源（多源并下）" else "管理镜像源")
+                    }
+                }
+                // v1.7: integrity check — the expected hash the
+                // finished file is verified against at completion.
+                val expectedHash = Checksum.expectedOf(task)
+                if (expectedHash != null) {
+                    InfoRow(
+                        "完整性校验：",
+                        "${expectedHash.first} · ${Checksum.stateLabel(task.checksumState)}",
+                    )
+                }
+                if (task.status != TaskStatus.RUNNING) {
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedButton(onClick = onChecksum) {
+                        Text(if (expectedHash == null) "设置校验哈希" else "改校验哈希")
                     }
                 }
                 if (task.retryCount > 0) {

@@ -420,7 +420,14 @@ class DownloadService : Service() {
             } else {
                 "已保存到公共「下载」目录"
             }
-            task.note = "$where：$displayName"
+            var note = "$where：$displayName"
+            // v1.7: if the user attached an expected hash, stream
+            // the finished file through it NOW and put the verdict
+            // in the note + on the card （对上 / 对不上）.
+            val verdict = runCatching { ChecksumVerifier.verify(this, task) }
+                .getOrDefault("")
+            if (verdict.isNotBlank()) note += " $verdict"
+            task.note = note
             notifyUpdate("下载完成", displayName, 100)
             // v1.6: feed the statistics screen (local counters).
             DownloadCenter.recordCompletion(task)
