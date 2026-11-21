@@ -56,6 +56,14 @@ class DownloadEngine(
         paused = true
     }
 
+    /** Append one per-second sample for the speed curve (keeps ~90 s). */
+    private fun recordSpeed(bps: Long) {
+        synchronized(task.speedHistory) {
+            task.speedHistory.add(bps)
+            while (task.speedHistory.size > 90) task.speedHistory.removeAt(0)
+        }
+    }
+
     /** Blocking run on the calling thread. Returns final status. */
     fun run(): TaskStatus {
         if (running) return task.status
@@ -93,6 +101,13 @@ class DownloadEngine(
         val c = open(task.url)
         c.setRequestProperty("Range", "bytes=0-0")
         val code = c.responseCode
+        val contentType = c.getHeaderField("Content-Type") ?: ""
+        if (contentType.contains("html", true) || contentType.contains("xhtml", true)) {
+            c.disconnect()
+            throw IllegalStateException(
+                "这个链接打开的是网页，不是文件直链。请用「嗅探网页」或内置浏览器找到真正的下载地址。"
+            )
+        }
         val cd = c.getHeaderField("Content-Disposition")
         if (task.fileName.isBlank()) {
             task.fileName = fileNameFrom(cd, task.url)
@@ -148,6 +163,7 @@ class DownloadEngine(
                 val dt = max(1L, now - lastTime)
                 val speed = (bytes - lastBytes) * 1000 / dt
                 task.speedBps = if (task.speedBps == 0L) speed else (task.speedBps * 3 + speed) / 4
+                recordSpeed(task.speedBps)
                 task.downloaded = bytes
                 ticks++
                 // Every 3 s decide whether more threads still help.
@@ -349,6 +365,7 @@ class DownloadEngine(
                 val dt = max(1L, now - lastTime)
                 val speed = (bytes - lastBytes) * 1000 / dt
                 task.speedBps = if (task.speedBps == 0L) speed else (task.speedBps * 3 + speed) / 4
+                recordSpeed(task.speedBps)
                 task.downloaded = bytes
                 lastBytes = bytes
                 lastTime = now

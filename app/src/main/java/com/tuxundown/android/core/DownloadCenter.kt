@@ -17,6 +17,15 @@ object DownloadCenter {
         get() = prefs().getBoolean("wifiOnly", false)
         set(v) { prefs().edit().putBoolean("wifiOnly", v).apply() }
 
+    /** Custom download folder (SAF tree Uri string); "" = public Download/TuxunDown. */
+    var downloadDirUri: String
+        get() = prefs().getString("downloadDirUri", "") ?: ""
+        set(v) { prefs().edit().putString("downloadDirUri", v).apply() }
+
+    var downloadDirName: String
+        get() = prefs().getString("downloadDirName", "") ?: ""
+        set(v) { prefs().edit().putString("downloadDirName", v).apply() }
+
     private fun prefs() = appContext!!.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
     @Synchronized

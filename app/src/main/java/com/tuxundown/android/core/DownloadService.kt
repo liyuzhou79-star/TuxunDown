@@ -57,6 +57,7 @@ class DownloadService : Service() {
             DownloadCenter.registerEngine(task, engine)
             try {
                 engine.run()
+                if (task.status == TaskStatus.DONE) exportFinished(task)
             } finally {
                 DownloadCenter.unregisterEngine(task)
                 store.save()
@@ -64,6 +65,30 @@ class DownloadService : Service() {
         }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    /**
+     * Move a finished file out of the private scratch area into the
+     * user's download folder under its real name. On failure the file
+     * stays inside the app and the task note says why.
+     */
+    private fun exportFinished(task: TaskRecord) {
+        val store = DownloadCenter.store
+        val src = store.fileOf(task)
+        if (!src.exists()) return
+        val name = store.finalName(task)
+        try {
+            val out = FileExporter.export(this, src, name)
+            task.savedUri = out.uri.toString()
+            task.savedName = out.displayName
+            task.note = "已保存到${out.where}：${out.displayName}"
+            src.delete()
+            notifyUpdate("下载完成：${out.displayName}", 100)
+        } catch (e: Exception) {
+            task.note = "下载完成，但保存到目标文件夹失败（${e.message ?: "未知错误"}），" +
+                "文件暂存在应用内，可用「打开/分享」取出，或在设置里重选下载文件夹后重试。"
+        }
+        store.save()
     }
 
     private fun buildNotification(text: String, pct: Int): Notification {

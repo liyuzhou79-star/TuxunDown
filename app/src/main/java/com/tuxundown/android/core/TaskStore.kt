@@ -23,9 +23,14 @@ class TaskRecord(
     var note: String = "",
     var error: String = "",
     var createdAt: Long = System.currentTimeMillis(),
+    /** Where the finished file was exported to (content Uri string), "" if not yet. */
+    var savedUri: String = "",
+    /** Display name of the exported file (real file name, not the internal id). */
+    var savedName: String = "",
     // Live-only fields (not persisted):
     @Transient var downloaded: Long = 0,
     @Transient var speedBps: Long = 0,
+    @Transient val speedHistory: MutableList<Long> = mutableListOf(),
 ) {
     val progress: Float
         get() = if (totalSize > 0) (downloaded.toFloat() / totalSize).coerceIn(0f, 1f) else 0f
@@ -65,6 +70,8 @@ class TaskStore(context: Context) {
                     note = o.optString("note"),
                     error = o.optString("error"),
                     createdAt = o.optLong("createdAt", 0),
+                    savedUri = o.optString("savedUri"),
+                    savedName = o.optString("savedName"),
                 )
                 val h = o.optJSONObject("headers")
                 if (h != null) {
@@ -102,6 +109,8 @@ class TaskStore(context: Context) {
             o.put("note", t.note)
             o.put("error", t.error)
             o.put("createdAt", t.createdAt)
+            o.put("savedUri", t.savedUri)
+            o.put("savedName", t.savedName)
             val h = JSONObject()
             for ((k, v) in t.headers) h.put(k, v)
             o.put("headers", h)
