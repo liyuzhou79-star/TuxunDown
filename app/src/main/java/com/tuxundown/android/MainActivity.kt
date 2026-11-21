@@ -5061,7 +5061,6 @@ fun TaskCard(
  * the time window labelled along the bottom. History is
  * right-aligned in a 90-second window.
  */
-@androidx.compose.runtime.Composable
 /**
  * v2.7: last-7-days download volume bars, hand-drawn in the
  * same visual language as [SpeedChart] (same background, grid,
@@ -5125,6 +5124,7 @@ fun WeekChart(days: List<DaySeries.Day>, modifier: Modifier = Modifier) {
     }
 }
 
+@androidx.compose.runtime.Composable
 fun SpeedChart(history: List<Long>, modifier: Modifier = Modifier) {
     val dark = isSystemInDarkTheme()
     val lineColor = WinPalette.ChartGreen
