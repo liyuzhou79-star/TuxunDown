@@ -107,6 +107,7 @@ import com.tuxundown.android.core.DownloadedFiles
 import com.tuxundown.android.core.Format
 import com.tuxundown.android.core.FtpClient
 import com.tuxundown.android.core.LinkExtract
+import com.tuxundown.android.core.LinkSchemes
 import com.tuxundown.android.core.QuietHours
 import com.tuxundown.android.core.ThunderLink
 import com.tuxundown.android.core.ProxySettings
@@ -160,7 +161,11 @@ class MainActivity : ComponentActivity() {
             }
         }
         if (intent?.action == Intent.ACTION_SEND) {
-            SharedLinkState.text = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim() ?: ""
+            // v2.8 audit round 14: shared text is another app's
+            // input — trim AND cap it before it can land in the
+            // add dialog / link extractor (see LinkSchemes).
+            SharedLinkState.text =
+                LinkSchemes.sanitizeSharedText(intent.getStringExtra(Intent.EXTRA_TEXT))
         }
         // v2.7: long-press icon shortcuts land here (and in
         // onNewIntent while running); DownApp consumes the
@@ -239,7 +244,7 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         if (intent.action == Intent.ACTION_SEND) {
             SharedLinkState.text =
-                intent.getStringExtra(Intent.EXTRA_TEXT)?.trim() ?: ""
+                LinkSchemes.sanitizeSharedText(intent.getStringExtra(Intent.EXTRA_TEXT))
         }
         if (intent.action == ShortcutActions.NEW_DOWNLOAD ||
             intent.action == ShortcutActions.OPEN_SNIFF
@@ -699,6 +704,20 @@ fun DownApp() {
         mirrors: List<String> = emptyList(),
         daily: Boolean = false,
     ): Boolean {
+        // v2.8 audit round 14: the intake gate. Only http /
+        // https / ftp links may become tasks at all — a file://,
+        // content:// or intent:// string arriving via a share, a
+        // sniffed page or a paste is refused HERE, in plain
+        // words, instead of failing later inside the engine
+        // (see LinkSchemes).
+        if (!LinkSchemes.isSupported(url)) {
+            Toast.makeText(
+                context,
+                "这个链接的格式不支持：只支持 http、https、ftp 开头的下载链接",
+                Toast.LENGTH_LONG,
+            ).show()
+            return false
+        }
         // Audit A2 (UI side): the same URL twice would produce two
         // records fighting over one file name — refuse politely.
         val dup = store.tasks.any {

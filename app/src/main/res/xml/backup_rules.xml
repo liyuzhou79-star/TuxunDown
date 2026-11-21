@@ -18,6 +18,10 @@
     <exclude domain="sharedpref" path="settings.xml" />
     <exclude domain="file" path="tasks.json" />
     <exclude domain="file" path="tasks.json.bak" />
+    <!-- v2.8 audit round 14: the atomic-save temp file holds the
+         same content as tasks.json for the milliseconds of a
+         flush — a backup snapshot must not catch it either. -->
+    <exclude domain="file" path="tasks.json.tmp" />
     <exclude domain="file" path="last_crash.txt" />
     <exclude domain="file" path="downloads/" />
 </full-backup-content>

@@ -212,7 +212,23 @@ class SniffActivity : Activity() {
             runCatching { web.restoreState(it) }.getOrNull()
         }
         if (restored == null && startUrl.isNotBlank()) {
-            runCatching { web.loadUrl(startUrl) }
+            // v2.8 audit round 14: loadUrl() does NOT pass
+            // through shouldOverrideUrlLoading — the navigation
+            // gate below never sees the FIRST load. Gate it
+            // here: only real web pages may open (an ftp://
+            // task URL or a javascript:/file: string typed into
+            // the add dialog gets a plain explanation instead
+            // of a WebView error page or worse).
+            val scheme = startUrl.substringBefore(':').lowercase()
+            if (scheme == "http" || scheme == "https") {
+                runCatching { web.loadUrl(startUrl) }
+            } else {
+                Toast.makeText(
+                    this,
+                    "内置浏览器只能打开 http / https 网页，这个链接（$scheme）打不开",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
         }
     }
 
@@ -246,6 +262,14 @@ class SniffActivity : Activity() {
 
     /** Create a task unless the same link is already active. */
     private fun createTask(url: String, headers: Map<String, String> = emptyMap()): Boolean {
+        // v2.8 audit round 14: same intake gate as the home
+        // screen (see LinkSchemes) — a page can hand the
+        // download listener or the long-press handler an
+        // absolute file:// / content:// URL, and isDownloadableUrl
+        // above already filters those two call sites; this is
+        // the funnel every path ends in, so the rule sits here
+        // too, in depth.
+        if (!com.tuxundown.android.core.LinkSchemes.isSupported(url)) return false
         val dup = DownloadCenter.store.tasks.any {
             it.url == url && it.status != TaskStatus.DONE && it.status != TaskStatus.FAILED
         }
