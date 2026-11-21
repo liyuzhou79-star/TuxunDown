@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
+    <!-- v2.0 audit (round 6): FileProvider is only ever used for
+         the legacy private scratch files under filesDir/downloads
+         (open/share fallbacks in MainActivity). The old
+         cache-path "." entry exposed the WHOLE cache directory
+         and nothing ever shared from there — removed, so the
+         provider's reach is exactly the one directory in use. -->
     <files-path name="downloads" path="downloads/" />
-    <cache-path name="cache" path="." />
 </paths>

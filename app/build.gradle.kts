@@ -12,8 +12,8 @@ android {
         applicationId = "com.tuxundown.android"
         minSdk = 29
         targetSdk = 35
-        versionCode = 10
-        versionName = "1.9.0"
+        versionCode = 11
+        versionName = "2.0.0"
     }
 
     // Release signing is injected by CI from repository secrets (the
@@ -72,6 +72,16 @@ android {
     buildFeatures {
         compose = true
     }
+    // v2.0.0 slimming: DebugProbesKt.bin is kotlinx-coroutines'
+    // debug-agent hook table. It is only ever read when a debugger
+    // attaches with the coroutines agent; production code paths
+    // never touch it, and excluding it is the library's own
+    // documented packaging advice.
+    packaging {
+        resources {
+            excludes += "DebugProbesKt.bin"
+        }
+    }
 }
 
 dependencies {
@@ -90,7 +100,10 @@ dependencies {
     // re-measured every version.
     implementation("com.google.zxing:core:3.5.3")
     debugImplementation("androidx.compose.ui:ui-tooling")
-    implementation("androidx.compose.ui:ui-tooling-preview")
+    // v2.0.0 slimming: ui-tooling-preview used to be an
+    // implementation dependency, but no source file uses @Preview
+    // (verified by grep — the only "Preview" hits are camera
+    // preview APIs in ScanActivity), so it shipped dead weight.
     testImplementation("junit:junit:4.13.2")
     // Real org.json for JVM unit tests (the android.jar stub throws);
     // test-only, never shipped in the APK.

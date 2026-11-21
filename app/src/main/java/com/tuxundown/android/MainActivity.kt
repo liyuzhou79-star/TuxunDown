@@ -22,6 +22,9 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -37,6 +40,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -75,6 +79,8 @@ import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
@@ -96,6 +102,7 @@ import com.tuxundown.android.core.SpeedTest
 import com.tuxundown.android.core.TaskHeaders
 import com.tuxundown.android.core.TaskRecord
 import com.tuxundown.android.core.TaskStatus
+import com.tuxundown.android.core.UpdateCheck
 import com.tuxundown.android.core.UserAgents
 import com.tuxundown.android.sniff.LinkRouter
 import com.tuxundown.android.sniff.SizeProbe
@@ -357,7 +364,7 @@ fun DownApp() {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "1.9.0"
+        }.getOrNull() ?: "2.0.0"
     }
     var showGuide by remember {
         mutableStateOf(DownloadCenter.guideSeenVersion != appVersion)
@@ -981,6 +988,7 @@ fun DownApp() {
                 }
             },
             onShowGuide = { showGuide = true },
+            onShowHelp = { screen = "help" },
             onExport = { exportLauncher.launch("tuxundown-backup.json") },
             onImport = { importLauncher.launch(arrayOf("application/json", "text/plain")) },
             onBack = { screen = "home" },
@@ -992,6 +1000,8 @@ fun DownApp() {
         )
     } else if (screen == "files") {
         FilesScreen(onBack = { screen = "home" })
+    } else if (screen == "help") {
+        HelpScreen(onBack = { screen = "settings" })
     } else if (screen == "speedtest") {
         SpeedTestScreen(onBack = { screen = "stats" })
     } else {
@@ -1072,7 +1082,10 @@ fun DownApp() {
             // ---- tabs (v1.4 item 2) ----
             item(key = "tabs") {
                 Row(
-                    Modifier.fillMaxWidth(),
+                    // v2.0: sideways-scrollable so max font scale
+                    // cannot push the last tab off the screen.
+                    Modifier.fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     val tabs = listOf(0 to "全部", 1 to "下载中", 2 to "已完成", 3 to "失败")
@@ -1098,7 +1111,8 @@ fun DownApp() {
                             modifier = Modifier.fillMaxWidth(),
                         )
                         Row(
-                            Modifier.fillMaxWidth().padding(top = 6.dp),
+                            Modifier.fillMaxWidth().padding(top = 6.dp)
+                                .horizontalScroll(rememberScrollState()),
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
@@ -1304,7 +1318,8 @@ fun DownApp() {
                     }
                     if (scheduleMode == 0) {
                         Row(
-                            Modifier.padding(top = 6.dp),
+                            Modifier.padding(top = 6.dp)
+                                .horizontalScroll(rememberScrollState()),
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
                             val opts = listOf(0 to "立即", 30 to "30分钟后", 60 to "1小时后", 180 to "3小时后")
@@ -1432,7 +1447,13 @@ fun DownApp() {
             text = {
                 Column {
                     // ---- filter + sort (v1.4 item 15) ----
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    // v2.0: both rows scroll sideways — a page can
+                    // have many resource kinds, and at max font
+                    // scale even the sort row outgrows the dialog.
+                    Row(
+                        Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
                         if (sniffKind.isBlank()) {
                             Button(onClick = { }) { Text("全部") }
                         } else {
@@ -1447,7 +1468,8 @@ fun DownApp() {
                         }
                     }
                     Row(
-                        Modifier.padding(top = 6.dp),
+                        Modifier.padding(top = 6.dp)
+                            .horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -1464,7 +1486,10 @@ fun DownApp() {
                                 OutlinedButton(onClick = { sniffSort = m }) { Text(label) }
                             }
                         }
-                        Spacer(Modifier.weight(1f))
+                        // Fixed spacer, not weight: inside a
+                        // horizontally scrolling row a weighted
+                        // spacer has no bounded width to fill.
+                        Spacer(Modifier.size(8.dp))
                         TextButton(onClick = {
                             val all = shownSniff.map { it.url }.toSet()
                             sniffChecked = if (all.all { it in sniffChecked }) {
@@ -2426,6 +2451,83 @@ fun SpeedTestScreen(onBack: () -> Unit) {
 }
 
 /**
+ * Help center (v2.0): fully offline FAQ. Every answer is 3–5
+ * plain-language sentences, no jargon without an explanation,
+ * and the speed claims follow the project's honesty rule —
+ * where a server or the user's own bandwidth is the ceiling,
+ * the text says so instead of promising miracles.
+ */
+@androidx.compose.runtime.Composable
+fun HelpScreen(onBack: () -> Unit) {
+    val faqs = listOf(
+        "为什么这里下载比浏览器快？" to
+            "浏览器下载一个文件通常只开一条连接，服务器对每条连接单独限速时，它就只能跑那个速度。\n" +
+            "TuxunDown 会把文件切成很多小块，开多条连接同时下，最后再拼回成一个完整文件。\n" +
+            "每条连接都拿到一份限速的话，总速度就能叠上去，所以在很多服务器上会比浏览器快几倍甚至十几倍。\n" +
+            "App 还会自动试探开多少条连接最合适：从少到多加，加上去速度不再涨就停下来，不瞎开。",
+        "为什么有时候就是快不了？" to
+            "有些服务器是按总量限速的：不管你开几条连接，加起来就给这么多，这种情况谁来下都一样快不了。\n" +
+            "还有你的宽带本身就是上限，比如家里宽带总共就这么快，浏览器已经跑满了，这里也变不出更多。\n" +
+            "遇到这两种情况，任务卡片上会明说原因，不会假装还在提速。\n" +
+            "主页「统计」里的测速页能测你现在的网络到底能跑多快，可以拿它当参考。",
+        "「单线程」是什么意思？" to
+            "分片多线程下载有个前提：服务器得支持「从中间开始下」（专业说法叫 Range 请求）。\n" +
+            "有些老服务器不支持，文件只能从头一条道下到底，这就叫单线程，速度跟浏览器差不多。\n" +
+            "这不是出错，任务卡片上会写明为什么退回单线程。\n" +
+            "单线程也一样支持暂停和续传，只是不能靠加连接提速。",
+        "双通道要什么条件？" to
+            "双通道是让 WiFi 和手机流量两条网络一起下载同一个文件，两边速度叠加。\n" +
+            "条件是：手机流量开着、有信号，而且系统愿意把流量网络分配给 App 用。\n" +
+            "在设置里打开开关后，如果当前环境拿不到流量网络，任务卡片上会明说「双通道没开成」和原因，不会假装开着。\n" +
+            "注意它会实实在在消耗流量；另外和「仅 WiFi 下载」同时开时，以「仅 WiFi」为准，双通道不启用。",
+        "流量保护是什么？" to
+            "这是防手滑烧流量的：在设置里选一个大小门槛（比如 200 MB），用流量下载超过这个大小的文件时，任务会先暂停并写明原因。\n" +
+            "你确认就是这个文件、愿意花流量的话，在任务卡片上点一次「继续」就行，这一次确认只对这一个任务有效。\n" +
+            "在 WiFi 下不受这个限制；门槛设为「关」就完全不拦。",
+        "下好的文件在哪？" to
+            "默认都在手机公共的「下载」目录里，就是文件管理器打开就能看到的那个下载文件夹的第一层，不藏在 App 自己的角落里。\n" +
+            "没下完的文件也在那里，文件名后面带 .part，下完会自动改成正式名字。\n" +
+            "如果你在设置里改过下载目录，那就是你选的那个文件夹。\n" +
+            "App 里主页的「已下载文件」页也能看到全部下好的文件，可以直接打开、分享、删除。",
+        "暂停、关机以后，续传靠什么接着下？" to
+            "文件被切成很多小块，每下完一块都会记下来：哪块好了、哪块还没下，这个记录存在手机里。\n" +
+            "所以暂停、退出 App、甚至关机重启，再点「继续」都是从没下完的地方接着下，不用从头来。\n" +
+            "继续之前还会跟服务器对一下文件的「身份证」（大小和更新标记），确认服务器上的文件没换过才敢接着拼。\n" +
+            "万一文件被服务器换掉了，会从头重下并在卡片上说明，不会把两个文件拼错。",
+    )
+    LazyColumn(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item(key = "h-head") {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onBack) { Text("← 返回") }
+                Text(
+                    "帮助中心",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
+        item(key = "h-intro") {
+            Text(
+                "下面是大家最常问的几件事，全是离线内容，不用联网也能看。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        items(faqs, key = { it.first }) { (q, a) ->
+            SettingsGroup(q) {
+                Text(a, style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+    }
+}
+
+/**
  * Settings screen (v1.4 item 20): grouped sections on their own
  * scrolling page — 下载 / 提示 / 引导与数据 / 关于 — instead of one
  * giant card squeezed onto the home page.
@@ -2471,11 +2573,65 @@ fun SettingsScreen(
     batteryOk: Boolean,
     onOpenBattery: () -> Unit,
     onShowGuide: () -> Unit,
+    onShowHelp: () -> Unit,
     onExport: () -> Unit,
     onImport: () -> Unit,
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
+    // v2.0: in-app update check state (About section). The check
+    // runs ONLY from the button below — UpdateCheck is never
+    // called on launch or in the background.
+    var updateBusy by remember { mutableStateOf(false) }
+    var updateText by remember { mutableStateOf("") }
+    var updateLatest by remember { mutableStateOf<UpdateCheck.Latest?>(null) }
+    fun startUpdateCheck() {
+        if (updateBusy) return
+        updateBusy = true
+        updateText = "正在检查…"
+        updateLatest = null
+        Thread {
+            val result = UpdateCheck.fetchLatest()
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                updateBusy = false
+                when (result) {
+                    is UpdateCheck.Result.Found -> {
+                        val l = result.latest
+                        if (UpdateCheck.isNewer(l.version, version)) {
+                            updateLatest = l
+                            updateText = "发现新版本 v${l.version}（你现在是 v$version）"
+                        } else if (l.version == version) {
+                            updateText = "已经是最新版本（v$version），不用更新。"
+                        } else {
+                            updateText = "已经是最新：发布页最新正式版是 v${l.version}，" +
+                                "你现在用的 v$version 比它还新。"
+                        }
+                    }
+                    is UpdateCheck.Result.Failed -> updateText = result.reason
+                }
+            }
+        }.start()
+    }
+    fun downloadUpdate() {
+        val l = updateLatest ?: return
+        val dup = DownloadCenter.store.tasks.any {
+            it.url == l.apkUrl && it.status != TaskStatus.DONE &&
+                it.status != TaskStatus.FAILED
+        }
+        if (dup) {
+            Toast.makeText(context, "这个更新已经在任务列表里了", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val t = DownloadCenter.newTask(l.apkUrl)
+        t.fileName = l.apkName
+        DownloadCenter.store.add(t)
+        DownloadCenter.enqueue(t)
+        updateLatest = null
+        updateText = "更新已开始下载：回到主页看进度，下完点任务卡上的「安装」就能升级。"
+        Toast.makeText(
+            context, "更新已开始下载，下完在任务卡上点「安装」", Toast.LENGTH_LONG
+        ).show()
+    }
     // v1.7: custom-UA text field + orphan .part scan state.
     var uaCustom by remember(userAgent) { mutableStateOf(userAgent) }
     var orphanScan by remember { mutableStateOf<List<PublicStorage.OrphanPart>?>(null) }
@@ -2810,6 +2966,22 @@ fun SettingsScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
+                        Text("帮助中心")
+                        Text(
+                            "常见问题：为什么快、文件在哪、续传怎么回事，都在这儿（离线可看）",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    OutlinedButton(onClick = onShowHelp) { Text("常见问题") }
+                }
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
                         Text("新手引导")
                         Text(
                             "每个新版本首次打开都会自动播放一次",
@@ -2866,16 +3038,67 @@ fun SettingsScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(8.dp))
-                OutlinedButton(onClick = {
-                    runCatching {
-                        context.startActivity(
-                            Intent(
-                                Intent.ACTION_VIEW,
-                                Uri.parse("https://github.com/liyuzhou79-star/TuxunDown/releases"),
+                // v2.0: the update check is WIRED now — it asks
+                // GitHub for the latest formal release, compares
+                // versions in-app, and can download the new APK
+                // with the app's own engine. It runs only when
+                // tapped (see UpdateCheck's doc).
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { startUpdateCheck() },
+                        enabled = !updateBusy,
+                    ) { Text(if (updateBusy) "检查中…" else "检查更新") }
+                    OutlinedButton(onClick = {
+                        runCatching {
+                            context.startActivity(
+                                Intent(
+                                    Intent.ACTION_VIEW,
+                                    Uri.parse(UpdateCheck.RELEASES_PAGE_URL),
+                                )
                             )
+                        }
+                    }) { Text("打开 GitHub 发布页") }
+                }
+                if (updateText.isNotBlank()) {
+                    Text(
+                        updateText,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+                val l = updateLatest
+                if (l != null) {
+                    if (l.notes.isNotBlank()) {
+                        Text(
+                            "更新说明：",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                        Text(
+                            l.notes,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 2.dp),
                         )
                     }
-                }) { Text("检查更新（打开 GitHub 发布页）") }
+                    Button(
+                        onClick = { downloadUpdate() },
+                        modifier = Modifier.padding(top = 10.dp),
+                    ) { Text("下载更新（${l.apkName}）") }
+                    Text(
+                        "用本 App 自己的引擎下载，存到公共「下载」目录；" +
+                            "下完回到主页，点任务卡上的「安装」完成升级，任务记录都保留。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+                Text(
+                    "检查更新只在你点按钮时联网查一次，平时不联网、不自动下载。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
             }
         }
     }
@@ -2966,8 +3189,12 @@ fun SettingsGroup(title: String, content: @androidx.compose.runtime.Composable (
 
 @androidx.compose.runtime.Composable
 fun ChipRow(options: List<Pair<Int, String>>, selected: Int, onPick: (Int) -> Unit) {
+    // v2.0 font-scale fix: at the system maximum font scale the
+    // chips outgrow a narrow screen; the row scrolls sideways
+    // instead of clipping the last options off-screen.
     Row(
-        Modifier.fillMaxWidth().padding(top = 6.dp),
+        Modifier.fillMaxWidth().padding(top = 6.dp)
+            .horizontalScroll(rememberScrollState()),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         for ((v, label) in options) {
@@ -2994,13 +3221,12 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 多了「已下载文件」页（主页进入）：下好的文件按时间/大小排好，打开、分享、删除都在这儿；删记录和删文件是两个分开的动作，不会误删文件\n" +
-            "· 设置里多了下载代理（HTTP / SOCKS5）：下载和嗅探都走它，任务卡上会标明；代理连不上会停下报错，绝不偷偷改走直连\n" +
-            "· 每个任务能改请求头了：卡片详情里查看/修改它带的 Cookie、Referer 等，改完续传时生效；导出备份会自动剔除 Cookie 和代理密码\n" +
-            "· 嗅探结果更清爽：统计、广告、小图片这类噪音默认折叠（可展开）；名字和大小都一样的疑似重复资源会标出来\n" +
-            "· 内置浏览器里长按某个链接，可以直接把这个链接丢给 TuxunDown 下载\n" +
-            "· 嗅探结果关掉不再丢：主页有「上次嗅探结果」，点开接着选，不用重新嗅探\n" +
-            "· 又过了一轮安全审计：导入备份加了大小上限和内容校验（坏文件搞不崩 App），往已打开的 App 分享链接也不会再开出第二个界面",
+            "· 「检查更新」真的接通了：设置 → 关于里点一下，就能查有没有新正式版，有的话直接用本 App 下载更新包，下完点「安装」完成升级（只在你手点时联网，平时不查）\n" +
+            "· 多了帮助中心（设置 → 引导与数据 → 常见问题）：为什么快、为什么有时快不了、单线程是什么意思、双通道条件、文件在哪、续传原理，全是离线大白话\n" +
+            "· 这一版把从 1.2 到 1.9 的全部功能逐项回归自检了一遍，入口、接线、设置是否真的生效都核对过，自检表随版本存档\n" +
+            "· 瘦身：安装包比上一版更小了（压缩方式和无用内容都清理过），功能一个没砍\n" +
+            "· 大字体更友好了：系统字体调到最大档时，主要页面不再溢出重叠，按钮行能横着滑；卡片上的暂停/继续/删除按钮补了无障碍说明\n" +
+            "· 又过了一轮发布路径审计：签名配置、备份在全新安装上的恢复、导出文件的敏感信息、文件分享的授权范围都复查过",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
             "· 文件直链 → 直接开始多线程下载，还能预先改好保存文件名\n" +
@@ -3042,17 +3268,27 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
                     .clip(RoundedCornerShape(14.dp)),
             )
             Spacer(Modifier.height(16.dp))
-            Text(
-                pages[page].first,
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
-            )
-            Spacer(Modifier.height(12.dp))
-            Text(
-                pages[page].second,
-                style = MaterialTheme.typography.bodyLarge,
-            )
-            Spacer(Modifier.weight(1f))
+            // v2.0 font-scale fix: the title + body live in a
+            // SCROLLABLE area now. At the system maximum font
+            // scale the long pages (especially 本版更新） used to
+            // push the dots and the navigation buttons off the
+            // bottom of small screens.
+            Column(
+                Modifier
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                Text(
+                    pages[page].first,
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    pages[page].second,
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+            }
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.Center,
@@ -3270,13 +3506,18 @@ fun CheckGlyph(color: Color, modifier: Modifier = Modifier) {
 @androidx.compose.runtime.Composable
 fun InfoRow(label: String, value: String) {
     Row(Modifier.fillMaxWidth()) {
+        // v2.0 font-scale fix: the label used to have a FIXED
+        // 20.dp height — at the system maximum font scale
+        // bodyMedium needs more than that and the text clipped.
+        // Width-only now (a touch wider, since scaled glyphs are
+        // wider too) and the height wraps with the text.
         Text(
             label,
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(width = 76.dp, height = 20.dp),
+            modifier = Modifier.width(88.dp),
         )
-        Text(value, style = MaterialTheme.typography.bodyMedium)
+        Text(value, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
     }
 }
 
@@ -3457,11 +3698,21 @@ fun TaskCard(
                 when (task.status) {
                     TaskStatus.RUNNING ->
                         IconButton(onClick = onPause) {
-                            PauseGlyph(MaterialTheme.colorScheme.onSurface)
+                            // v2.0 a11y: the glyphs are bare Canvas
+                            // draws — without a content description
+                            // a screen reader finds an unnamed
+                            // button here.
+                            PauseGlyph(
+                                MaterialTheme.colorScheme.onSurface,
+                                Modifier.semantics { contentDescription = "暂停" },
+                            )
                         }
                     TaskStatus.PAUSED, TaskStatus.FAILED ->
                         IconButton(onClick = onResume) {
-                            PlayGlyph(MaterialTheme.colorScheme.onSurface)
+                            PlayGlyph(
+                                MaterialTheme.colorScheme.onSurface,
+                                Modifier.semantics { contentDescription = "继续" },
+                            )
                         }
                     TaskStatus.DONE ->
                         Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
@@ -3470,7 +3721,10 @@ fun TaskCard(
                     TaskStatus.QUEUED -> Spacer(Modifier.size(48.dp))
                 }
                 IconButton(onClick = onDelete) {
-                    CloseGlyph(MaterialTheme.colorScheme.onSurface)
+                    CloseGlyph(
+                        MaterialTheme.colorScheme.onSurface,
+                        Modifier.semantics { contentDescription = "删除任务" },
+                    )
                 }
             }
 
