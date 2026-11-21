@@ -21,7 +21,13 @@ import kotlin.math.max
  *   for how split parts share the chunk's single bitset bit).
  * - Auto thread probing: starts low, then doubles 4 -> 8 -> 16 -> 32
  *   every 2 s while the measured speed keeps growing by more than 10%;
- *   stops at the first plateau.
+ *   stops at the first plateau. v2.3 adds mid-download DYNAMIC
+ *   SCALING on top (see [ThreadScaler]): the settled count is not
+ *   final — the scaler keeps growing it while the speed responds
+ *   and reclaims connections the flat/declining line no longer
+ *   rewards, with verdicts and learned bounds against flapping.
+ *   Probing decides the start, scaling manages the middle, and
+ *   HostMemory stores the scaler's final count as the optimum.
  * - Honest fallback: if the server does not support Range, the task is
  *   downloaded in a single stream and [TaskRecord.note] says so. If more
  *   threads stop helping (speed plateau at the first step), the note
@@ -77,9 +83,11 @@ class DownloadEngine(
      *  connection. FTP runs ignore it (documented in settings). */
     private val proxySettings: ProxySettings = ProxySettings(),
 ) {
-    /** False once the thread count is settled (hint used, plateau
-     *  reached or ceiling hit): the sampler stops growing workers. */
-    @Volatile private var probingActive = true
+    /** v2.3: owns the worker count for the segmented run — the
+     *  opening ladder, then steady-state dynamic scaling (see
+     *  [ThreadScaler]). Created in runSegmented, read by the
+     *  sampler (drives it) and by workers (surplus exit). */
+    @Volatile private var scaler: ThreadScaler? = null
     /** Seekable destination in the public download folder, opened after probing. */
     private lateinit var target: DownloadTarget
     @Volatile var paused = false
@@ -532,8 +540,6 @@ class DownloadEngine(
         val sampler = Thread {
             var lastBytes = downloadedBytes.get()
             var lastTime = System.currentTimeMillis()
-            var lastSpeed = 0L
-            var plateauSteps = 0
             var ticks = 0
             // v1.5: fixed-period ticks. The old sleep(1000)+work loop
             // drifted long, so the chart's "90 samples = 90 seconds"
@@ -582,29 +588,37 @@ class DownloadEngine(
                         }
                     }
                 }
-                // Every 2 s decide whether more threads still help.
+                // Every 2 s the ThreadScaler re-decides the worker
+                // count (v2.3): opening ladder first, then steady
+                // grow/shrink with verdicts and learned bounds.
                 if (ticks % 2 == 0) {
-                    val cur = task.speedBps
-                    if (probingActive && task.threads < MAX_THREADS && nextChunk.get() < count) {
-                        if (lastSpeed == 0L || cur > lastSpeed * 11 / 10) {
-                            val want = (task.threads * 2).coerceAtMost(MAX_THREADS)
-                            val add = want - activeWorkers.get()
-                            if (add > 0) repeat(add) { spawnWorker(count) }
-                            task.threads = want
-                            plateauSteps = 0
-                            if (want >= MAX_THREADS) probingActive = false
-                        } else {
-                            plateauSteps++
-                            // First plateau = settled (the class doc
-                            // always promised this; now it also stops
-                            // the controller from re-checking forever).
-                            probingActive = false
-                            if (plateauSteps >= 1 && task.note.isBlank() && task.threads <= 8) {
-                                task.note = "加线程后速度不再提升，服务器可能按 IP 总限速，已用最优线程数。"
-                            }
+                    val sc = scaler
+                    if (sc != null) {
+                        val wasProbing = sc.probing
+                        val chunksLeft = nextChunk.get() < count
+                        val anyWork = chunksLeft ||
+                            synchronized(activeLock) { active.isNotEmpty() }
+                        val newTarget = sc.onEval(task.speedBps, chunksLeft, anyWork)
+                        // The ladder just settled at a low count:
+                        // more threads stopped helping (the honest
+                        // per-IP-throttling note, as before v2.3).
+                        if (wasProbing && !sc.probing && chunksLeft &&
+                            newTarget <= 8 && task.note.isBlank()
+                        ) {
+                            task.note = "加线程后速度不再提升，服务器可能按 IP 总限速，已用最优线程数。"
+                        }
+                        // task.threads IS the card's live thread
+                        // display and, at DONE, the value HostMemory
+                        // remembers — keep it equal to the target.
+                        task.threads = newTarget
+                        // A higher target spawns at once; a lower
+                        // one is honoured by surplus workers exiting
+                        // at their next chunk boundary (workerLoop).
+                        val deficit = newTarget - activeWorkers.get()
+                        if (deficit > 0 && chunksLeft) {
+                            repeat(deficit) { spawnWorker(count) }
                         }
                     }
-                    lastSpeed = cur
                     onSave()
                 }
                 lastBytes = bytes
@@ -633,12 +647,17 @@ class DownloadEngine(
             hint > 0 -> hint
             else -> 4
         }
-        probingActive = hint == 0
+        // v2.3: the scaler owns the count from here. A hint start
+        // skips the ladder (steady state from the first tick); any
+        // other start ladders first — a resume included, since the
+        // network may have changed since the count was persisted.
+        val sc = ThreadScaler(initial, probing = hint == 0)
+        scaler = sc
         if (hint > 0 && task.note.isBlank()) {
             task.note = "这个服务器上次的最佳线程数是 $hint，已直接用它下载，跳过试探。"
         }
-        task.threads = initial
-        repeat(initial) { spawnWorker(count) }
+        task.threads = sc.target
+        repeat(sc.target) { spawnWorker(count) }
 
         // Wait until all workers exit (done or paused). v2.2
         // power pass: JOIN the worker threads instead of polling
@@ -858,6 +877,15 @@ class DownloadEngine(
 
     private fun workerLoop(chunkCount: Int) {
         while (!stopped()) {
+            // v2.3 dynamic scaling: when the scaler has lowered the
+            // target below the live worker count, surplus workers
+            // leave HERE — between chunks, never mid-chunk — so a
+            // shrink can never tear a part in half or orphan its
+            // bytes. Two workers racing the check can dip the count
+            // one below target; the sampler's top-up corrects that
+            // within one evaluation (2 s).
+            val sc = scaler
+            if (sc != null && activeWorkers.get() > sc.target) return
             var index = nextChunk.getAndIncrement()
             if (index >= chunkCount) {
                 // No fresh chunks: endgame. Take a pre-cut tail if
