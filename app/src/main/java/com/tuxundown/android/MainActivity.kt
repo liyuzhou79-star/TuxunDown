@@ -414,8 +414,14 @@ fun DownApp(sharedUrl: String) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             // v1.3: home header icon kept deliberately small (36dp) —
             // the user asked twice for the icon NOT to fill its space.
+            // NOTE: never painterResource(R.mipmap.ic_launcher) here —
+            // on API 26+ that resolves to the adaptive-icon XML and
+            // painterResource throws IllegalArgumentException
+            // ("Only VectorDrawables and rasterized asset types are
+            // supported"), crashing the first frame. R.drawable.app_icon
+            // is a plain raster copy kept for in-app use (v1.3.0 hotfix).
             androidx.compose.foundation.Image(
-                painter = androidx.compose.ui.res.painterResource(R.mipmap.ic_launcher),
+                painter = androidx.compose.ui.res.painterResource(R.drawable.app_icon),
                 contentDescription = null,
                 modifier = Modifier
                     .size(36.dp)
@@ -817,7 +823,10 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
         ) {
             Spacer(Modifier.height(24.dp))
             androidx.compose.foundation.Image(
-                painter = androidx.compose.ui.res.painterResource(R.mipmap.ic_launcher),
+                // Raster copy, NOT R.mipmap.ic_launcher — see the
+                // header-icon note in DownApp (adaptive-icon XML
+                // crashes painterResource on API 26+).
+                painter = androidx.compose.ui.res.painterResource(R.drawable.app_icon),
                 contentDescription = null,
                 modifier = Modifier
                     .size(64.dp)
