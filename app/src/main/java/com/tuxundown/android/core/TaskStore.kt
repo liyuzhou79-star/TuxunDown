@@ -54,6 +54,21 @@ class TaskRecord(
     var autoRetriesUsed: Int = 0,
     /** The user explicitly accepted downloading this task on mobile data. */
     var mobileConfirmed: Boolean = false,
+    // ---- v1.6 additions ----
+    /** Extra mirror URLs of the SAME file (multi-source download).
+     *  Validated against the primary before use (see SourceCheck). */
+    var sources: MutableList<String> = mutableListOf(),
+    /** Bandwidth-budget weight: 0 = normal, 1 = boosted （插队）. */
+    var priority: Int = 0,
+    /** HLS (m3u8) stream task: segments merge into one .ts file. */
+    var isHls: Boolean = false,
+    /** HLS: segment count of the playlist the state below belongs to. */
+    var hlsTotalSegments: Int = 0,
+    /**
+     * HLS: segments already written to the target file. Writes are
+     * strictly in playlist order, so the done set is always a prefix.
+     */
+    var hlsDone: BooleanArray = BooleanArray(0),
     // Live-only fields (speedHistory IS persisted since v1.4 so a
     // finished task keeps its curve; the rest stay transient):
     @Transient var downloaded: Long = 0,
@@ -63,9 +78,20 @@ class TaskRecord(
     @Transient var speedBps: Long = 0,
     @Transient var peakBps: Long = 0,
     @Transient val speedHistory: MutableList<Long> = mutableListOf(),
+    /**
+     * HLS: byte size of each segment whose size is known (-1 =
+     * unknown), aligned with the playlist order. Persisted as CSV.
+     */
+    @Transient val hlsSizes: MutableList<Long> = mutableListOf(),
 ) {
     val progress: Float
-        get() = if (totalSize > 0) (downloaded.toFloat() / totalSize).coerceIn(0f, 1f) else 0f
+        get() = if (isHls && hlsTotalSegments > 0) {
+            // HLS totals are unknown until the last segment lands;
+            // the honest progress is the merged-segment fraction.
+            (hlsDone.count { it }.toFloat() / hlsTotalSegments).coerceIn(0f, 1f)
+        } else if (totalSize > 0) {
+            (downloaded.toFloat() / totalSize).coerceIn(0f, 1f)
+        } else 0f
 
     val etaSeconds: Long
         get() = if (totalSize > 0 && speedBps > 0 && downloaded < totalSize)
@@ -203,6 +229,14 @@ class TaskStore(context: Context) {
                 o.put("retryCount", t.retryCount)
                 o.put("autoRetriesUsed", t.autoRetriesUsed)
                 o.put("mobileConfirmed", t.mobileConfirmed)
+                o.put("sources", JSONArray(t.sources))
+                o.put("priority", t.priority)
+                o.put("isHls", t.isHls)
+                o.put("hlsTotalSegments", t.hlsTotalSegments)
+                o.put("hlsDone", ChunkPlanner.encodeBitset(t.hlsDone))
+                synchronized(t.hlsSizes) {
+                    o.put("hlsSizesCsv", t.hlsSizes.joinToString(","))
+                }
                 o.put("peakBps", t.peakBps)
                 val hist = JSONArray()
                 synchronized(t.speedHistory) { for (v in t.speedHistory) hist.put(v) }
@@ -247,7 +281,42 @@ class TaskStore(context: Context) {
                         retryCount = o.optInt("retryCount", 0),
                         autoRetriesUsed = o.optInt("autoRetriesUsed", 0),
                         mobileConfirmed = o.optBoolean("mobileConfirmed", false),
+                        priority = o.optInt("priority", 0),
+                        isHls = o.optBoolean("isHls", false),
+                        hlsTotalSegments = o.optInt("hlsTotalSegments", 0),
                     )
+                    val srcArr = o.optJSONArray("sources")
+                    if (srcArr != null) {
+                        for (j in 0 until srcArr.length()) {
+                            val s = srcArr.optString(j)
+                            if (s.isNotBlank() && s != t.url && s !in t.sources) {
+                                t.sources.add(s)
+                            }
+                        }
+                    }
+                    if (t.hlsTotalSegments > 0) {
+                        t.hlsDone = ChunkPlanner.decodeBitset(
+                            o.optString("hlsDone"), t.hlsTotalSegments
+                        )
+                        val csv = o.optString("hlsSizesCsv")
+                        if (csv.isNotBlank()) {
+                            synchronized(t.hlsSizes) {
+                                csv.split(',').forEach {
+                                    t.hlsSizes.add(it.trim().toLongOrNull() ?: -1)
+                                }
+                            }
+                        }
+                        // Downloaded bytes = the sizes of the written
+                        // (prefix) segments whose size was recorded.
+                        var sum = 0L
+                        for (j in t.hlsDone.indices) {
+                            if (t.hlsDone[j]) {
+                                val s = t.hlsSizes.getOrElse(j) { -1 }
+                                if (s > 0) sum += s
+                            }
+                        }
+                        t.downloaded = sum
+                    }
                     t.peakBps = o.optLong("peakBps", 0)
                     val h = o.optJSONObject("headers")
                     if (h != null) {

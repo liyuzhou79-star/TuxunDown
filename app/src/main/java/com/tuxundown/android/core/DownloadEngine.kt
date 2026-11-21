@@ -118,6 +118,12 @@ class DownloadEngine(
         if (task.startedAt == 0L) task.startedAt = System.currentTimeMillis()
         val runStartMs = System.currentTimeMillis()
         try {
+            // v1.6: HLS (m3u8) tasks take their own path — playlist,
+            // parallel segment downloads, in-order merge into one .ts.
+            if (task.isHls || isHlsUrl(task.url)) {
+                task.isHls = true
+                return runHls()
+            }
             if (task.totalSize <= 0 || task.fileName.isBlank()) probe()
             // Traffic protection can only judge once the size is known.
             if (!trafficGuard()) {
@@ -598,6 +604,284 @@ class DownloadEngine(
         ac.connection = null
     }
 
+    // ---------- HLS (m3u8) path (v1.6) ----------
+
+    /** Read a small text resource (playlist) with the usual headers. */
+    private fun fetchText(url: String, capBytes: Int = 4 * 1024 * 1024): String {
+        val c = openFollowingRedirects(url) { }
+        try {
+            if (c.responseCode !in 200..299) {
+                throw IllegalStateException("服务器返回 HTTP ${c.responseCode}")
+            }
+            c.inputStream.use { input ->
+                val out = java.io.ByteArrayOutputStream()
+                val buf = ByteArray(32 * 1024)
+                var total = 0
+                while (total < capBytes) {
+                    val n = input.read(buf, 0, minOf(buf.size, capBytes - total))
+                    if (n < 0) break
+                    out.write(buf, 0, n)
+                    total += n
+                }
+                return String(out.toByteArray(), Charsets.UTF_8)
+            }
+        } finally {
+            c.disconnect()
+        }
+    }
+
+    /** Read a whole segment (or a key) into memory, size-capped. */
+    private fun fetchBytes(url: String, capBytes: Int): ByteArray {
+        val c = openFollowingRedirects(url) { }
+        try {
+            if (c.responseCode !in 200..299) {
+                throw IllegalStateException("服务器返回 HTTP ${c.responseCode}")
+            }
+            c.inputStream.use { input ->
+                val out = java.io.ByteArrayOutputStream()
+                val buf = ByteArray(BUFFER_SIZE)
+                var total = 0
+                while (true) {
+                    val n = input.read(buf)
+                    if (n < 0) break
+                    total += n
+                    if (total > capBytes) throw IllegalStateException("分片太大了，已停下")
+                    out.write(buf, 0, n)
+                }
+                return out.toByteArray()
+            }
+        } finally {
+            c.disconnect()
+        }
+    }
+
+    /**
+     * Download an HLS stream: fetch the playlist (for a master
+     * playlist, the highest-bandwidth variant), download the TS
+     * segments a few at a time, and write them into the target
+     * STRICTLY in playlist order — the finished file is one plain
+     * .ts that any player can open. No transcoding (there is no
+     * ffmpeg here); the note on the card says exactly that.
+     *
+     * Resume granularity is one segment: written segments are a
+     * prefix of the playlist and are never re-downloaded; segments
+     * fetched but not yet written when a pause hits are fetched
+     * again next time (bounded by the prefetch window).
+     */
+    private fun runHls(): TaskStatus {
+        var parsed = Hls.parse(fetchText(task.url), task.url)
+        if (parsed is Hls.Playlist.Master) {
+            val variant = parsed.variants.maxByOrNull { it.bandwidth }
+                ?: parsed.variants.firstOrNull()
+                ?: throw IllegalStateException("播放列表里没有可选的清晰度")
+            parsed = Hls.parse(fetchText(variant.url), variant.url)
+        }
+        val media = parsed as? Hls.Playlist.Media
+            ?: throw IllegalStateException("播放列表格式不对，可能不是有效的 m3u8")
+        val segments = media.segments
+        if (segments.isEmpty()) throw IllegalStateException("播放列表里没有分片")
+        val badKey = segments.firstOrNull {
+            it.keyUri != null && it.keyMethod != "AES-128"
+        }
+        if (badKey != null) {
+            throw IllegalStateException(
+                "这个流媒体用了暂不支持的加密方式（${badKey.keyMethod}），下不了"
+            )
+        }
+
+        // Resume state: a playlist whose segment count changed is a
+        // different stream — old merged bytes are meaningless.
+        if (task.hlsTotalSegments != segments.size) {
+            if (task.hlsTotalSegments > 0) {
+                task.note = "播放列表变了（分片数和上次不一样），已重新开始合并。"
+            }
+            task.hlsTotalSegments = segments.size
+            task.hlsDone = BooleanArray(segments.size)
+            synchronized(task.hlsSizes) { task.hlsSizes.clear() }
+            task.downloaded = 0
+            downloadedBytes.set(0)
+        }
+        synchronized(task.hlsSizes) {
+            while (task.hlsSizes.size < segments.size) task.hlsSizes.add(-1)
+        }
+        // Rebuild the write cursor: written segments form a prefix.
+        var writeIndex = 0
+        var offset = 0L
+        while (writeIndex < segments.size && task.hlsDone.getOrElse(writeIndex) { false }) {
+            val s = synchronized(task.hlsSizes) { task.hlsSizes.getOrElse(writeIndex) { -1 } }
+            if (s < 0) break
+            offset += s
+            writeIndex++
+        }
+        if (task.hlsDone.drop(writeIndex).any { it }) {
+            // Inconsistent state (done segments beyond a gap): the
+            // only safe move is to merge again from the beginning.
+            task.hlsDone = BooleanArray(segments.size)
+            synchronized(task.hlsSizes) {
+                task.hlsSizes.clear()
+                while (task.hlsSizes.size < segments.size) task.hlsSizes.add(-1)
+            }
+            writeIndex = 0
+            offset = 0
+        }
+        downloadedBytes.set(offset)
+        task.downloaded = offset
+
+        if (task.fileName.isBlank() || task.fileName.endsWith(".m3u8", true)) {
+            task.fileName = hlsFileName(task.url)
+        }
+        target = targetProvider()
+        if (offset == 0L) target.truncate(0)
+
+        // Speed sampler on the same fixed 1 s grid as the other
+        // paths (guards included; the traffic guard cannot block
+        // here — an HLS total is unknowable before the last segment,
+        // and TrafficGuard never blocks unknown sizes).
+        val stopSampler = AtomicInteger(0)
+        val sampler = Thread {
+            var lastBytes = downloadedBytes.get()
+            var lastTime = System.currentTimeMillis()
+            var nextTick = System.currentTimeMillis() + 1000
+            while (stopSampler.get() == 0 && !stopped()) {
+                val waitMs = nextTick - System.currentTimeMillis()
+                try {
+                    Thread.sleep(waitMs.coerceIn(50, 1000))
+                } catch (e: InterruptedException) { break }
+                nextTick += 1000
+                if (nextTick < System.currentTimeMillis()) {
+                    nextTick = System.currentTimeMillis() + 1000
+                }
+                if (!networkGuard()) {
+                    netBlocked = true
+                    break
+                }
+                if (!trafficGuard()) {
+                    trafficBlocked = true
+                    break
+                }
+                val now = System.currentTimeMillis()
+                val bytes = downloadedBytes.get()
+                val dt = max(1L, now - lastTime)
+                val speed = (bytes - lastBytes) * 1000 / dt
+                task.speedBps = if (task.speedBps == 0L) speed else (task.speedBps * 3 + speed) / 4
+                recordSpeed(task.speedBps)
+                task.downloaded = bytes
+                lastBytes = bytes
+                lastTime = now
+                onProgress(task)
+            }
+        }
+        sampler.isDaemon = true
+        sampler.start()
+
+        val keyCache = mutableMapOf<String, ByteArray>()
+        fun segmentBytes(seg: Hls.Segment): ByteArray {
+            var lastError: Exception? = null
+            var attempt = 0
+            while (attempt < 3) {
+                attempt++
+                if (attempt > 1) task.retryCount++
+                if (stopped()) throw InterruptedException("stopped")
+                try {
+                    var data = fetchBytes(seg.url, MAX_SEGMENT_BYTES)
+                    val keyUri = seg.keyUri
+                    if (keyUri != null) {
+                        val key = synchronized(keyCache) {
+                            keyCache.getOrPut(keyUri) { fetchBytes(keyUri, 64) }
+                        }
+                        if (key.size != 16) {
+                            throw IllegalStateException("这个流媒体的密钥长度不对，下不了")
+                        }
+                        val iv = seg.keyIv ?: Hls.sequenceIv(seg.sequence)
+                        data = Hls.decryptAes128(data, key, iv)
+                    }
+                    return data
+                } catch (e: InterruptedException) {
+                    throw e
+                } catch (e: Exception) {
+                    lastError = e
+                    try { Thread.sleep(400L * attempt) } catch (_: InterruptedException) {
+                        throw InterruptedException("stopped")
+                    }
+                }
+            }
+            throw lastError ?: IllegalStateException("分片下载失败")
+        }
+
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(HLS_PARALLEL) { r ->
+            Thread(r).apply { isDaemon = true }
+        }
+        var failure: Exception? = null
+        try {
+            val futures = HashMap<Int, java.util.concurrent.Future<ByteArray>>()
+            var submitIndex = writeIndex
+            while (writeIndex < segments.size && !stopped()) {
+                while (submitIndex < segments.size &&
+                    submitIndex < writeIndex + HLS_WINDOW && !stopped()
+                ) {
+                    val idx = submitIndex
+                    futures[idx] = pool.submit(
+                        java.util.concurrent.Callable { segmentBytes(segments[idx]) }
+                    )
+                    submitIndex++
+                }
+                val f = futures.remove(writeIndex) ?: break
+                val data = try {
+                    f.get()
+                } catch (e: java.util.concurrent.ExecutionException) {
+                    throw (e.cause as? Exception) ?: e
+                }
+                target.writeAt(offset, data, 0, data.size)
+                offset += data.size
+                synchronized(task.hlsSizes) { task.hlsSizes[writeIndex] = data.size.toLong() }
+                task.hlsDone[writeIndex] = true
+                downloadedBytes.addAndGet(data.size.toLong())
+                task.downloaded = downloadedBytes.get()
+                limiter?.throttle(data.size)
+                writeIndex++
+                if (writeIndex % 4 == 0) onSave()
+            }
+        } catch (e: InterruptedException) {
+            if (!stopped()) failure = e
+        } catch (e: Exception) {
+            failure = e
+        } finally {
+            pool.shutdownNow()
+            stopSampler.set(1)
+            sampler.join(1500)
+            task.speedBps = 0
+            task.downloaded = downloadedBytes.get()
+        }
+        if (failure != null) throw failure
+        return when {
+            trafficBlocked -> TaskStatus.PAUSED.also {
+                task.status = it
+                task.note = "流量保护：网络已切到流量，已自动暂停省流量。回到 WiFi 点继续即可续传。"
+            }
+            netBlocked -> TaskStatus.PAUSED.also {
+                task.status = it
+                task.note = "网络已切到流量（已开启「仅 WiFi 下载」），已暂停；回到 WiFi 后点继续即可续传。"
+            }
+            paused -> TaskStatus.PAUSED.also { task.status = it }
+            writeIndex >= segments.size -> TaskStatus.DONE.also {
+                task.status = it
+                task.totalSize = downloadedBytes.get()
+                task.note = "HLS 流媒体：已把 ${segments.size} 个分片按顺序合并成一个 .ts 文件，" +
+                    "可直接用播放器打开（没有转码）。"
+            }
+            else -> TaskStatus.FAILED.also {
+                task.status = it
+                if (task.error.isBlank()) task.error = "分片合并中断"
+            }
+        }
+    }
+
+    private fun hlsFileName(url: String): String {
+        val raw = fileNameFrom(null, url)
+        val base = raw.substringBeforeLast('.', raw)
+        return (if (base.isBlank()) "stream" else base) + ".ts"
+    }
+
     // ---------- single-stream fallback ----------
 
     private fun runSingleStream(): TaskStatus {
@@ -709,6 +993,15 @@ class DownloadEngine(
         const val BUFFER_SIZE = 128 * 1024
         const val MAX_REDIRECTS = 6
         const val STALL_EVICT_MS = 12_000L
+        /** v1.6 HLS: segments in flight / prefetch window / size cap. */
+        const val HLS_PARALLEL = 4
+        const val HLS_WINDOW = 6
+        const val MAX_SEGMENT_BYTES = 64 * 1024 * 1024
+
+        /** True when the URL path ends in .m3u8 (query/fragment aside). */
+        fun isHlsUrl(url: String): Boolean =
+            url.substringBefore('?').substringBefore('#')
+                .endsWith(".m3u8", ignoreCase = true)
         const val DEFAULT_UA =
             "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
 

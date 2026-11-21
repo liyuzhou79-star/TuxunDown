@@ -48,6 +48,37 @@ class TaskStoreJsonTest {
     }
 
     @Test
+    fun roundTripKeepsV16Fields() {
+        val t = TaskRecord(
+            url = "https://example.com/live/index.m3u8",
+            fileName = "index.ts",
+            status = TaskStatus.PAUSED,
+            priority = 1,
+            isHls = true,
+            hlsTotalSegments = 4,
+        )
+        t.sources.addAll(listOf("https://mirror1.example.com/f.bin", "https://mirror2.example.com/f.bin"))
+        t.hlsDone = booleanArrayOf(true, true, false, false)
+        synchronized(t.hlsSizes) { t.hlsSizes.addAll(listOf(1000L, 2000L, -1L, -1L)) }
+        val back = TaskStore.deserialize(TaskStore.serialize(listOf(t)))
+        assertEquals(1, back.size)
+        val r = back[0]
+        assertEquals(
+            listOf("https://mirror1.example.com/f.bin", "https://mirror2.example.com/f.bin"),
+            r.sources.toList(),
+        )
+        assertEquals(1, r.priority)
+        assertTrue(r.isHls)
+        assertEquals(4, r.hlsTotalSegments)
+        assertEquals(listOf(true, true, false, false), r.hlsDone.toList())
+        assertEquals(listOf(1000L, 2000L, -1L, -1L), r.hlsSizes.toList())
+        // Downloaded bytes are rebuilt from the written segments.
+        assertEquals(3000L, r.downloaded)
+        // Progress is the merged-segment fraction for HLS tasks.
+        assertEquals(0.5f, r.progress, 0.001f)
+    }
+
+    @Test
     fun runningBecomesPausedAndCorruptTextIsEmpty() {
         val t = TaskRecord(url = "https://a.b/c.bin", status = TaskStatus.RUNNING)
         val back = TaskStore.deserialize(TaskStore.serialize(listOf(t)))
