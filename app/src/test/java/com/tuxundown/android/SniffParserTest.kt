@@ -37,6 +37,47 @@ class SniffParserTest {
     }
 
     @Test
+    fun metaVideoTagsAreExtracted() {
+        // v2.3: pages that publish their video ONLY as social
+        // metadata (no anchor / <video> tag anywhere).
+        val page = """
+            <html><head>
+              <meta property="og:video" content="https://cdn.example.com/v/12345.mp4">
+              <meta name="twitter:player:stream" content="https://cdn.example.com/v/12345.mp4">
+              <meta property="og:image" content="https://cdn.example.com/v/poster.jpg">
+            </head><body><p>watch this</p></body></html>
+        """.trimIndent()
+        val res = SniffParser.extract(page, "https://example.com/watch/1")
+        val video = res.firstOrNull { it.url.endsWith(".mp4") }
+        assertTrue(video != null)
+        assertEquals("video", video!!.kind)
+        assertTrue(video.looksLikeDownloadEntry)
+        // Both meta tags name the same file: still one entry.
+        assertEquals(1, res.count { it.url.endsWith(".mp4") })
+        // The og:image poster is NOT promoted to a download entry
+        // (it may still list as a plain image via the raw-URL pass,
+        // like any other URL in the page).
+        val poster = res.firstOrNull { it.url.endsWith(".jpg") }
+        if (poster != null) {
+            assertEquals("image", poster.kind)
+            assertTrue(!poster.looksLikeDownloadEntry)
+        }
+    }
+
+    @Test
+    fun metaSecureUrlAndRelativeResolve() {
+        val page = """
+            <html><head>
+              <meta property="og:video:secure_url" content="/media/clip.webm">
+            </head><body></body></html>
+        """.trimIndent()
+        val res = SniffParser.extract(page, "https://example.com/watch/2")
+        assertEquals(1, res.size)
+        assertEquals("https://example.com/media/clip.webm", res[0].url)
+        assertEquals("video", res[0].kind)
+    }
+
+    @Test
     fun kindOfIgnoresQuery() {
         assertEquals("archive", SniffParser.kindOf("https://x.com/a.zip?token=1"))
         assertEquals(null, SniffParser.kindOf("https://x.com/page.html"))

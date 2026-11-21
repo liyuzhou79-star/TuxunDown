@@ -2152,6 +2152,25 @@ fun StatsScreen(onBack: () -> Unit, onSpeedTest: () -> Unit) {
                 )
             }
         }
+        item(key = "st-hosts") {
+            SettingsGroup("下载最多的站点（本机统计）") {
+                val hosts = DownloadCenter.hostStatsTop()
+                if (hosts.isEmpty()) {
+                    Text(
+                        "还没有完成的下载，下完第一个文件这里就会开始排行。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    hosts.forEachIndexed { i, h ->
+                        InfoRow(
+                            "第 ${i + 1} 名：",
+                            "${h.host} · ${Format.size(h.bytes)} · ${h.count} 个文件",
+                        )
+                    }
+                }
+            }
+        }
         item(key = "st-test") {
             SettingsGroup("网络测速") {
                 Text(
@@ -2693,6 +2712,30 @@ fun SettingsScreen(
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
+    // v2.3: settings search — the settings page has grown to seven
+    // groups; a search box at the top filters GROUPS by keyword.
+    // Every item's common names are indexed in its group's keyword
+    // string, so searching 限速/代理/备份 lands on the right group.
+    var settingsQuery by remember { mutableStateOf("") }
+    val settingsKeywords = mapOf(
+        "s-download" to "下载 仅wifi wifi 同时下载 任务数 并发 全局限速 限速 速度 " +
+            "自动重试 重试 流量保护 流量 阈值 双通道 user-agent ua 浏览器标识 " +
+            "下载目录 文件夹 保存位置",
+        "s-proxy" to "代理 proxy http socks 端口 地址 服务器 用户名 密码 认证",
+        "s-look" to "外观 amoled 纯黑 深色 暗色 主题 黑色",
+        "s-notify" to "提示 震动 声音 响铃 完成 自动安装 安装 自动打开 打开",
+        "s-power" to "后台运行 后台 保活 电池 白名单 省电 冻结",
+        "s-data" to "引导与数据 引导 新手引导 帮助 常见问题 备份 导出 导入 " +
+            "恢复 孤儿 清理 part 数据",
+        "s-about" to "关于 版本 检查更新 更新 github 开源 gpl 许可",
+    )
+    fun groupVisible(key: String): Boolean {
+        val q = settingsQuery.trim().lowercase()
+        if (q.isEmpty()) return true
+        val kw = settingsKeywords[key] ?: return true
+        return q.split(Regex("\\s+")).all { it in kw }
+    }
+    val anyGroupVisible = settingsKeywords.keys.any { groupVisible(it) }
     // v2.0: in-app update check state (About section). The check
     // runs ONLY from the button below — UpdateCheck is never
     // called on launch or in the background.
@@ -2768,6 +2811,26 @@ fun SettingsScreen(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        item(key = "s-search") {
+            OutlinedTextField(
+                value = settingsQuery,
+                onValueChange = { settingsQuery = it },
+                label = { Text("搜索设置") },
+                placeholder = { Text("输入关键词，如：代理 / 限速 / 备份") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        if (settingsQuery.isNotBlank() && !anyGroupVisible) {
+            item(key = "s-nomatch") {
+                Text(
+                    "没有找到和「${settingsQuery.trim()}」有关的设置，" +
+                        "换个词试试，比如：代理、限速、备份、深色。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
         item(key = "s-head") {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onBack) { Text("← 返回") }
@@ -2778,7 +2841,7 @@ fun SettingsScreen(
                 )
             }
         }
-        item(key = "s-download") {
+        if (groupVisible("s-download")) item(key = "s-download") {
             SettingsGroup("下载") {
                 Row(
                     Modifier.fillMaxWidth(),
@@ -2918,7 +2981,7 @@ fun SettingsScreen(
                 ) { Text("用这个自定义 UA") }
             }
         }
-        item(key = "s-proxy") {
+        if (groupVisible("s-proxy")) item(key = "s-proxy") {
             SettingsGroup("代理") {
                 Row(
                     Modifier.fillMaxWidth(),
@@ -2999,7 +3062,7 @@ fun SettingsScreen(
                 )
             }
         }
-        item(key = "s-look") {
+        if (groupVisible("s-look")) item(key = "s-look") {
             SettingsGroup("外观") {
                 Row(
                     Modifier.fillMaxWidth(),
@@ -3018,7 +3081,7 @@ fun SettingsScreen(
                 }
             }
         }
-        item(key = "s-notify") {
+        if (groupVisible("s-notify")) item(key = "s-notify") {
             SettingsGroup("提示") {
                 Row(
                     Modifier.fillMaxWidth(),
@@ -3070,7 +3133,7 @@ fun SettingsScreen(
                 }
             }
         }
-        item(key = "s-power") {
+        if (groupVisible("s-power")) item(key = "s-power") {
             SettingsGroup("后台运行") {
                 Row(
                     Modifier.fillMaxWidth(),
@@ -3104,7 +3167,7 @@ fun SettingsScreen(
                 )
             }
         }
-        item(key = "s-data") {
+        if (groupVisible("s-data")) item(key = "s-data") {
             SettingsGroup("引导与数据") {
                 Row(
                     Modifier.fillMaxWidth(),
@@ -3174,7 +3237,7 @@ fun SettingsScreen(
                 }
             }
         }
-        item(key = "s-about") {
+        if (groupVisible("s-about")) item(key = "s-about") {
             SettingsGroup("关于") {
                 Text("TuxunDown v$version")
                 Text(

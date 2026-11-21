@@ -293,6 +293,13 @@ object DownloadCenter {
             )
             e.putString("statsTodayKey", StatsMath.dayKey(now))
             e.putLong("statsTodayBytes", today + bytes)
+            // v2.3: per-host totals for the statistics Top 5.
+            val hostEntries = HostStats.record(
+                HostStats.parse(pString("hostStats", "")),
+                HostMemory.hostOf(task.url),
+                bytes,
+            )
+            e.putString("hostStats", HostStats.serialize(hostEntries))
         }
         e.putInt("statsDoneCount", pInt("statsDoneCount", 0) + 1)
         if (task.avgBps > 0) {
@@ -316,11 +323,16 @@ object DownloadCenter {
         return if (count > 0) pLong("statsSpeedSum", 0) / count else 0
     }
 
+    /** v2.3: the hosts the user downloads the most from, by bytes. */
+    fun hostStatsTop(n: Int = 5): List<HostStats.Entry> =
+        HostStats.top(HostStats.parse(pString("hostStats", "")), n)
+
     fun clearStats() {
         prefs().edit()
             .remove("statsTotalBytes").remove("statsDoneCount")
             .remove("statsTodayKey").remove("statsTodayBytes")
             .remove("statsSpeedSum").remove("statsSpeedCount")
+            .remove("hostStats")
             .apply()
     }
 

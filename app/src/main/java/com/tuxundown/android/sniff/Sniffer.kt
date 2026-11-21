@@ -137,6 +137,24 @@ object SniffParser {
         """<meta[^>]+http-equiv\s*=\s*["']?refresh["']?[^>]*>""",
         RegexOption.IGNORE_CASE
     )
+    // v2.3: social/video meta tags. A page that exists to play ONE
+    // video often publishes its direct file ONLY as metadata —
+    // og:video / og:video:url / og:video:secure_url (Open Graph)
+    // or twitter:player:stream (Twitter card) — with no anchor,
+    // <video> or script URL pointing at it.
+    private val META_TAG = Regex("""<meta[^>]+>""", RegexOption.IGNORE_CASE)
+    private val META_NAME = Regex(
+        """(?:property|name)\s*=\s*["']([^"']+)["']""",
+        RegexOption.IGNORE_CASE
+    )
+    private val META_CONTENT = Regex(
+        """content\s*=\s*["']([^"']+)["']""",
+        RegexOption.IGNORE_CASE
+    )
+    private val VIDEO_META_NAMES = setOf(
+        "og:video", "og:video:url", "og:video:secure_url",
+        "twitter:player:stream",
+    )
     private val REFRESH_URL = Regex("""url\s*=\s*([^"'>\s]+)""", RegexOption.IGNORE_CASE)
     private val PLAIN_URL = Regex("""https?://[^\s"'<>\\)\]}]+""")
 
@@ -214,7 +232,19 @@ object SniffParser {
                     (prev?.looksLikeDownloadEntry == true),
             )
         }
-        // Anchors first: their text tells us which link is the download entry.
+        // Meta video tags first (v2.3): the page's headline video
+        // is a download entry by definition; its kind comes from
+        // the URL's extension when it has one, else "video".
+        for (m in META_TAG.findAll(html)) {
+            val tag = m.value
+            val name = META_NAME.find(tag)?.groupValues?.get(1)
+                ?.trim()?.lowercase() ?: continue
+            if (name !in VIDEO_META_NAMES) continue
+            val content = META_CONTENT.find(tag)?.groupValues?.get(1) ?: continue
+            val resolved = resolve(baseUrl, content) ?: continue
+            add(resolved, kindOf(resolved) ?: "video", true)
+        }
+        // Anchors next: their text tells us which link is the download entry.
         for (m in ANCHOR.findAll(html)) {
             val resolved = resolve(baseUrl, m.groupValues[1]) ?: continue
             val text = m.groupValues[2].replace(Regex("<[^>]+>"), "").trim()
