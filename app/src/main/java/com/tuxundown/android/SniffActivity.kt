@@ -56,7 +56,19 @@ class SniffActivity : Activity() {
         frame.layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
         )
-        web = WebView(this)
+        // v1.5 startup audit: WebView construction throws on devices
+        // whose WebView provider is missing/disabled mid-update. This
+        // is a first-frame path — degrade to a plain explanation and
+        // leave, never crash the launch.
+        web = runCatching { WebView(this) }.getOrElse {
+            Toast.makeText(
+                this,
+                "内置浏览器不可用（系统 WebView 异常），请改用粘贴链接或嗅探网页的方式下载",
+                Toast.LENGTH_LONG,
+            ).show()
+            finish()
+            return
+        }
         web.layoutParams = FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
         )
@@ -67,7 +79,8 @@ class SniffActivity : Activity() {
         web.setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
             val headers = mutableMapOf<String, String>()
             headers["User-Agent"] = userAgent ?: ""
-            CookieManager.getInstance().getCookie(url)?.let { headers["Cookie"] = it }
+            runCatching { CookieManager.getInstance().getCookie(url) }
+                .getOrNull()?.let { headers["Cookie"] = it }
             web.url?.let { headers["Referer"] = it }
             if (createTask(url, headers)) {
                 Toast.makeText(this, "已抓到真实地址，开始下载", Toast.LENGTH_LONG).show()
@@ -101,7 +114,7 @@ class SniffActivity : Activity() {
 
         root.addView(frame)
         setContentView(root)
-        if (startUrl.isNotBlank()) web.loadUrl(startUrl)
+        if (startUrl.isNotBlank()) runCatching { web.loadUrl(startUrl) }
     }
 
     /** Create a task unless the same link is already active. */

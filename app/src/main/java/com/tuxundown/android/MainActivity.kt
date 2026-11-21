@@ -93,7 +93,11 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         DownloadCenter.init(this)
         if (Build.VERSION.SDK_INT >= 33) {
-            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
+            // v1.5 startup audit: a permission-request hiccup on an
+            // exotic ROM must never cost the launch itself.
+            runCatching {
+                requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
+            }
         }
         val sharedUrl = if (intent?.action == Intent.ACTION_SEND) {
             intent.getStringExtra(Intent.EXTRA_TEXT)?.trim() ?: ""
@@ -173,6 +177,20 @@ fun DownApp(sharedUrl: String) {
     var autoRetry by remember { mutableStateOf(DownloadCenter.autoRetryCount) }
     var trafficMB by remember { mutableStateOf(DownloadCenter.trafficThresholdMB) }
 
+    // ---- v1.5: battery-optimisation whitelist status for the
+    // settings keep-alive card. Refreshed every time the settings
+    // screen is entered (the user may have just changed it). ----
+    var batteryOk by remember { mutableStateOf(false) }
+    LaunchedEffect(screen) {
+        if (screen == "settings") {
+            batteryOk = runCatching {
+                val pm = context.getSystemService(android.content.Context.POWER_SERVICE)
+                    as android.os.PowerManager
+                pm.isIgnoringBatteryOptimizations(context.packageName)
+            }.getOrDefault(false)
+        }
+    }
+
     // ---- add-task dialog state ----
     var showAdd by remember { mutableStateOf(sharedUrl.isNotBlank()) }
     var urlText by remember { mutableStateOf(sharedUrl) }
@@ -205,7 +223,7 @@ fun DownApp(sharedUrl: String) {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "1.4.0"
+        }.getOrNull() ?: "1.5.0"
     }
     var showGuide by remember {
         mutableStateOf(DownloadCenter.guideSeenVersion != appVersion)
@@ -577,6 +595,35 @@ fun DownApp(sharedUrl: String) {
             onVibrate = { vibrateOn = it; DownloadCenter.completeVibrate = it },
             soundOn = soundOn,
             onSound = { soundOn = it; DownloadCenter.completeSound = it },
+            batteryOk = batteryOk,
+            onOpenBattery = {
+                // v1.5: ONLY guide the user to the system switch —
+                // the app never touches battery settings itself.
+                val direct = runCatching {
+                    context.startActivity(
+                        Intent(
+                            android.provider.Settings
+                                .ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                            Uri.parse("package:" + context.packageName),
+                        )
+                    )
+                }.isSuccess
+                if (!direct) {
+                    runCatching {
+                        context.startActivity(
+                            Intent(
+                                android.provider.Settings
+                                    .ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS
+                            )
+                        )
+                    }
+                    Toast.makeText(
+                        context,
+                        "在列表里找到 TuxunDown，把电池设为不限制",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            },
             onShowGuide = { showGuide = true },
             onExport = { exportLauncher.launch("tuxundown-tasks.json") },
             onImport = { importLauncher.launch(arrayOf("application/json", "text/plain")) },
@@ -1223,6 +1270,8 @@ fun SettingsScreen(
     onVibrate: (Boolean) -> Unit,
     soundOn: Boolean,
     onSound: (Boolean) -> Unit,
+    batteryOk: Boolean,
+    onOpenBattery: () -> Unit,
     onShowGuide: () -> Unit,
     onExport: () -> Unit,
     onImport: () -> Unit,
@@ -1343,6 +1392,40 @@ fun SettingsScreen(
                 }
             }
         }
+        item(key = "s-power") {
+            SettingsGroup("后台运行") {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("后台保活（电池白名单）")
+                        Text(
+                            if (batteryOk) {
+                                "已加入白名单：锁屏后系统不会冻住下载，后台下大文件更稳。"
+                            } else {
+                                "还没加入白名单：锁屏久了，系统可能把下载冻住、甚至杀掉。"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (!batteryOk) {
+                        OutlinedButton(onClick = onOpenBattery) { Text("去设置") }
+                    }
+                }
+                Text(
+                    "点「去设置」会打开系统的电池优化页面，把 TuxunDown 设为「不限制」即可，" +
+                        "只能由你亲手开，App 不会也不能替你改系统设置。\n" +
+                        "魅族 Flyme 也可以这样找：设置 → 应用管理 → TuxunDown → 电池 → 选「不限制」；" +
+                        "再在最近任务界面长按 TuxunDown 的卡片，点「锁定」，双保险。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+        }
         item(key = "s-data") {
             SettingsGroup("引导与数据") {
                 Row(
@@ -1446,10 +1529,10 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 主页改版：整个页面可以顺滑滚动，任务再多也能滑到底\n" +
-            "· 新增标签页（全部／下载中／已完成／失败）、长按多选批量管理、排队任务插队\n" +
-            "· 可以预约下载、设置同时下载个数、失败自动重试、流量保护\n" +
-            "· 任务详情有完整统计；下完的文件保留速度曲线，随时回看",
+            "· 更快：同一个服务器第二次下载会记住上次的最佳线程数，直接满速开下，不再慢慢试探\n" +
+            "· 更稳：下载中途断网不再直接失败——任务会排队等网络恢复，回来后自动接着下\n" +
+            "· 设置里新增「后台运行」卡：照着把电池设为不限制，锁屏下大文件不容易被系统冻住\n" +
+            "· 速度数字和曲线图对齐到同一秒的节拍，看到的数字更可信",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
             "· 文件直链 → 直接开始多线程下载，还能预先改好保存文件名\n" +

@@ -5,7 +5,11 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkRequest
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.tuxundown.android.MainActivity
@@ -24,15 +28,66 @@ class DownloadService : Service() {
     @Volatile private var worker: Thread? = null
     @Volatile private var lastNotifyMs = 0L
 
+    /** v1.5: per-task network-outage recovery attempts spent. */
+    private val netAttempts = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    /** v1.5: fires when connectivity returns; un-parks deferred tasks. */
+    private var netCallback: ConnectivityManager.NetworkCallback? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         DownloadCenter.init(this)
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(
-            NotificationChannel(CHANNEL, "下载进度", NotificationManager.IMPORTANCE_LOW)
-        )
+        // v1.5 startup audit: channel creation is idempotent, but a
+        // ROM quirk here must never take the whole service down.
+        runCatching {
+            val nm = getSystemService(NotificationManager::class.java)
+            nm.createNotificationChannel(
+                NotificationChannel(CHANNEL, "下载进度", NotificationManager.IMPORTANCE_LOW)
+            )
+        }
+        registerNetworkCallback()
+    }
+
+    override fun onDestroy() {
+        runCatching {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            netCallback?.let { cm.unregisterNetworkCallback(it) }
+        }
+        netCallback = null
+        super.onDestroy()
+    }
+
+    private fun registerNetworkCallback() {
+        runCatching {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val cb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    // Connectivity is back: un-park every task that
+                    // was deferred by an outage and make sure the
+                    // drain loop is running to pick them up.
+                    var cleared = false
+                    for (t in DownloadCenter.store.tasks) {
+                        if (t.netDeferred && t.status == TaskStatus.QUEUED) {
+                            t.netDeferred = false
+                            t.note = "网络已恢复，自动继续下载。"
+                            cleared = true
+                        }
+                    }
+                    if (cleared) {
+                        DownloadCenter.store.save()
+                        if (worker?.isAlive != true) {
+                            worker = Thread { drainQueue() }.apply {
+                                isDaemon = true; start()
+                            }
+                        }
+                    }
+                }
+            }
+            cm.registerNetworkCallback(NetworkRequest.Builder().build(), cb)
+            netCallback = cb
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -69,12 +124,39 @@ class DownloadService : Service() {
             }
             val anyQueued = store.tasks.any { it.status == TaskStatus.QUEUED }
             if (running.isEmpty()) {
-                if (!anyQueued) break
+                // v1.5: tasks parked by a network outage keep the
+                // service (and its network callback) alive until
+                // connectivity returns — they are QUEUED but not
+                // eligible, so without this branch the service would
+                // stop and nobody would ever un-park them.
+                val anyDeferred = store.tasks.any {
+                    it.netDeferred && it.status == TaskStatus.QUEUED
+                }
+                if (!anyQueued && !anyDeferred) break
+                if (anyDeferred &&
+                    QueueOrder.nextEligible(store.tasks, System.currentTimeMillis()) == null
+                ) {
+                    notifyUpdate(
+                        "等待网络恢复",
+                        "断网的任务已排队，网络一回来就自动继续",
+                        0,
+                    )
+                    try { Thread.sleep(5000) } catch (e: InterruptedException) { break }
+                    continue
+                }
                 // Only future-scheduled tasks remain: wait for the
                 // earliest one (polling, so a newly enqueued task or
                 // a changed setting is picked up within seconds).
                 val nextAt = QueueOrder.nextScheduledAt(store.tasks, System.currentTimeMillis())
-                if (nextAt <= 0) break
+                if (nextAt <= 0) {
+                    // Nothing scheduled — but outage-parked tasks still
+                    // need the callback alive, so wait instead of dying.
+                    if (anyDeferred) {
+                        try { Thread.sleep(5000) } catch (e: InterruptedException) { break }
+                        continue
+                    }
+                    break
+                }
                 notifyUpdate(
                     "预约下载待机",
                     "下一个任务将在 ${Format.clockTime(nextAt)} 开始",
@@ -133,6 +215,14 @@ class DownloadService : Service() {
                         confirmed = task.mobileConfirmed,
                     )
                 },
+                // v1.5: per-host thread memory — start known hosts at
+                // their remembered optimum, remember new optima, and
+                // age the memory out when a host starts failing.
+                initialThreadsHint = DownloadCenter.hostThreadsHint(task.url),
+                onThreadsSettled = { threads ->
+                    DownloadCenter.recordHostThreads(task.url, threads)
+                },
+                onHostFailed = { DownloadCenter.recordHostFailure(task.url) },
             )
             DownloadCenter.registerEngine(task, engine)
             try {
@@ -147,12 +237,37 @@ class DownloadService : Service() {
                     return
                 }
                 if (task.status == TaskStatus.DONE) {
+                    netAttempts.remove(task.id)
                     finalizeFinished(task)
                     return
                 }
             } finally {
                 DownloadCenter.unregisterEngine(task)
                 store.save()
+            }
+            // v1.5: a failure caused by the network going away is not
+            // the server's fault and must not burn the v1.4 retry
+            // budget — park the task and let the connectivity
+            // callback re-queue it when the network returns (bounded
+            // by NetRetry.MAX_ATTEMPTS per outage streak).
+            if (task.status == TaskStatus.FAILED && NetRetry.isNetworkError(task.error)) {
+                val used = netAttempts[task.id] ?: 0
+                if (NetRetry.shouldDefer(used)) {
+                    netAttempts[task.id] = used + 1
+                    task.netDeferred = true
+                    task.status = TaskStatus.QUEUED
+                    task.note = "网络好像断了，先排队等网络恢复后自动继续" +
+                        "（第 ${used + 1}/${NetRetry.MAX_ATTEMPTS} 次）。原因：${task.error}"
+                    task.error = ""
+                    store.save()
+                    notifyUpdate(
+                        "网络断开，等待恢复",
+                        task.fileName,
+                        (task.progress * 100).toInt(),
+                    )
+                    return
+                }
+                netAttempts.remove(task.id)
             }
             // v1.4: automatic whole-task retry with backoff.
             val limit = DownloadCenter.autoRetryCount
