@@ -193,7 +193,17 @@ class TaskStore(context: Context) {
         // previous good file as .bak, then rename over. A crash or
         // power loss mid-save can no longer corrupt the only copy.
         val tmp = File(metaFile.path + ".tmp")
-        tmp.writeText(text)
+        // v1.8 audit: fsync the tmp file BEFORE the rename. Without
+        // it, a power cut in the rename window can leave the new
+        // tasks.json zero-length or torn on delayed-allocation
+        // filesystems (the .bak fallback then costs one flush of
+        // state). Worst case after this change: the rename itself
+        // is atomic, so readers see either the old or the new
+        // complete file — never a half one.
+        java.io.FileOutputStream(tmp).use { out ->
+            out.write(text.toByteArray(Charsets.UTF_8))
+            runCatching { out.fd.sync() }
+        }
         if (metaFile.exists()) {
             runCatching { metaFile.copyTo(File(metaFile.path + ".bak"), overwrite = true) }
         }

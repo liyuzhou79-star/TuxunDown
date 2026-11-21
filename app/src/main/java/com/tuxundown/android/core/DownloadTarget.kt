@@ -27,6 +27,14 @@ interface DownloadTarget {
     /** Current length of the destination in bytes (v1.7: FTP resume
      *  measures the existing .part this way). */
     fun size(): Long
+    /**
+     * Flush written bytes to the storage device (v1.8). pwrite
+     * returning only proves the bytes reached the kernel's page
+     * cache; the engine calls this ONCE when a download completes,
+     * before the task may call itself DONE — one fsync per download
+     * is free, one per chunk would murder the speed.
+     */
+    fun sync()
     fun close()
 }
 
@@ -62,6 +70,10 @@ class PfdTarget(private val pfd: ParcelFileDescriptor) : DownloadTarget {
     }
 
     override fun size(): Long = Os.fstat(fd).st_size
+
+    override fun sync() {
+        Os.fsync(fd)
+    }
 
     override fun close() {
         runCatching { pfd.close() }
@@ -99,6 +111,10 @@ class FileTarget(file: File) : DownloadTarget {
     }
 
     override fun size(): Long = synchronized(lock) { raf.length() }
+
+    override fun sync() {
+        synchronized(lock) { raf.fd.sync() }
+    }
 
     override fun close() {
         runCatching { raf.close() }

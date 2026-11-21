@@ -120,7 +120,15 @@ class FtpClient {
 
     fun close() {
         runCatching { dataSocket?.close() }
-        runCatching { command("QUIT") }
+        // v1.8 audit: after an aborted transfer the server may owe
+        // us a 426 reply, or none at all — waiting for the QUIT
+        // reply on the normal 30 s read timeout could park the
+        // engine thread for half a minute on every pause. Give the
+        // goodbye 2 s, then just drop the socket.
+        runCatching {
+            control?.soTimeout = 2_000
+            command("QUIT")
+        }
         runCatching { control?.close() }
         dataSocket = null
         control = null
@@ -146,6 +154,12 @@ class FtpClient {
     private fun command(cmd: String): Int = commandFull(cmd).first
 
     private fun commandFull(cmd: String): Pair<Int, String> {
+        // v1.8 audit: paths and credentials come from a
+        // percent-decoded URL — a CR/LF smuggled in there would
+        // inject extra commands into the control channel.
+        if (cmd.contains('\r') || cmd.contains('\n')) {
+            throw IllegalStateException("FTP 地址里有非法字符")
+        }
         val w = writer ?: throw IllegalStateException("FTP 还没连接")
         w.write(cmd)
         w.write("\r\n")
@@ -166,6 +180,12 @@ class FtpClient {
             val line = r.readLine()
                 ?: throw IllegalStateException("FTP 服务器断开了连接")
             onLine(line)
+            // v1.8 audit: a bare "226" with no text after it is a
+            // complete reply too — the old code fell through and
+            // reported code -1 (a fake failure) for such servers.
+            if (line.length == 3 && line.all { it.isDigit() }) {
+                return line.toInt()
+            }
             if (line.length >= 4) {
                 val c = line.substring(0, 3).toIntOrNull()
                 if (c != null) {

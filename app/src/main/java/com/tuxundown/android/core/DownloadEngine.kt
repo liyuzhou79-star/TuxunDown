@@ -506,6 +506,13 @@ class DownloadEngine(
         task.speedBps = 0
         task.downloaded = downloadedBytes.get()
         val doneCount = task.chunkDone.count { it }
+        if (doneCount == count) {
+            // v1.8: one fsync seals the file before it may call
+            // itself DONE (see DownloadTarget.sync). A failed sync
+            // must not fail a byte-complete download — the bytes
+            // are in the OS's hands either way.
+            runCatching { target.sync() }
+        }
         return when {
             doneCount == count -> {
                 task.status = TaskStatus.DONE
@@ -1062,6 +1069,10 @@ class DownloadEngine(
             task.downloaded = downloadedBytes.get()
         }
         if (failure != null) throw failure
+        if (writeIndex >= segments.size) {
+            // v1.8: seal the merged file before it counts as DONE.
+            runCatching { target.sync() }
+        }
         return when {
             trafficBlocked -> TaskStatus.PAUSED.also {
                 task.status = it
@@ -1170,13 +1181,23 @@ class DownloadEngine(
             val rest = client.restSupported()
             target = targetProvider()
             var offset = 0L
+            // v1.8 audit: a .part that already holds the WHOLE file
+            // (the previous run died between the last byte and the
+            // rename) is finished, not a resume candidate — the old
+            // code truncated it and downloaded everything again.
+            var alreadyComplete = false
             if (rest && !serverChanged) {
                 val existing = runCatching { target.size() }.getOrDefault(0)
-                if (existing > 0 && (total < 0 || existing < total)) {
+                if (existing > 0 && total > 0 && existing >= total) {
+                    offset = total
+                    alreadyComplete = true
+                } else if (existing > 0 && (total < 0 || existing < total)) {
                     offset = existing
                 }
             }
-            if (offset == 0L) {
+            if (alreadyComplete) {
+                appendNote("FTP：文件其实已经下完了，直接收尾。")
+            } else if (offset == 0L) {
                 target.truncate(0)
             } else {
                 appendNote("FTP 断点续传：从 ${Format.size(offset)} 处接着下。")
@@ -1186,14 +1207,18 @@ class DownloadEngine(
             }
             downloadedBytes.set(offset)
             task.downloaded = offset
-            sampler.start()
-            var pos = offset
-            client.retrieve(ftp.path, offset) { buf, n ->
-                if (stopped()) throw InterruptedException("stopped")
-                target.writeAt(pos, buf, 0, n)
-                pos += n
-                downloadedBytes.addAndGet(n.toLong())
-                limiter?.throttle(n)
+            if (!alreadyComplete) {
+                sampler.start()
+                var pos = offset
+                client.retrieve(ftp.path, offset) { buf, n ->
+                    if (stopped()) throw InterruptedException("stopped")
+                    target.writeAt(pos, buf, 0, n)
+                    pos += n
+                    downloadedBytes.addAndGet(n.toLong())
+                    limiter?.throttle(n)
+                }
+                // v1.8: seal the file before it counts as DONE.
+                if (!stopped()) runCatching { target.sync() }
             }
         } catch (e: InterruptedException) {
             // Pause (or a guard) stopped the transfer mid-stream;
@@ -1293,6 +1318,8 @@ class DownloadEngine(
                     }
                 }
             }
+            // v1.8: the stream ran to its end unstopped — seal it.
+            if (!stopped()) runCatching { target.sync() }
             c.disconnect()
         } finally {
             stopSampler.set(1)
