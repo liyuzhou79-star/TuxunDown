@@ -357,8 +357,13 @@ class DownloadService : Service() {
                 // User speed limit: v1.6 turns it into a TOTAL
                 // budget shared by all running tasks (weighted by
                 // priority), read live so changes rebalance at once.
+                // v2.1: the task's own cap composes on top — the
+                // smaller of the two limits wins (see RateCap).
                 limiter = SpeedLimiter(rateBps = {
-                    DownloadCenter.budgetShareBps(task.id)
+                    RateCap.effectiveBps(
+                        DownloadCenter.budgetShareBps(task.id),
+                        task.taskLimitKBps,
+                    )
                 }),
                 networkGuard = {
                     !(DownloadCenter.wifiOnly && !DownloadCenter.isOnWifi())
@@ -605,12 +610,64 @@ class DownloadService : Service() {
             // v1.6: feed the statistics screen (local counters).
             DownloadCenter.recordCompletion(task)
             completionFeedback()
+            // v2.1: the user's completion auto actions (both
+            // default OFF; see runCompletionAction).
+            runCompletionAction(task)
         } catch (e: Exception) {
             task.note = "下载完成，但改名失败（${e.message ?: "未知错误"}），" +
                 "文件在下载目录里，名字带 .part 后缀，去掉后缀即可使用。"
             notifyAggregate()
         }
         store.saveNow()
+    }
+
+    /**
+     * v2.1: completion auto actions, per the user's switches (both
+     * default OFF). Auto-install only LAUNCHES the system installer
+     * for an APK — the installer's own 「安装」 tap stays the
+     * user's; nothing can bypass it and nothing here tries.
+     * Auto-open hands the finished file to a viewer app. Both go
+     * through the savedUri finalizeTarget just recorded (the real
+     * public-folder location). A launch the system refuses
+     * (background-activity limits on some ROMs, no viewer for the
+     * type) is reported on the card instead of failing silently —
+     * the completion notification and the card buttons remain the
+     * fallback either way.
+     */
+    private fun runCompletionAction(task: TaskRecord) {
+        if (!DownloadCenter.autoInstallApk && !DownloadCenter.autoOpenFile) return
+        val uriText = task.savedUri
+        if (uriText.isBlank()) return
+        val name = task.savedName.ifBlank { task.fileName }
+        val isApk = name.endsWith(".apk", ignoreCase = true)
+        try {
+            when {
+                isApk && DownloadCenter.autoInstallApk -> {
+                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(
+                            android.net.Uri.parse(uriText),
+                            "application/vnd.android.package-archive",
+                        )
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    startActivity(intent)
+                }
+                DownloadCenter.autoOpenFile -> {
+                    val ext = name.substringAfterLast('.', "").lowercase()
+                    val mime = android.webkit.MimeTypeMap.getSingleton()
+                        .getMimeTypeFromExtension(ext) ?: "*/*"
+                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(android.net.Uri.parse(uriText), mime)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    startActivity(intent)
+                }
+            }
+        } catch (e: Exception) {
+            task.note += "（自动打开没成功，在卡片上点「打开 / 安装」即可。）"
+        }
     }
 
     /** Completion vibration / sound, per the user's switches. */

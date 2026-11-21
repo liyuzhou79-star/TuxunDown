@@ -47,6 +47,25 @@ object DownloadCenter {
         get() = pInt("speedLimitKBps", 0)
         set(v) { prefs().edit().putInt("speedLimitKBps", v).apply() }
 
+    /**
+     * v2.1: when a download finishes, auto-launch the system
+     * installer for an APK task. This only OPENS the installer —
+     * the installer's own 「安装」 tap stays the user's; nothing
+     * here can or should bypass it. Default off.
+     */
+    var autoInstallApk: Boolean
+        get() = pBool("autoInstallApk", false)
+        set(v) { prefs().edit().putBoolean("autoInstallApk", v).apply() }
+
+    /**
+     * v2.1: when a download finishes, auto-open the file with a
+     * viewer app. An APK task prefers the installer above when
+     * both switches are on. Default off.
+     */
+    var autoOpenFile: Boolean
+        get() = pBool("autoOpenFile", false)
+        set(v) { prefs().edit().putBoolean("autoOpenFile", v).apply() }
+
     /** Completion feedback switches (v1.3). */
     var completeVibrate: Boolean
         get() = pBool("completeVibrate", true)
@@ -184,6 +203,8 @@ object DownloadCenter {
         o.put("amoledBlack", amoledBlack)
         o.put("completeVibrate", completeVibrate)
         o.put("completeSound", completeSound)
+        o.put("autoInstallApk", autoInstallApk)
+        o.put("autoOpenFile", autoOpenFile)
         o.put("detailsExpanded", detailsExpanded)
         o.put("sniffHistory", org.json.JSONArray(sniffHistory))
         // v1.9: proxy settings travel with the backup EXCEPT the
@@ -214,6 +235,8 @@ object DownloadCenter {
             completeVibrate = o.optBoolean("completeVibrate", completeVibrate)
         }
         if (o.has("completeSound")) completeSound = o.optBoolean("completeSound", completeSound)
+        if (o.has("autoInstallApk")) autoInstallApk = o.optBoolean("autoInstallApk", autoInstallApk)
+        if (o.has("autoOpenFile")) autoOpenFile = o.optBoolean("autoOpenFile", autoOpenFile)
         if (o.has("detailsExpanded")) {
             detailsExpanded = o.optBoolean("detailsExpanded", detailsExpanded)
         }

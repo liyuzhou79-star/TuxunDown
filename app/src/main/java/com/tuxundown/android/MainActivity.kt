@@ -261,6 +261,9 @@ fun DownApp() {
     var limitKBps by remember { mutableStateOf(DownloadCenter.speedLimitKBps) }
     var vibrateOn by remember { mutableStateOf(DownloadCenter.completeVibrate) }
     var soundOn by remember { mutableStateOf(DownloadCenter.completeSound) }
+    // v2.1: completion auto actions (both default off).
+    var autoInstallUi by remember { mutableStateOf(DownloadCenter.autoInstallApk) }
+    var autoOpenUi by remember { mutableStateOf(DownloadCenter.autoOpenFile) }
     var maxConc by remember { mutableStateOf(DownloadCenter.maxConcurrent) }
     var autoRetry by remember { mutableStateOf(DownloadCenter.autoRetryCount) }
     var trafficMB by remember { mutableStateOf(DownloadCenter.trafficThresholdMB) }
@@ -500,6 +503,8 @@ fun DownApp() {
                             limitKBps = DownloadCenter.speedLimitKBps
                             vibrateOn = DownloadCenter.completeVibrate
                             soundOn = DownloadCenter.completeSound
+                            autoInstallUi = DownloadCenter.autoInstallApk
+                            autoOpenUi = DownloadCenter.autoOpenFile
                             maxConc = DownloadCenter.maxConcurrent
                             autoRetry = DownloadCenter.autoRetryCount
                             trafficMB = DownloadCenter.trafficThresholdMB
@@ -874,6 +879,12 @@ fun DownApp() {
                 headersText = TaskHeaders.toText(task.headers)
                 headersError = ""
             },
+            onTaskLimit = { kbps ->
+                // v2.1: per-task cap lives on the record; the
+                // engine's limiter reads it live on every tick.
+                task.taskLimitKBps = kbps
+                store.save()
+            },
         )
     }
 
@@ -958,6 +969,10 @@ fun DownApp() {
             onVibrate = { vibrateOn = it; DownloadCenter.completeVibrate = it },
             soundOn = soundOn,
             onSound = { soundOn = it; DownloadCenter.completeSound = it },
+            autoInstall = autoInstallUi,
+            onAutoInstall = { autoInstallUi = it; DownloadCenter.autoInstallApk = it },
+            autoOpen = autoOpenUi,
+            onAutoOpen = { autoOpenUi = it; DownloadCenter.autoOpenFile = it },
             batteryOk = batteryOk,
             onOpenBattery = {
                 // v1.5: ONLY guide the user to the system switch —
@@ -2570,6 +2585,10 @@ fun SettingsScreen(
     onVibrate: (Boolean) -> Unit,
     soundOn: Boolean,
     onSound: (Boolean) -> Unit,
+    autoInstall: Boolean,
+    onAutoInstall: (Boolean) -> Unit,
+    autoOpen: Boolean,
+    onAutoOpen: (Boolean) -> Unit,
     batteryOk: Boolean,
     onOpenBattery: () -> Unit,
     onShowGuide: () -> Unit,
@@ -2921,6 +2940,38 @@ fun SettingsScreen(
                 ) {
                     Text("下载完成提示音")
                     Switch(checked = soundOn, onCheckedChange = onSound)
+                }
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("下载完成后自动安装（仅安装包）")
+                        Text(
+                            "下完 APK 自动调起系统安装界面；最后的「安装」按钮仍要你亲手点，" +
+                                "App 不会也不能替你确认。要是系统拦住了后台弹出，点完成通知或卡片上的「安装」也一样。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = autoInstall, onCheckedChange = onAutoInstall)
+                }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("下载完成后自动打开")
+                        Text(
+                            "下完自动用能打开它的应用打开这个文件；安装包优先走上面的自动安装。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = autoOpen, onCheckedChange = onAutoOpen)
                 }
             }
         }
@@ -3540,6 +3591,7 @@ fun TaskCard(
     onSources: () -> Unit,
     onChecksum: () -> Unit,
     onHeaders: () -> Unit,
+    onTaskLimit: (Int) -> Unit,
 ) {
     var expanded by remember(task.id) {
         mutableStateOf(DownloadCenter.detailsExpanded)
@@ -3881,6 +3933,26 @@ fun TaskCard(
                     task.status != TaskStatus.DONE
                 ) {
                     InfoRow("下载代理：", "${proxyNow.typeLabel()} ${proxyNow.label()}")
+                }
+                // v2.1: per-task speed cap. It composes with the
+                // global budget — the smaller limit wins (RateCap)
+                // — and the engine's limiter reads the record live,
+                // so changing it mid-download applies at once.
+                if (task.status != TaskStatus.DONE) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "单任务限速（和全局限速同时设了时，取更小的那个）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    ChipRow(
+                        options = listOf(
+                            0 to "不限", 512 to "512KB", 1024 to "1MB",
+                            3072 to "3MB", 5120 to "5MB",
+                        ),
+                        selected = task.taskLimitKBps,
+                        onPick = onTaskLimit,
+                    )
                 }
                 if (task.status != TaskStatus.DONE) {
                     Spacer(Modifier.height(6.dp))

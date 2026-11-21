@@ -82,6 +82,11 @@ class TaskRecord(
     /** Checksum verdict: see Checksum.STATE_* (0 none, 1 verifying,
      *  2 matched 对上， 3 mismatched 对不上）. */
     var checksumState: Int = 0,
+    // ---- v2.1 additions ----
+    /** Per-task speed cap in KB/s (0 = no cap of its own). Composes
+     *  with the global budget via RateCap — the smaller limit wins.
+     *  Read live by the engine's limiter on every tick. */
+    var taskLimitKBps: Int = 0,
     // ---- v1.8 additions ----
     /** Daily recurrence: when this task reaches a terminal state,
      *  the service re-queues it for the same wall-clock time next
@@ -345,6 +350,7 @@ class TaskStore(context: Context) {
                 o.put("expectedMd5", t.expectedMd5)
                 o.put("checksumState", t.checksumState)
                 o.put("scheduleDaily", t.scheduleDaily)
+                o.put("taskLimitKBps", t.taskLimitKBps)
                 o.put("hlsDone", ChunkPlanner.encodeBitset(t.hlsDone))
                 synchronized(t.hlsSizes) {
                     o.put("hlsSizesCsv", t.hlsSizes.joinToString(","))
@@ -414,6 +420,7 @@ class TaskStore(context: Context) {
                         expectedMd5 = o.optString("expectedMd5"),
                         checksumState = o.optInt("checksumState", 0),
                         scheduleDaily = o.optBoolean("scheduleDaily", false),
+                        taskLimitKBps = o.optInt("taskLimitKBps", 0).coerceAtLeast(0),
                     )
                     // A verify never survives a restart: a persisted
                     // "verifying" just means it was interrupted.
