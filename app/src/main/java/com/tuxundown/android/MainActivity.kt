@@ -98,6 +98,7 @@ import com.tuxundown.android.core.Checksum
 import com.tuxundown.android.core.CrashGuard
 import com.tuxundown.android.core.Errors
 import com.tuxundown.android.core.ChecksumVerifier
+import com.tuxundown.android.core.Diagnostics
 import com.tuxundown.android.core.DownloadCenter
 import com.tuxundown.android.core.DownloadedFiles
 import com.tuxundown.android.core.Format
