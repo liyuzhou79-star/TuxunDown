@@ -881,11 +881,23 @@ class DownloadEngine(
                     }.sortedBy { it.chunkIndex }
                 }
                 // Evict stalled connections: a part that has not
-                // advanced for 12 s while the task as a whole IS
-                // moving gets its connection dropped; the worker
-                // retries the part on a fresh connection, resuming
-                // from the part's current offset.
-                if (speed > 0) {
+                // advanced while the task as a whole IS moving
+                // gets its connection dropped; the worker retries
+                // the part on a fresh connection, resuming from
+                // the part's current offset.
+                // v4.6: the patience is speed-aware (StallPolicy):
+                // it shrinks from the old flat 12 s toward a 4 s
+                // floor as the task's aggregate speed rises, and
+                // the verdict is judged on task.speedBps — the
+                // EMA this same tick just updated above (and the
+                // number ThreadScaler reads), NOT the tick's
+                // instantaneous byte delta, whose single-tick
+                // spikes would thrash slow-starting connections.
+                // StallPolicy also makes the old gate's implied
+                // rules explicit: a lone active connection is
+                // never evicted, and a task that is not moving at
+                // all evicts nobody.
+                run {
                     // v4.0: collect the stalled connections inside
                     // the lock but disconnect AFTER releasing it —
                     // disconnect() is a blocking socket operation
@@ -897,8 +909,14 @@ class DownloadEngine(
                     // evicted twice for the same stall.
                     val stalled = ArrayList<HttpURLConnection>()
                     synchronized(activeLock) {
+                        val activeCount = active.size
                         for (ac in active) {
-                            if (now - ac.lastAdvanceMs > STALL_EVICT_MS) {
+                            if (StallPolicy.shouldEvict(
+                                    task.speedBps,
+                                    now - ac.lastAdvanceMs,
+                                    activeCount,
+                                )
+                            ) {
                                 ac.lastAdvanceMs = now // don't spam
                                 ac.connection?.let { stalled.add(it) }
                             }
@@ -2550,7 +2568,11 @@ class DownloadEngine(
         /** v1.7: was 6 — long CDN redirect chains hit it; loops are
          *  detected separately, so a higher budget is safe. */
         const val MAX_REDIRECTS = 10
-        const val STALL_EVICT_MS = 12_000L
+        /** Pre-v4.6 flat stall patience; since v4.6 the live
+         *  threshold is StallPolicy's speed-aware curve, whose
+         *  maximum this remains (kept as the single source for
+         *  that number). */
+        const val STALL_EVICT_MS = StallPolicy.MAX_THRESHOLD_MS
         /** v1.6 HLS segment size cap. */
         const val MAX_SEGMENT_BYTES = 64 * 1024 * 1024
         /** v4.3: the widest an HLS fetch pool may ever get (see
