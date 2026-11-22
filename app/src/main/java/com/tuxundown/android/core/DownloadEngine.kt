@@ -163,7 +163,21 @@ class DownloadEngine(
 
     private val active = mutableListOf<ActiveChunk>()
     private val activeLock = Object()
-    /** Outstanding parts per chunk index (a chunk split by stealing has 2). */
+    /**
+     * Outstanding parts per chunk index (a chunk split by stealing has 2).
+     *
+     * v4.7 CORE INVARIANT: chunkParts[idx] always equals the number
+     * of LIVE parts whose CURRENT span covers idx (an absent entry
+     * means 1 — the one part a fresh claim created). Every mutation
+     * preserves it: a fresh merged claim creates ONE part covering
+     * several indexes (each still counts 1, so no entry is needed);
+     * an endgame split rebalances every overlapped index in one
+     * locked delta (ChunkPlanner.splitRebalancedCounts); a
+     * completion drains exactly one from every index its part's
+     * FINAL span overlaps (ChunkPlanner.indexesOverlapping). An
+     * index is marked done ONLY when that completion drain takes
+     * its count to 0 — a split can never do it.
+     */
     private val chunkParts = mutableMapOf<Int, Int>()
 
     fun pause() {
@@ -1383,8 +1397,35 @@ class DownloadEngine(
             }
             if (index < 0 || index >= chunkCount) return
             if (task.chunkDone[index]) continue
-            val r = ChunkPlanner.rangeOf(grid, index)
-            val ac = ActiveChunk(index, r.first, r.last + 1)
+            // v4.7 step B: adjacent-chunk merging on the FRESH
+            // claim path only (tails and stolen pieces above keep
+            // their exact spans). mergeCount decides how many
+            // following chunks this claim MAY cover; each one is
+            // then actually taken with a CAS on nextChunk — a lost
+            // race (another worker advanced the cursor) or a chunk
+            // that turned done stops the extension, so an index is
+            // never claimed twice and never skipped: an index the
+            // CAS failed on stays ahead of the cursor for its own
+            // claimant. The result is ONE ActiveChunk spanning
+            // [start of index, end of lastIndex) streamed by ONE
+            // Range request (downloadRange needs no change);
+            // per-index completion stays deferred to
+            // downloadActive, which drains every index the final
+            // span overlaps.
+            val target = ChunkPlanner.mergeCount(grid, index, chunkCount) { idx ->
+                synchronized(task.chunkDone) { task.chunkDone[idx] }
+            }
+            var lastIndex = index
+            while (lastIndex - index + 1 < target) {
+                val nxt = lastIndex + 1
+                if (nxt >= chunkCount) break
+                if (synchronized(task.chunkDone) { task.chunkDone[nxt] }) break
+                if (!nextChunk.compareAndSet(nxt, nxt + 1)) break
+                lastIndex = nxt
+            }
+            val firstRange = ChunkPlanner.rangeOf(grid, index)
+            val lastRange = ChunkPlanner.rangeOf(grid, lastIndex)
+            val ac = ActiveChunk(index, firstRange.first, lastRange.last + 1)
             synchronized(activeLock) { active.add(ac) }
             downloadActive(ac)
         }
@@ -1417,13 +1458,48 @@ class DownloadEngine(
                 idle, MIN_SPLIT,
             ) ?: return null
             val origEnd = owner.end
-            owner.end = live.cuts.first()
             val bounds = live.cuts + origEnd
+            // v4.7 step B (coordinator-approved fix): rebalance
+            // chunkParts for EVERY index the owner's span touches,
+            // in this same locked section, BEFORE any mutation.
+            // The owner's shrink surrenders the indexes past the
+            // first cut to the tails; each surrendered index loses
+            // the owner's share (-1) and gains one per tail
+            // covering it, each kept index gains only its covering
+            // tails — see ChunkPlanner.splitRebalancedCounts for
+            // the invariant and why the result can never be <= 0
+            // for a correct partition (the tails partition the
+            // surrendered range, so every surrendered index is
+            // covered by >= 1 tail). If it ever were <= 0 the
+            // partition logic itself would be broken: abort the
+            // split untouched rather than store a count that could
+            // mark an index done from a split (done-marking is
+            // exclusive to downloadActive's completion drain).
+            // The formula is span-based, not index-based, so it
+            // applies recursively when a cross-boundary TAIL is
+            // itself split later, exactly as it does here.
+            // Single-chunk owner: the transfer set is empty (the
+            // cut is always inside its one index), every tail
+            // covers that index, and the delta is exactly
+            // +tails.size — word-for-word the pre-v4.7 behaviour.
+            val grid = ChunkPlanner.gridOf(
+                task.totalSize, task.chunkSize, task.fineChunkSize, task.fineChunkCount
+            )
+            val origOverlap = ChunkPlanner.indexesOverlapping(grid, owner.start, origEnd)
+            val newOverlap = ChunkPlanner.indexesOverlapping(grid, owner.start, live.cuts.first())
+            val tailOverlaps = (0 until bounds.size - 1).map { i ->
+                ChunkPlanner.indexesOverlapping(grid, bounds[i], bounds[i + 1])
+            }
+            val rebalanced = ChunkPlanner.splitRebalancedCounts(
+                origOverlap, newOverlap, tailOverlaps
+            ) { idx -> chunkParts[idx] ?: 1 }
+            if (rebalanced.values.any { it <= 0 }) return null
+            owner.end = live.cuts.first()
             val tails = ArrayList<ActiveChunk>(bounds.size - 1)
             for (i in 0 until bounds.size - 1) {
                 tails.add(ActiveChunk(owner.index, bounds[i], bounds[i + 1]))
             }
-            chunkParts[owner.index] = (chunkParts[owner.index] ?: 1) + tails.size
+            for ((idx, newCount) in rebalanced) chunkParts[idx] = newCount
             active.addAll(tails)
             for (t in tails.drop(1)) pendingTails.addLast(t)
             return tails.first()
@@ -1499,13 +1575,32 @@ class DownloadEngine(
         synchronized(activeLock) { active.remove(ac) }
         ac.connection = null
         if (ok && ac.index >= 0) {
+            // v4.7 step B: completion drains EVERY index this
+            // part's FINAL span [ac.start, ac.end) overlaps — the
+            // grid rebuilt from the task fields exactly as
+            // workerLoop builds it. ac.end is read NOW, after any
+            // endgame split shrank it, so a split owner drains only
+            // the indexes it still covers (the tails drain theirs).
+            // Each overlapped index loses exactly one — this part
+            // was one of the live parts covering it (the core
+            // invariant on chunkParts) — and an index whose count
+            // reaches 0 is marked done; this drain is the ONLY
+            // place done is ever marked. For a single-chunk part
+            // the overlapped set is exactly [ac.index], so the
+            // arithmetic is word-for-word the pre-v4.7 behaviour.
+            val grid = ChunkPlanner.gridOf(
+                task.totalSize, task.chunkSize, task.fineChunkSize, task.fineChunkCount
+            )
+            val overlapped = ChunkPlanner.indexesOverlapping(grid, ac.start, ac.end)
             synchronized(activeLock) {
-                val left = (chunkParts[ac.index] ?: 1) - 1
-                if (left <= 0) {
-                    chunkParts.remove(ac.index)
-                    synchronized(task.chunkDone) { task.chunkDone[ac.index] = true }
-                } else {
-                    chunkParts[ac.index] = left
+                for (idx in overlapped) {
+                    val left = (chunkParts[idx] ?: 1) - 1
+                    if (left <= 0) {
+                        chunkParts.remove(idx)
+                        synchronized(task.chunkDone) { task.chunkDone[idx] = true }
+                    } else {
+                        chunkParts[idx] = left
+                    }
                 }
             }
         }

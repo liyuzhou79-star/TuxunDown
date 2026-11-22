@@ -230,6 +230,185 @@ class ChunkPlannerTest {
         assertTrue(g.fineZoneBytes < g.totalSize)
     }
 
+    // ---------- v4.7 step B: adjacent-chunk merging ----------
+
+    private val kb = 1024L
+    private val mb = 1024L * kb
+
+    @Test
+    fun mergeCountUniform128kHitsCountCap() {
+        // 128 KB pieces: 4 x 128 KB = 512 KB, well under the span
+        // cap — the COUNT cap (4) is what stops it.
+        val grid = ChunkPlanner.uniform(16 * 128 * kb, 128 * kb)
+        val count = ChunkPlanner.chunkCount(grid)
+        assertEquals(16, count)
+        assertEquals(4, ChunkPlanner.mergeCount(grid, 0, count) { false })
+    }
+
+    @Test
+    fun mergeCountFineZone256kHitsCountCap() {
+        // Fine zone of 256 KB pieces (coarse 1 MB behind it):
+        // 4 x 256 KB = 1 MB span, count cap stops it.
+        val grid = ChunkGrid(64 * mb, 256 * kb, 8, mb)
+        assertEquals(4, ChunkPlanner.mergeCount(grid, 0, ChunkPlanner.chunkCount(grid)) { false })
+    }
+
+    @Test
+    fun mergeCount512kHitsSpanCapExactlyAtBoundary() {
+        // 512 KB pieces: the 4th piece lands the span EXACTLY on
+        // the 2 MB cap (allowed, <=), so the count is 4.
+        val grid = ChunkPlanner.uniform(16 * 512 * kb, 512 * kb)
+        val count = ChunkPlanner.chunkCount(grid)
+        assertEquals(4, ChunkPlanner.mergeCount(grid, 0, count) { false })
+    }
+
+    @Test
+    fun mergeCount1MbStopsAtTwoBySpanCap() {
+        // 1 MB pieces: 1 + 1 = 2 MB exactly; a third would exceed.
+        val grid = ChunkPlanner.uniform(16 * mb, mb)
+        val count = ChunkPlanner.chunkCount(grid)
+        assertEquals(2, ChunkPlanner.mergeCount(grid, 0, count) { false })
+    }
+
+    @Test
+    fun mergeCountOversizedFirstChunkIsOne() {
+        // A first chunk over the 1 MB per-chunk cap never merges.
+        val grid = ChunkPlanner.uniform(16 * 2 * mb, 2 * mb)
+        val count = ChunkPlanner.chunkCount(grid)
+        assertEquals(1, ChunkPlanner.mergeCount(grid, 0, count) { false })
+    }
+
+    @Test
+    fun mergeCountStopsAtDoneChunkInMiddle() {
+        val grid = ChunkPlanner.uniform(16 * 128 * kb, 128 * kb)
+        val count = ChunkPlanner.chunkCount(grid)
+        // Index 2 already done: the merge is the prefix {0,1}.
+        assertEquals(2, ChunkPlanner.mergeCount(grid, 0, count) { it == 2 })
+        // Done immediately after the first chunk: no merge at all.
+        assertEquals(1, ChunkPlanner.mergeCount(grid, 0, count) { it == 1 })
+    }
+
+    @Test
+    fun mergeCountStopsAtChunkCountEnd() {
+        val grid = ChunkPlanner.uniform(16 * 128 * kb, 128 * kb)
+        val count = ChunkPlanner.chunkCount(grid)
+        assertEquals(1, ChunkPlanner.mergeCount(grid, count - 1, count) { false })
+        assertEquals(2, ChunkPlanner.mergeCount(grid, count - 2, count) { false })
+        assertEquals(4, ChunkPlanner.mergeCount(grid, count - 4, count) { false })
+    }
+
+    // Grid for the overlap tests: fine [0,1k) [1k,2k) [2k,3k);
+    // coarse [3k,5k) [5k,7k) [7k,9k) [9k,10k).
+    private val overlapGrid = ChunkGrid(10_000, 1_000, 3, 2_000)
+
+    @Test
+    fun overlappingWholeChunk() {
+        assertEquals(listOf(3), ChunkPlanner.indexesOverlapping(overlapGrid, 3_000, 5_000))
+        assertEquals(listOf(0), ChunkPlanner.indexesOverlapping(overlapGrid, 0, 1_000))
+    }
+
+    @Test
+    fun overlappingCrossesThreeChunks() {
+        assertEquals(
+            listOf(0, 1, 2),
+            ChunkPlanner.indexesOverlapping(overlapGrid, 500, 2_500),
+        )
+    }
+
+    @Test
+    fun overlappingPartialInsideOneChunk() {
+        assertEquals(listOf(3), ChunkPlanner.indexesOverlapping(overlapGrid, 3_200, 3_800))
+    }
+
+    @Test
+    fun overlappingCrossesFineCoarseBoundary() {
+        assertEquals(
+            listOf(2, 3),
+            ChunkPlanner.indexesOverlapping(overlapGrid, 2_500, 3_500),
+        )
+    }
+
+    @Test
+    fun overlappingEndingExactlyOnBoundaryExcludesNext() {
+        // [2k, 3k) is exactly chunk 2; chunk 3 starts at 3k and
+        // only touches the interval.
+        assertEquals(listOf(2), ChunkPlanner.indexesOverlapping(overlapGrid, 2_000, 3_000))
+        assertEquals(listOf(0), ChunkPlanner.indexesOverlapping(overlapGrid, 0, 1_000))
+    }
+
+    @Test
+    fun overlappingEmptyIntervalIsEmpty() {
+        assertEquals(emptyList<Int>(), ChunkPlanner.indexesOverlapping(overlapGrid, 5_000, 5_000))
+        assertEquals(emptyList<Int>(), ChunkPlanner.indexesOverlapping(overlapGrid, 6_000, 5_000))
+    }
+
+    @Test
+    fun overlappingEndPastTotalIsClamped() {
+        assertEquals(listOf(6), ChunkPlanner.indexesOverlapping(overlapGrid, 9_000, 999_999))
+        assertEquals(
+            emptyList<Int>(),
+            ChunkPlanner.indexesOverlapping(overlapGrid, 10_000, 11_000),
+        )
+    }
+
+    @Test
+    fun splitRebalanceReproducesTheStoppedCounterexample() {
+        // The first attempt's stop case: 128 KB grid, a merged
+        // owner covering {0,1,2,3}, split with the first cut at
+        // 256 KB — the owner keeps {0,1}, one tail takes {2,3}.
+        // Balanced counts must be exactly 1 everywhere: the owner
+        // completion then drains {0,1} to 0 (done) and the tail
+        // completion drains {2,3} to 0 (done). Without the
+        // surrendered -1, {2,3} would sit at 2 and never finish.
+        val grid = ChunkPlanner.uniform(8 * 128 * kb, 128 * kb)
+        val orig = ChunkPlanner.indexesOverlapping(grid, 0, 512 * kb)
+        val kept = ChunkPlanner.indexesOverlapping(grid, 0, 256 * kb)
+        val tail = ChunkPlanner.indexesOverlapping(grid, 256 * kb, 512 * kb)
+        assertEquals(listOf(0, 1, 2, 3), orig)
+        assertEquals(listOf(0, 1), kept)
+        assertEquals(listOf(2, 3), tail)
+        val counts = ChunkPlanner.splitRebalancedCounts(orig, kept, listOf(tail)) { 1 }
+        assertEquals(mapOf(0 to 1, 1 to 1, 2 to 1, 3 to 1), counts)
+        // Simulate the two completion drains over the balanced map.
+        val live = counts.toMutableMap()
+        for (idx in kept) live[idx] = live.getValue(idx) - 1
+        for (idx in tail) live[idx] = live.getValue(idx) - 1
+        assertTrue(live.values.all { it == 0 })
+    }
+
+    @Test
+    fun splitRebalanceSingleChunkOwnerMatchesLegacyDelta() {
+        // Single-chunk owner split into owner + 2 tails, all inside
+        // index 5: transfer set empty, delta is exactly +tails.size
+        // over the current count — the pre-v4.7 arithmetic.
+        val counts = ChunkPlanner.splitRebalancedCounts(
+            listOf(5), listOf(5), listOf(listOf(5), listOf(5))
+        ) { 1 }
+        assertEquals(mapOf(5 to 3), counts)
+    }
+
+    @Test
+    fun splitRebalanceAppliesRecursivelyToACrossBoundaryTail() {
+        // The tail that took {2,3} (count 1 each after the first
+        // rebalance) is itself split: it keeps {2}, a new tail
+        // takes {3}. The same formula on the tail's own overlaps
+        // leaves both counts at exactly 1.
+        val counts = ChunkPlanner.splitRebalancedCounts(
+            listOf(2, 3), listOf(2), listOf(listOf(3))
+        ) { 1 }
+        assertEquals(mapOf(2 to 1, 3 to 1), counts)
+    }
+
+    @Test
+    fun splitRebalanceMultipleTailsPartitioningSurrenderedRange() {
+        // Owner {0,1,2,3} shrinks to {0}; two tails partition the
+        // surrendered range as {1,2} and {3}. Every index stays 1.
+        val counts = ChunkPlanner.splitRebalancedCounts(
+            listOf(0, 1, 2, 3), listOf(0), listOf(listOf(1, 2), listOf(3))
+        ) { 1 }
+        assertEquals(mapOf(0 to 1, 1 to 1, 2 to 1, 3 to 1), counts)
+    }
+
     @Test
     fun manyThreadsOnMidFileStillGetSeveralChunksEach() {
         // 64 MB at 32 threads: the 512 KB tier alone would give

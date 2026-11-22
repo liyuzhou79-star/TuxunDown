@@ -168,6 +168,149 @@ object ChunkPlanner {
         return start until end
     }
 
+    // ---------- v4.7: adjacent-chunk request merging ----------
+
+    /** Most chunks one fresh claim may merge into a single Range
+     *  request (v4.7 step B). Four keeps the merged span's failure
+     *  waste bounded (see [MERGE_MAX_SPAN_BYTES]) while still
+     *  collapsing the common fine-grid burst into one request. */
+    const val MERGE_MAX_CHUNKS = 4
+
+    /** A single chunk larger than this is never merged: it already
+     *  amortises its request round trip on its own. */
+    const val MERGE_MAX_CHUNK_BYTES = 1024L * 1024
+
+    /** Total span cap for one merged request. A failed merged
+     *  attempt re-downloads at most this much on resume — the same
+     *  bounded-waste class as today's partial single chunk. */
+    const val MERGE_MAX_SPAN_BYTES = 2L * 1024 * 1024
+
+    private fun chunkBytes(grid: ChunkGrid, index: Int): Long {
+        val r = rangeOf(grid, index)
+        return r.last - r.first + 1
+    }
+
+    /**
+     * How many consecutive chunks, starting at [firstIndex], one
+     * fresh claim may merge into a single span (>= 1).
+     *
+     * Contract: the caller guarantees [firstIndex] is already
+     * claimed and not done. The FIRST chunk larger than
+     * [MERGE_MAX_CHUNK_BYTES] returns 1 at once. Each FOLLOWING
+     * chunk joins only while ALL of these hold: its index is
+     * < [chunkCount], it is not done ([isDone]), its own size is
+     * <= [MERGE_MAX_CHUNK_BYTES], the accumulated span plus its
+     * size stays <= [MERGE_MAX_SPAN_BYTES], and the merged total
+     * stays < [MERGE_MAX_CHUNKS]. The first failure stops the
+     * count — merging is a prefix, never a selection.
+     */
+    fun mergeCount(
+        grid: ChunkGrid,
+        firstIndex: Int,
+        chunkCount: Int,
+        isDone: (Int) -> Boolean,
+    ): Int {
+        if (firstIndex < 0 || firstIndex >= chunkCount) return 1
+        val firstBytes = chunkBytes(grid, firstIndex)
+        if (firstBytes > MERGE_MAX_CHUNK_BYTES) return 1
+        var count = 1
+        var span = firstBytes
+        while (count < MERGE_MAX_CHUNKS) {
+            val next = firstIndex + count
+            if (next >= chunkCount) break
+            if (isDone(next)) break
+            val bytes = chunkBytes(grid, next)
+            if (bytes > MERGE_MAX_CHUNK_BYTES) break
+            if (span + bytes > MERGE_MAX_SPAN_BYTES) break
+            span += bytes
+            count++
+        }
+        return count
+    }
+
+    /**
+     * Indexes of the chunks whose byte ranges intersect
+     * [start, end), in ascending order. An empty (or reversed)
+     * interval yields an empty list; [end] past the file is
+     * clamped to the grid, and a start at/past the file end
+     * yields an empty list. A chunk that merely TOUCHES the
+     * interval at a boundary (its start == [end], or its end ==
+     * [start]) does not intersect it and is not included.
+     */
+    fun indexesOverlapping(grid: ChunkGrid, start: Long, end: Long): List<Int> {
+        if (grid.totalSize <= 0 || grid.coarseSize <= 0) return emptyList()
+        if (end <= start) return emptyList()
+        val clampedStart = maxOf(start, 0L)
+        val clampedEnd = minOf(end, grid.totalSize)
+        if (clampedEnd <= clampedStart) return emptyList()
+        val firstIndex = if (
+            grid.fineCount > 0 && grid.fineSize > 0 &&
+            clampedStart < grid.fineZoneBytes
+        ) {
+            (clampedStart / grid.fineSize).toInt()
+        } else {
+            grid.fineCount +
+                ((clampedStart - grid.fineZoneBytes) / grid.coarseSize).toInt()
+        }
+        val count = chunkCount(grid)
+        val out = ArrayList<Int>()
+        var idx = firstIndex
+        while (idx < count) {
+            val r = rangeOf(grid, idx)
+            if (r.first >= clampedEnd) break
+            if (r.last + 1 > clampedStart) out.add(idx)
+            idx++
+        }
+        return out
+    }
+
+    /**
+     * v4.7 step B (coordinator-approved fix): the chunkParts
+     * rebalance for ONE endgame split, as a pure function.
+     *
+     * CORE INVARIANT (the invariant the whole merged-claim
+     * accounting rests on): for every chunk index, chunkParts[idx]
+     * always equals the number of LIVE parts whose CURRENT span
+     * covers idx (an absent entry means 1). A completion drains
+     * exactly one from every index its part's final span overlaps;
+     * a count reaching 0 is the ONLY way an index is marked done.
+     *
+     * A split shrinks the owner's span from [origOverlap] to
+     * [newOverlap] and creates tail parts covering the surrendered
+     * range. For each originally overlapped index the balanced
+     * count is:
+     *   newCount = currentCount(idx) + tailsCovering(idx)
+     *              - (1 if idx was surrendered by the shrink else 0)
+     * where tailsCovering counts the tails whose span intersects
+     * idx. The surrendered term is the fix: without it, a merged
+     * owner split past a chunk boundary would leave the
+     * surrendered indexes counted for a part that no longer covers
+     * them, and they could never drain to 0.
+     *
+     * newCount is always >= 1 for a correct split: every
+     * surrendered index is covered by >= 1 tail (the tails
+     * partition the surrendered range), so its delta is >= 0, and
+     * a kept index's delta is >= 0 too. A result <= 0 therefore
+     * proves the partition itself is wrong; the caller must abort
+     * the split rather than store it. A split NEVER marks an index
+     * done — only the completion drain does.
+     */
+    fun splitRebalancedCounts(
+        origOverlap: Collection<Int>,
+        newOverlap: Collection<Int>,
+        tailOverlaps: List<Collection<Int>>,
+        currentCount: (Int) -> Int,
+    ): Map<Int, Int> {
+        val kept = newOverlap.toSet()
+        val out = LinkedHashMap<Int, Int>()
+        for (idx in origOverlap) {
+            val tailsCovering = tailOverlaps.count { idx in it }
+            val surrendered = if (idx in kept) 0 else 1
+            out[idx] = currentCount(idx) + tailsCovering - surrendered
+        }
+        return out
+    }
+
     fun downloadedOf(grid: ChunkGrid, done: BooleanArray): Long {
         var sum = 0L
         for (i in done.indices) {
