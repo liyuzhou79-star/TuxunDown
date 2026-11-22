@@ -1344,6 +1344,26 @@ fun DownApp() {
             }
         }
 
+    // v3.3: a non-blank query switches the home list into
+    // GLOBAL search mode — tasks across all tabs (archived
+    // included), downloaded files and sniff history, in three
+    // groups INSTEAD of the tab-filtered list (see
+    // GlobalSearch). The task group honours the same sort
+    // modes as the flat list. Null = normal browsing.
+    val globalResult = if (query.isNotBlank()) {
+        val r = com.tuxundown.android.core.GlobalSearch.search(
+            store.tasks, DownloadCenter.sniffHistory, query,
+        )
+        val sortedTasks = when (sortMode) {
+            1 -> r.tasks.sortedByDescending { it.totalSize }
+            2 -> r.tasks.sortedBy { it.createdAt }
+            else -> r.tasks
+        }
+        r.copy(tasks = sortedTasks)
+    } else {
+        null
+    }
+
     // v2.1 safe-area: the whole UI sits inside the system-bar
     // insets (see MainActivity.onCreate) — screens and their
     // bottom buttons never slide under the status or gesture bar
@@ -1645,16 +1665,28 @@ fun DownApp() {
             }
 
             // ---- search + sort ----
-            if (store.tasks.isNotEmpty()) {
+            // v3.3: the box is a GLOBAL search now (tasks /
+            // downloaded files / sniff history), so it also
+            // shows when only sniff history exists.
+            if (store.tasks.isNotEmpty() || DownloadCenter.sniffHistory.isNotEmpty()) {
                 item(key = "search") {
                     Column {
                         OutlinedTextField(
                             value = query,
                             onValueChange = { query = it },
-                            label = { Text("搜索任务（文件名或链接）") },
+                            label = { Text("搜索任务、已下载文件、嗅探历史") },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth(),
                         )
+                        if (globalResult != null) {
+                            Text(
+                                "全局搜索中：下面按任务 / 已下载文件 / 嗅探历史分组显示，" +
+                                    "清空搜索就回到任务列表。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 4.dp),
+                            )
+                        }
                         Row(
                             Modifier.fillMaxWidth().padding(top = 6.dp)
                                 .horizontalScroll(rememberScrollState()),
@@ -1736,7 +1768,11 @@ fun DownApp() {
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                             ) {
                                 OutlinedButton(onClick = {
-                                    selectedIds = displayedTasks.map { it.id }.toSet()
+                                    // v3.3: in global-search mode
+                                    // the rendered set is the
+                                    // search hits, not the tab list.
+                                    selectedIds = (globalResult?.tasks ?: displayedTasks)
+                                        .map { it.id }.toSet()
                                 }) { Text("全选") }
                                 OutlinedButton(onClick = {
                                     store.tasks.filter { it.id in selectedIds }.forEach {
@@ -1825,8 +1861,90 @@ fun DownApp() {
                 }
             }
 
+            // ---- v3.3: global search results (three groups) ----
+            // Rendered INSTEAD of the tab list while a query is
+            // present. A task hit is the full card (that is its
+            // location — every action works right there); a
+            // file hit jumps to the files page (the search does
+            // not open files itself); a history hit re-opens
+            // the add dialog with the page filled in, exactly
+            // like tapping the entry inside that dialog.
+            if (globalResult != null) {
+                if (globalResult.isEmpty) {
+                    item(key = "g-none") {
+                        Text("全局搜索没有找到和「${query.trim()}」有关的内容。")
+                    }
+                }
+                if (globalResult.tasks.isNotEmpty()) {
+                    item(key = "g-tasks-head") {
+                        Text(
+                            "任务（${globalResult.tasks.size}）",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                    items(globalResult.tasks, key = { "g-" + it.id }) { task ->
+                        TaskCardFor(task)
+                    }
+                }
+                if (globalResult.files.isNotEmpty()) {
+                    item(key = "g-files-head") {
+                        Text(
+                            "已下载文件（${globalResult.files.size}）",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                    items(globalResult.files, key = { "gf-" + it.taskId }) { f ->
+                        Card(
+                            Modifier.fillMaxWidth().clickable { screen = "files" },
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surface
+                            ),
+                        ) {
+                            Column(Modifier.padding(12.dp)) {
+                                Text(
+                                    f.name,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    "${com.tuxundown.android.core.Format.size(f.size)} · 点开去「已下载文件」页",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+                if (globalResult.history.isNotEmpty()) {
+                    item(key = "g-hist-head") {
+                        Text(
+                            "嗅探历史（${globalResult.history.size}）",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                    items(globalResult.history, key = { "gh-$it" }) { h ->
+                        Text(
+                            h,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp)
+                                .clickable { urlText = h; showAdd = true }
+                                .padding(vertical = 14.dp),
+                        )
+                    }
+                }
+            }
+
             // ---- empty state (v1.4 item 14) ----
-            if (store.tasks.isEmpty()) {
+            if (globalResult == null && store.tasks.isEmpty()) {
                 item(key = "empty") {
                     Card(
                         Modifier.fillMaxWidth(),
@@ -1871,7 +1989,7 @@ fun DownApp() {
                         }
                     }
                 }
-            } else if (displayedTasks.isEmpty()) {
+            } else if (globalResult == null && displayedTasks.isEmpty()) {
                 item(key = "nomatch") {
                     Text("这个分类下没有任务。")
                 }
@@ -1881,18 +1999,22 @@ fun DownApp() {
             // unfolded foldable) the tasks flow in TWO columns
             // inside the same single scrolling LazyColumn — cards
             // keep their natural height, nothing is stretched.
-            if (wideScreen) {
-                items(displayedTasks.chunked(2), key = { "row-" + it.first().id }) { pair ->
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        for (t in pair) {
-                            Box(Modifier.weight(1f)) { TaskCardFor(t) }
+            // v3.3: in global-search mode the groups above ARE
+            // the list; the flat list renders only when browsing.
+            if (globalResult == null) {
+                if (wideScreen) {
+                    items(displayedTasks.chunked(2), key = { "row-" + it.first().id }) { pair ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            for (t in pair) {
+                                Box(Modifier.weight(1f)) { TaskCardFor(t) }
+                            }
+                            if (pair.size == 1) Spacer(Modifier.weight(1f))
                         }
-                        if (pair.size == 1) Spacer(Modifier.weight(1f))
                     }
-                }
-            } else {
-                items(displayedTasks, key = { it.id }) { task ->
-                    TaskCardFor(task)
+                } else {
+                    items(displayedTasks, key = { it.id }) { task ->
+                        TaskCardFor(task)
+                    }
                 }
             }
         }
