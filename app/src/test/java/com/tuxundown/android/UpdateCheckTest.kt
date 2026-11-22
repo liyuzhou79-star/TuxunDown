@@ -33,6 +33,31 @@ class UpdateCheckTest {
     }
 
     @Test
+    fun compareVersions_3xChainOrdersCorrectly() {
+        // v3.6 audit round 22 (release readiness): the whole
+        // published/acceptance chain 1.2.0 -> 3.6.0 must order
+        // strictly ascending under the same comparator the About
+        // page uses, so a future formal release is offered to
+        // every older install — and to none of the newer ones.
+        val chain = listOf(
+            "1.2.0", "1.9.0", "2.0.0", "2.9.0", "3.0.0", "3.5.0", "3.6.0",
+        )
+        for (i in 0 until chain.size - 1) {
+            assertTrue(
+                "${chain[i]} < ${chain[i + 1]}",
+                UpdateCheck.compareVersions(chain[i], chain[i + 1]) < 0,
+            )
+            assertTrue(UpdateCheck.isNewer(chain[i + 1], chain[i]))
+            assertFalse(UpdateCheck.isNewer(chain[i], chain[i + 1]))
+        }
+        // Two-digit minors keep ordering numerically past 3.9.
+        assertTrue(UpdateCheck.compareVersions("3.10.0", "3.9.0") > 0)
+        // An installed 3.6.0 acceptance build is ahead of the
+        // only formal release page (v1.2.0): not an update offer.
+        assertFalse(UpdateCheck.isNewer("1.2.0", "3.6.0"))
+    }
+
+    @Test
     fun parseLatest_picksTheApkAsset() {
         val json = """
             {
