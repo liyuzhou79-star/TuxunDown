@@ -41,6 +41,21 @@ object DownloadCenter {
         set(v) { prefs().edit().putBoolean("chargeOnlyDownload", v).apply() }
 
     /**
+     * v4.9 (audit round 34): keep the CPU awake while a
+     * transfer is actually running (see WakeGuard), so
+     * screen-off / Doze suspend cannot sag throughput.
+     * Default ON — deliberately unlike chargeOnlyDownload
+     * above (a protective gate, default off): this switch
+     * guards the app's core promise (speed with the screen
+     * off), and its honest cost (more battery) is spelled out
+     * on the switch itself. Only real transfer time holds
+     * the lock — queueing, parking and backoff never do.
+     */
+    var keepCpuAwake: Boolean
+        get() = pBool("keepCpuAwake", true)
+        set(v) { prefs().edit().putBoolean("keepCpuAwake", v).apply() }
+
+    /**
      * v3.9: is external power connected right now? Read from
      * the sticky ACTION_BATTERY_CHANGED broadcast — querying it
      * with a null receiver returns the last broadcast without
@@ -562,6 +577,7 @@ object DownloadCenter {
         val o = org.json.JSONObject()
         o.put("wifiOnly", wifiOnly)
         o.put("chargeOnlyDownload", chargeOnlyDownload)
+        o.put("keepCpuAwake", keepCpuAwake)
         o.put("speedLimitKBps", speedLimitKBps)
         o.put("speedSchedEnabled", speedSchedEnabled)
         o.put("speedSchedStartMin", speedSchedStartMin)
@@ -615,6 +631,9 @@ object DownloadCenter {
         if (o.has("wifiOnly")) wifiOnly = o.optBoolean("wifiOnly", wifiOnly)
         if (o.has("chargeOnlyDownload")) {
             chargeOnlyDownload = o.optBoolean("chargeOnlyDownload", chargeOnlyDownload)
+        }
+        if (o.has("keepCpuAwake")) {
+            keepCpuAwake = o.optBoolean("keepCpuAwake", keepCpuAwake)
         }
         if (o.has("speedLimitKBps")) speedLimitKBps = o.optInt("speedLimitKBps", speedLimitKBps)
         if (o.has("speedSchedEnabled")) {

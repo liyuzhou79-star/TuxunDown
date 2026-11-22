@@ -18,6 +18,12 @@
          switch; with the switch off the receiver returns instantly
          and nothing runs at boot beyond that check. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- v4.9: only so a PARTIAL_WAKE_LOCK can be held while a
+         transfer is actually running (screen-off speed keeping,
+         see WakeGuard); queueing / waiting states never hold it,
+         and the「下载中保持运行」settings switch can turn it off
+         entirely. This is the only permission v4.9 adds. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <application

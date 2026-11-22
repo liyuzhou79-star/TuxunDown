@@ -145,6 +145,10 @@ class DownloadService : Service() {
         // process entry (idempotent — see CrashGuard.install).
         CrashGuard.install(this)
         DownloadCenter.init(this)
+        // v4.9 (audit round 34): hand WakeGuard its context so
+        // DownloadEngine.run() can hold a partial wake lock for
+        // the length of a transfer (idempotent — see WakeGuard).
+        WakeGuard.attach(this)
         // v2.5: fallback trigger for the deferred startup work
         // when the process was started by the service rather
         // than the UI (one-shot inside; the UI path is primary).

@@ -238,6 +238,14 @@ class DownloadEngine(
         // re-queue does not inherit a stale first pick.
         task.jumpedAt = 0
         val runStartMs = System.currentTimeMillis()
+        // v4.9 (audit round 34): hold the CPU awake for exactly
+        // this transfer — see WakeGuard for the lifecycle proof
+        // (run() is the single funnel for segmented / single /
+        // HLS / FTP; backoff, finalize and every parked wait
+        // live outside it). False when the settings switch is
+        // off or no lock is available, and then the finally
+        // below releases nothing.
+        val wakeHeld = WakeGuard.acquireTransfer()
         try {
             // v1.7: FTP links take their own path (hand-written
             // FtpClient: PASV, SIZE/REST probe, single stream with
@@ -403,6 +411,9 @@ class DownloadEngine(
             task.status = if (paused) TaskStatus.PAUSED else TaskStatus.FAILED
             return task.status
         } finally {
+            // v4.9: paired with the acquireTransfer above —
+            // only a run that took a hold gives one back.
+            if (wakeHeld) WakeGuard.releaseTransfer()
             // v3.5: the live connection snapshot dies with
             // the run — a stale one would show connections
             // that no longer exist.
