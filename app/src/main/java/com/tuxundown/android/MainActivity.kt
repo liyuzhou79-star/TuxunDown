@@ -104,6 +104,7 @@ import com.tuxundown.android.core.DaySeries
 import com.tuxundown.android.core.Diagnostics
 import com.tuxundown.android.core.DownloadCenter
 import com.tuxundown.android.core.DownloadedFiles
+import com.tuxundown.android.core.DuplicateFinder
 import com.tuxundown.android.core.Format
 import com.tuxundown.android.core.FtpClient
 import com.tuxundown.android.core.LinkExtract
@@ -2785,6 +2786,54 @@ fun FilesScreen(onBack: () -> Unit) {
     var reloadKey by remember { mutableStateOf(0) }
     var deleteEntry by remember { mutableStateOf<DownloadedFiles.Entry?>(null) }
 
+    // ---- v3.1: duplicate finder — phase 1 groups by exact
+    // size (free), phase 2 streams only those candidates
+    // through SHA-256 on a background thread (cancellable).
+    // Read-only until the user ticks copies and confirms. ----
+    var dupScanning by remember { mutableStateOf(false) }
+    var dupProgress by remember { mutableStateOf("") }
+    var dupGroups by remember { mutableStateOf<List<DuplicateFinder.Group>?>(null) }
+    var dupChecked by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var dupConfirm by remember { mutableStateOf(false) }
+    val dupCancelFlag = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
+
+    fun startDupScan() {
+        dupGroups = null
+        dupChecked = emptySet()
+        dupCancelFlag.set(false)
+        dupScanning = true
+        dupProgress = "正在按大小分组…"
+        Thread {
+            val candidates = DuplicateFinder.sizeCandidates(entries)
+            val hashes = mutableMapOf<String, String>()
+            var done = 0
+            for (e in candidates) {
+                if (dupCancelFlag.get()) break
+                done++
+                val label = "正在校验第 $done / ${candidates.size} 个同大小文件…"
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    dupProgress = label
+                }
+                val h = runCatching {
+                    context.contentResolver.openInputStream(Uri.parse(e.uri))?.use {
+                        Checksum.digestCancellable(it, Checksum.SHA256) {
+                            !dupCancelFlag.get()
+                        }
+                    }
+                }.getOrNull()
+                if (h != null) hashes[e.uri] = h
+            }
+            val cancelled = dupCancelFlag.get()
+            val groups = if (cancelled) null
+                else DuplicateFinder.confirmedGroups(candidates, hashes)
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                dupScanning = false
+                dupProgress = ""
+                if (groups != null) dupGroups = groups
+            }
+        }.start()
+    }
+
     LaunchedEffect(reloadKey) {
         loading = true
         Thread {
@@ -2894,6 +2943,124 @@ fun FilesScreen(onBack: () -> Unit) {
                         }
                     }
                 }
+                // ---- v3.1: duplicate finder controls ----
+                Row(
+                    Modifier.padding(top = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (dupScanning) {
+                        Text(
+                            dupProgress,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = { dupCancelFlag.set(true) }) {
+                            Text("取消")
+                        }
+                    } else {
+                        OutlinedButton(
+                            onClick = { startDupScan() },
+                            enabled = !loading && entries.size >= 2,
+                        ) { Text("找重复文件") }
+                        if (dupGroups != null) {
+                            TextButton(onClick = {
+                                dupGroups = null
+                                dupChecked = emptySet()
+                            }) { Text("收起结果") }
+                        }
+                    }
+                }
+            }
+        }
+        // ---- v3.1: duplicate results ----
+        val dGroups = dupGroups
+        if (dGroups != null) {
+            item(key = "f-dup-head") {
+                val plan = DuplicateFinder.deletionPlan(dGroups, dupChecked)
+                Column {
+                    Text(
+                        if (dGroups.isEmpty()) {
+                            "没有发现重复文件（大小相同、内容也完全一样的文件一组都没有）。"
+                        } else {
+                            "找到 ${dGroups.size} 组重复文件，每组只留一份" +
+                                "可回收 ${Format.size(DuplicateFinder.totalReclaimable(dGroups))}。" +
+                                "勾选要删的副本，最后统一确认——不勾就不会删。"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (dupChecked.isNotEmpty()) {
+                        Spacer(Modifier.height(6.dp))
+                        Button(onClick = { dupConfirm = true }) {
+                            Text(
+                                "删除所选 ${dupChecked.size} 个" +
+                                    "（可回收 ${Format.size(plan.freedBytes)}）"
+                            )
+                        }
+                    }
+                }
+            }
+            dGroups.forEachIndexed { gi, g ->
+                item(key = "f-dup-g$gi") {
+                    Text(
+                        "第 ${gi + 1} 组 · 每份 ${Format.size(g.size)} · 共 ${g.entries.size} 份" +
+                            "（留一份可回收 ${Format.size(g.reclaimableBytes)}）",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+                items(g.entries, key = { "f-dup-m" + it.uri }) { e ->
+                    Card(
+                        Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surface
+                        ),
+                    ) {
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    dupChecked = if (e.uri in dupChecked) {
+                                        dupChecked - e.uri
+                                    } else {
+                                        dupChecked + e.uri
+                                    }
+                                }
+                                .padding(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Checkbox(
+                                checked = e.uri in dupChecked,
+                                onCheckedChange = { checked ->
+                                    dupChecked = if (checked) {
+                                        dupChecked + e.uri
+                                    } else {
+                                        dupChecked - e.uri
+                                    }
+                                },
+                            )
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    e.name,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    (if (e.modifiedAt > 0) {
+                                        Format.dateTime(e.modifiedAt)
+                                    } else "时间未知") +
+                                        if (e.taskId.isBlank()) " · 仅剩文件（记录已删）" else "",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
         if (!loading && entries.isEmpty()) {
@@ -2942,6 +3109,62 @@ fun FilesScreen(onBack: () -> Unit) {
                 }
             }
         }
+    }
+
+    // ---- v3.1: duplicate deletion — same rule as the single
+    // delete below (file AND its record go together), spelled
+    // out up front, with an extra warning when a ticked group
+    // would lose its LAST copy. ----
+    if (dupConfirm) {
+        val groupsNow = dupGroups ?: emptyList()
+        val plan = DuplicateFinder.deletionPlan(groupsNow, dupChecked)
+        val picked = entries.filter { it.uri in dupChecked }
+        AlertDialog(
+            onDismissRequest = { dupConfirm = false },
+            title = { Text("删除这些重复副本？") },
+            text = {
+                Text(
+                    "将删除 ${picked.size} 个文件，共回收 ${Format.size(plan.freedBytes)}。" +
+                        "有任务记录的文件会连记录一起清掉，删了不能恢复。\n" +
+                        if (plan.wipedGroups > 0) {
+                            "⚠ 其中 ${plan.wipedGroups} 组的所有副本都被勾选了——" +
+                                "删完这组文件就一份都不剩了，请确认不是误勾。"
+                        } else {
+                            "每组至少还留了一份，没勾的副本不受影响。"
+                        }
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    dupConfirm = false
+                    val targets = picked.toList()
+                    Thread {
+                        var okCount = 0
+                        for (e in targets) {
+                            if (PublicStorage.deleteByUri(context, e.uri)) okCount++
+                            if (e.taskId.isNotBlank()) {
+                                DownloadCenter.store.byId(e.taskId)?.let {
+                                    DownloadCenter.store.remove(it)
+                                }
+                            }
+                        }
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            Toast.makeText(
+                                context,
+                                "已删除 $okCount 个重复文件",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                            dupGroups = null
+                            dupChecked = emptySet()
+                            reloadKey++
+                        }
+                    }.start()
+                }) { Text("删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { dupConfirm = false }) { Text("取消") }
+            },
+        )
     }
 
     // Delete: FILE and RECORD are separate choices (v1.9) — the
