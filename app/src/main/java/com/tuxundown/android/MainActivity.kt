@@ -117,6 +117,7 @@ import com.tuxundown.android.core.ProxySettings
 import com.tuxundown.android.core.PublicStorage
 import com.tuxundown.android.core.ScheduleTime
 import com.tuxundown.android.core.SpeedSchedule
+import com.tuxundown.android.core.SpeedCompare
 import com.tuxundown.android.core.SpeedTest
 import com.tuxundown.android.core.TaskHeaders
 import com.tuxundown.android.core.TaskRecord
@@ -3437,6 +3438,13 @@ fun SpeedTestScreen(onBack: () -> Unit) {
     var singleBps by remember { mutableStateOf(-1L) }
     var multiBps by remember { mutableStateOf(-1L) }
     var testRef by remember { mutableStateOf<SpeedTest?>(null) }
+    // ---- v3.2: multi-point comparison state ----
+    var compareRunning by remember { mutableStateOf(false) }
+    var comparePhase by remember { mutableStateOf("") }
+    var compareResults by remember {
+        mutableStateOf<List<SpeedCompare.PointResult>>(emptyList())
+    }
+    var showCompareConfirm by remember { mutableStateOf(false) }
     // Leaving the screen stops the test (it would keep burning
     // data in the background otherwise).
     DisposableEffect(Unit) {
@@ -3492,6 +3500,77 @@ fun SpeedTestScreen(onBack: () -> Unit) {
                 }
             }
         }.start()
+    }
+    // v3.2: multi-point comparison — EVERY endpoint in turn
+    // (no early exit: a dead point is a result too, recorded as
+    // 没测通）, single phase then multi phase per point, results
+    // appended live so the chart grows point by point.
+    fun startCompare() {
+        if (running || compareRunning) return
+        compareRunning = true
+        compareResults = emptyList()
+        comparePhase = "准备多点对比…"
+        liveBps = 0
+        val test = SpeedTest()
+        testRef = test
+        Thread {
+            val out = mutableListOf<SpeedCompare.PointResult>()
+            val total = SpeedTest.ENDPOINTS.size
+            for ((idx, ep) in SpeedTest.ENDPOINTS.withIndex()) {
+                if (test.cancelled) break
+                post {
+                    comparePhase = "第 ${idx + 1}/$total 个测速点：${ep.label} · 单线程…"
+                    liveBps = 0
+                }
+                val s = test.runPhase(ep.url, 1, SpeedCompare.PHASE_MS) { b ->
+                    post { liveBps = b }
+                }
+                if (test.cancelled) break
+                post {
+                    comparePhase =
+                        "第 ${idx + 1}/$total 个测速点：${ep.label} · 多线程（4 条连接）…"
+                    liveBps = 0
+                }
+                val m = test.runPhase(
+                    ep.url, SpeedCompare.MULTI_CONNECTIONS, SpeedCompare.PHASE_MS,
+                ) { b -> post { liveBps = b } }
+                if (test.cancelled) break
+                out.add(SpeedCompare.PointResult(ep.label, s, m))
+                val snapshot = out.toList()
+                post { compareResults = snapshot }
+            }
+            post {
+                compareRunning = false
+                comparePhase = if (test.cancelled) "已停止" else "多点对比完成"
+                liveBps = 0
+            }
+        }.start()
+    }
+    // v3.2: the comparison burns real data on three networks —
+    // the totals are stated and consented BEFORE anything runs.
+    if (showCompareConfirm) {
+        val band = SpeedCompare.dataBandMB(SpeedTest.ENDPOINTS.size)
+        AlertDialog(
+            onDismissRequest = { showCompareConfirm = false },
+            title = { Text("多点对比测速") },
+            text = {
+                Text(
+                    "会依次测 ${SpeedTest.ENDPOINTS.size} 个测速点，每个点测单线程和多线程，" +
+                        "全程约 ${SpeedCompare.totalSeconds(SpeedTest.ENDPOINTS.size)} 秒，" +
+                        "大约消耗 ${band.first}–${band.last} MB 流量（网速越快用得越多）。" +
+                        "建议在 WiFi 下测；用流量测请先想好这个量。",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showCompareConfirm = false
+                    startCompare()
+                }) { Text("开始") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCompareConfirm = false }) { Text("取消") }
+            },
+        )
     }
     LazyColumn(
         Modifier
@@ -3579,6 +3658,147 @@ fun SpeedTestScreen(onBack: () -> Unit) {
                     modifier = Modifier.padding(top = 8.dp),
                 )
             }
+        }
+        // ---- v3.2: multi-point comparison ----
+        item(key = "sp-compare") {
+            SettingsGroup("多点对比") {
+                Text(
+                    "把三个测速点挨个测一遍，放在一起看。先说清：三个点在不同的网络上" +
+                        "（全球测速服务、镜像站、CDN 测试文件），到你手机的线路各不相同，" +
+                        "所以数字只能看个大概，不能直接比「哪个服务器快」——" +
+                        "同一个点里单线程和多线程的对比，才是这里真正有意义的部分。",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                if (comparePhase.isNotBlank()) {
+                    Text(
+                        comparePhase,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(top = 10.dp),
+                    )
+                }
+                if (compareRunning) {
+                    Text(
+                        Format.speed(liveBps),
+                        color = WinPalette.ChartGreen,
+                        fontSize = 30.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+                if (compareResults.isNotEmpty()) {
+                    Spacer(Modifier.height(10.dp))
+                    SpeedCompareChart(
+                        results = compareResults,
+                        modifier = Modifier.fillMaxWidth().height(150.dp),
+                    )
+                    Text(
+                        "浅绿＝单线程，深绿＝多线程；柱子按最快的那个值统一比例。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    compareResults.forEachIndexed { i, r ->
+                        if (r.reached) {
+                            InfoRow("${i + 1}. ${r.label} · 单线程：", Format.speed(r.singleBps))
+                            InfoRow("${i + 1}. ${r.label} · 多线程：", Format.speed(r.multiBps))
+                        } else {
+                            InfoRow("${i + 1}. ${r.label}：", "没测通（这个点连不上或没给数据）")
+                        }
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (compareRunning) {
+                        OutlinedButton(onClick = { testRef?.cancel() }) { Text("停止") }
+                    } else {
+                        Button(
+                            onClick = { showCompareConfirm = true },
+                            enabled = !running,
+                        ) {
+                            Text(if (compareResults.isEmpty()) "多点对比测速" else "再对比一次")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * v3.2: grouped bar chart for the multi-point comparison, in
+ * the same hand-drawn style as the weekly chart (green bars,
+ * grid, border, canvas labels). Two bars per point — pale for
+ * single-thread, full green for multi — on ONE shared scale
+ * (SpeedCompare.barFractions), point numbers under the columns;
+ * the rows under the chart map numbers to point names.
+ */
+@androidx.compose.runtime.Composable
+fun SpeedCompareChart(
+    results: List<SpeedCompare.PointResult>,
+    modifier: Modifier = Modifier,
+) {
+    val dark = isSystemInDarkTheme()
+    val singleColor = Color(0xFF9CCB9C)
+    val multiColor = WinPalette.ChartGreen
+    val gridColor = if (dark) Color(0xFF3A3A3A) else Color(0xFFDDDDDD)
+    val borderColor = if (dark) Color(0xFF4A4A4A) else Color(0xFFBDBDBD)
+    val bg = if (dark) Color(0xFF202020) else Color(0xFFFCFEFC)
+    val fractions = SpeedCompare.barFractions(results)
+    val fastest = results.maxOfOrNull { maxOf(it.singleBps, it.multiBps) } ?: 0
+    val topLabel = if (fastest > 0) "最快 ${Format.speed(fastest)}" else "还没有结果"
+    val labelColor = if (dark) 0xFFAAAAAA.toInt() else 0xFF767676.toInt()
+    Canvas(modifier.background(bg)) {
+        val w = size.width
+        val h = size.height
+        val labelH = 14.dp.toPx()
+        val bottomH = 12.dp.toPx()
+        val plotTop = labelH
+        val plotH = h - labelH - bottomH
+        for (i in 0..4) {
+            val y = plotTop + plotH * i / 4f
+            drawLine(gridColor, Offset(0f, y), Offset(w, y), strokeWidth = 1f)
+        }
+        drawRect(
+            borderColor,
+            topLeft = Offset(0f, plotTop),
+            size = Size(w, plotH),
+            style = Stroke(width = 1f),
+        )
+        val paint = android.graphics.Paint().apply {
+            color = labelColor
+            textSize = 10.dp.toPx()
+            isAntiAlias = true
+        }
+        drawContext.canvas.nativeCanvas.drawText(topLabel, 4.dp.toPx(), 11.dp.toPx(), paint)
+        if (results.isEmpty()) return@Canvas
+        val colW = w / results.size
+        val barW = colW * 0.28f
+        val gap = colW * 0.06f
+        fractions.forEachIndexed { i, (sf, mf) ->
+            val groupW = barW * 2 + gap
+            val gx = i * colW + (colW - groupW) / 2f
+            val sH = plotH * sf
+            if (sH > 0f) {
+                drawRect(
+                    singleColor,
+                    topLeft = Offset(gx, plotTop + plotH - sH),
+                    size = Size(barW, sH),
+                )
+            }
+            val mH = plotH * mf
+            if (mH > 0f) {
+                drawRect(
+                    multiColor,
+                    topLeft = Offset(gx + barW + gap, plotTop + plotH - mH),
+                    size = Size(barW, mH),
+                )
+            }
+            val label = "${i + 1}"
+            val tw = paint.measureText(label)
+            drawContext.canvas.nativeCanvas.drawText(
+                label, i * colW + (colW - tw) / 2f, h - 2.dp.toPx(), paint,
+            )
         }
     }
 }
