@@ -276,6 +276,21 @@ object SharedLinkState {
     var text by mutableStateOf("")
 }
 
+/**
+ * v3.8: a pending HLS variant choice — the variants a master
+ * playlist offered, plus everything the interrupted create was
+ * carrying, so picking a row can finish the create exactly as
+ * if the user had pasted the variant link directly.
+ */
+class HlsPick(
+    val variants: List<com.tuxundown.android.core.Hls.Variant>,
+    val referer: String,
+    val fileName: String,
+    val mirrors: List<String>,
+    val daily: Boolean,
+    val onCreated: () -> Unit,
+)
+
 /** v2.7: long-press icon shortcut actions (res/xml/shortcuts.xml). */
 object ShortcutActions {
     const val NEW_DOWNLOAD = "com.tuxundown.android.action.NEW_DOWNLOAD"
@@ -508,6 +523,11 @@ fun DownApp() {
     var sniffMinMB by remember { mutableStateOf(0) } // v3.1: minimum-size filter, MB (0 = off)
     var sniffProbing by remember { mutableStateOf(false) } // v1.6 size probe phase
     var sniffShowNoise by remember { mutableStateOf(false) } // v1.9 noise folding
+
+    // ---- HLS variant picker (v3.8): set when a single-create
+    // flow found a master playlist with more than one variant;
+    // the dialog below offers the choice BEFORE the task exists.
+    var hlsPick by remember { mutableStateOf<HlsPick?>(null) }
 
     // ---- mirror-sources dialog (v1.6 item 4) ----
     var sourcesTask by remember { mutableStateOf<TaskRecord?>(null) }
@@ -896,12 +916,68 @@ fun DownApp() {
         return true
     }
 
+    /**
+     * v3.8: single-create entry that offers the HLS 清晰度
+     * choice first. A non-HLS link (and any HLS link whose
+     * probe finds no real choice — media playlist, single
+     * variant, probe failed) goes straight to [createTask],
+     * unchanged. Only a master playlist with 2+ variants
+     * pauses the create and raises the picker dialog; picking
+     * a row creates the task against the CHOSEN media playlist
+     * (its resume fingerprint then covers that playlist's
+     * segments, as with any HLS task), and cancelling creates
+     * nothing. Batch creation deliberately does NOT come
+     * through here — a queue of links must not raise a queue
+     * of dialogs; batch HLS tasks keep the engine's automatic
+     * highest-bandwidth pick.
+     */
+    fun createTaskWithHlsChoice(
+        url: String,
+        referer: String = "",
+        fileName: String = "",
+        mirrors: List<String> = emptyList(),
+        daily: Boolean = false,
+        onCreated: () -> Unit = {},
+    ) {
+        if (!com.tuxundown.android.core.DownloadEngine.isHlsUrl(url)) {
+            if (createTask(url, referer, fileName, mirrors, daily)) onCreated()
+            return
+        }
+        Thread {
+            val headers = if (referer.isNotBlank()) {
+                mapOf("Referer" to referer)
+            } else {
+                emptyMap()
+            }
+            val variants = com.tuxundown.android.core.HlsProbe.fetchVariants(
+                url, headers, DownloadCenter.userAgent,
+            )
+            activity.runOnUiThread {
+                if (variants != null && variants.size > 1) {
+                    hlsPick = HlsPick(
+                        com.tuxundown.android.core.Hls.sortedForChoice(variants),
+                        referer, fileName, mirrors, daily, onCreated,
+                    )
+                } else if (createTask(url, referer, fileName, mirrors, daily)) {
+                    onCreated()
+                }
+            }
+        }.start()
+    }
+
     fun handleSniffResult(result: SniffResult, pageUrl: String) {
         when (result) {
             is SniffResult.DirectFile -> {
-                createTask(result.url, pageUrl, daily = scheduleMode == 1)
-                showAdd = false
-                urlText = ""
+                // v3.8: a sniffed .m3u8 master gets the variant
+                // picker; the dialog closes only once a task
+                // really exists (a duplicate keeps it open so
+                // the user sees why nothing happened).
+                createTaskWithHlsChoice(
+                    result.url, referer = pageUrl, daily = scheduleMode == 1,
+                ) {
+                    showAdd = false
+                    urlText = ""
+                }
             }
             is SniffResult.ResourceList -> {
                 DownloadCenter.rememberSniffedPage(result.pageUrl)
@@ -1100,11 +1176,14 @@ fun DownApp() {
             return
         }
         if (LinkRouter.looksLikeFileUrl(u)) {
-            createTask(u, fileName = nameText, mirrors = mirrors, daily = scheduleMode == 1)
-            showAdd = false
-            urlText = ""
-            nameText = ""
-            mirrorsText = ""
+            createTaskWithHlsChoice(
+                u, fileName = nameText, mirrors = mirrors, daily = scheduleMode == 1,
+            ) {
+                showAdd = false
+                urlText = ""
+                nameText = ""
+                mirrorsText = ""
+            }
             return
         }
         sniffing = true
@@ -1114,11 +1193,14 @@ fun DownApp() {
             activity.runOnUiThread {
                 if (route == LinkRouter.Route.DIRECT_FILE) {
                     sniffing = false
-                    createTask(u, fileName = nameText, mirrors = mirrors, daily = scheduleMode == 1)
-                    showAdd = false
-                    urlText = ""
-                    nameText = ""
-                    mirrorsText = ""
+                    createTaskWithHlsChoice(
+                        u, fileName = nameText, mirrors = mirrors, daily = scheduleMode == 1,
+                    ) {
+                        showAdd = false
+                        urlText = ""
+                        nameText = ""
+                        mirrorsText = ""
+                    }
                 } else {
                     startSniff(u)
                 }
@@ -3128,6 +3210,72 @@ fun DownApp() {
                     }
                     TextButton(onClick = { hashTask = null }) { Text("取消") }
                 }
+            },
+        )
+    }
+
+    // ---- HLS variant picker (v3.8) ----
+    if (hlsPick != null) {
+        val pick = hlsPick!!
+        AlertDialog(
+            onDismissRequest = { hlsPick = null },
+            title = { Text("选择清晰度") },
+            text = {
+                Column(
+                    Modifier.verticalScroll(rememberScrollState()),
+                ) {
+                    Text(
+                        "这个链接是一个流媒体主播放列表，里面有 ${pick.variants.size} 档清晰度。" +
+                            "选一档就按这一档下载（合并成一个 .ts 文件）；" +
+                            "之后想换一档，删掉任务重新新建即可。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    pick.variants.forEach { v ->
+                        OutlinedButton(
+                            onClick = {
+                                hlsPick = null
+                                if (createTask(
+                                        v.url, pick.referer, pick.fileName,
+                                        pick.mirrors, pick.daily,
+                                    )
+                                ) {
+                                    // The task must be an HLS task
+                                    // even when the variant URL does
+                                    // not end in .m3u8, and the card
+                                    // should say which quality was
+                                    // chosen (the engine's resume
+                                    // fingerprint covers THIS
+                                    // playlist's segments).
+                                    store.tasks.firstOrNull { it.url == v.url }?.let { t ->
+                                        t.isHls = true
+                                        val label =
+                                            com.tuxundown.android.core.Hls.variantLabel(v)
+                                        t.note = if (t.note.isBlank()) {
+                                            "已选清晰度：$label"
+                                        } else {
+                                            t.note + "（已选清晰度：$label）"
+                                        }
+                                        store.save()
+                                    }
+                                    pick.onCreated()
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(
+                                com.tuxundown.android.core.Hls.variantLabel(v),
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                        Spacer(Modifier.height(6.dp))
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { hlsPick = null }) { Text("取消") }
             },
         )
     }

@@ -125,12 +125,20 @@ class SniffActivity : Activity() {
                 runCatching { CookieManager.getInstance().getCookie(url) }
                     .getOrNull()?.let { headers["Cookie"] = it }
                 web.url?.let { headers["Referer"] = it }
-                if (createTask(url, headers)) {
-                    Toast.makeText(this, "已抓到真实地址，开始下载", Toast.LENGTH_LONG).show()
-                    finish()
-                } else {
-                    Toast.makeText(this, "这个链接已经在任务列表里了", Toast.LENGTH_LONG).show()
-                    finish()
+                createTaskSmart(url, headers) { outcome ->
+                    when (outcome) {
+                        true -> {
+                            Toast.makeText(this, "已抓到真实地址，开始下载", Toast.LENGTH_LONG).show()
+                            finish()
+                        }
+                        false -> {
+                            Toast.makeText(this, "这个链接已经在任务列表里了", Toast.LENGTH_LONG).show()
+                            finish()
+                        }
+                        // Cancelled the quality pick: stay in
+                        // the browser, say nothing.
+                        null -> Unit
+                    }
                 }
             }
         }
@@ -156,10 +164,16 @@ class SniffActivity : Activity() {
                         runCatching { CookieManager.getInstance().getCookie(link) }
                             .getOrNull()?.let { headers["Cookie"] = it }
                         web.url?.let { headers["Referer"] = it }
-                        if (createTask(link, headers)) {
-                            Toast.makeText(this, "已新建下载任务", Toast.LENGTH_LONG).show()
-                        } else {
-                            Toast.makeText(this, "这个链接已经在任务列表里了", Toast.LENGTH_LONG).show()
+                        createTaskSmart(link, headers) { outcome ->
+                            when (outcome) {
+                                true -> Toast.makeText(
+                                    this, "已新建下载任务", Toast.LENGTH_LONG,
+                                ).show()
+                                false -> Toast.makeText(
+                                    this, "这个链接已经在任务列表里了", Toast.LENGTH_LONG,
+                                ).show()
+                                null -> Unit
+                            }
                         }
                     }
                     .setNegativeButton("取消", null)
@@ -260,6 +274,75 @@ class SniffActivity : Activity() {
         return scheme == "http" || scheme == "https" || scheme == "ftp"
     }
 
+    /**
+     * v3.8: single-create with the HLS 清晰度 choice, for every
+     * create path in this browser. Non-HLS links (and HLS links
+     * whose probe finds no real choice — media playlist, one
+     * variant, probe failed) report synchronously. A master
+     * playlist with 2+ variants raises the picker first;
+     * [report] then receives true (created), false (already in
+     * the list) or null (user cancelled the pick — callers
+     * stay silent and stay on the page). The probe carries the
+     * same session headers the task itself would, so a
+     * login-walled playlist resolves the same way.
+     */
+    private fun createTaskSmart(
+        url: String,
+        headers: Map<String, String> = emptyMap(),
+        report: (Boolean?) -> Unit,
+    ) {
+        if (!com.tuxundown.android.core.DownloadEngine.isHlsUrl(url)) {
+            report(createTask(url, headers))
+            return
+        }
+        Thread {
+            val variants = com.tuxundown.android.core.HlsProbe.fetchVariants(
+                url, headers, DownloadCenter.userAgent,
+            )
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (variants == null || variants.size <= 1) {
+                    report(createTask(url, headers))
+                    return@runOnUiThread
+                }
+                val sorted = com.tuxundown.android.core.Hls.sortedForChoice(variants)
+                var reported = false
+                fun done(outcome: Boolean?) {
+                    if (!reported) {
+                        reported = true
+                        report(outcome)
+                    }
+                }
+                AlertDialog.Builder(this)
+                    .setTitle("选择清晰度")
+                    .setItems(
+                        sorted.map {
+                            com.tuxundown.android.core.Hls.variantLabel(it)
+                        }.toTypedArray()
+                    ) { _, which ->
+                        val v = sorted[which]
+                        val ok = createTask(v.url, headers)
+                        if (ok) {
+                            // Force the HLS flag (a variant URL
+                            // need not end in .m3u8) and record
+                            // the chosen quality on the card.
+                            DownloadCenter.store.tasks
+                                .firstOrNull { it.url == v.url }?.let { t ->
+                                    t.isHls = true
+                                    t.note = "已选清晰度：" +
+                                        com.tuxundown.android.core.Hls.variantLabel(v)
+                                    DownloadCenter.store.save()
+                                }
+                        }
+                        done(ok)
+                    }
+                    .setNegativeButton("取消") { _, _ -> done(null) }
+                    .setOnCancelListener { done(null) }
+                    .show()
+            }
+        }.start()
+    }
+
     /** Create a task unless the same link is already active. */
     private fun createTask(url: String, headers: Map<String, String> = emptyMap()): Boolean {
         // v2.8 audit round 14: same intake gate as the home
@@ -299,10 +382,16 @@ class SniffActivity : Activity() {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 when (result) {
                     is SniffResult.DirectFile -> {
-                        if (createTask(result.url)) {
-                            Toast.makeText(this, "已新建下载任务", Toast.LENGTH_LONG).show()
-                        } else {
-                            Toast.makeText(this, "这个链接已经在任务列表里了", Toast.LENGTH_LONG).show()
+                        createTaskSmart(result.url) { outcome ->
+                            when (outcome) {
+                                true -> Toast.makeText(
+                                    this, "已新建下载任务", Toast.LENGTH_LONG,
+                                ).show()
+                                false -> Toast.makeText(
+                                    this, "这个链接已经在任务列表里了", Toast.LENGTH_LONG,
+                                ).show()
+                                null -> Unit
+                            }
                         }
                     }
                     is SniffResult.ResourceList -> {
@@ -314,10 +403,17 @@ class SniffActivity : Activity() {
                             .setTitle("这个页面里的资源（点一个下载）")
                             .setItems(names) { _, which ->
                                 val res = result.resources[which]
-                                if (createTask(res.url)) {
-                                    Toast.makeText(this, "已新建下载任务", Toast.LENGTH_LONG).show()
-                                } else {
-                                    Toast.makeText(this, "这个链接已经在任务列表里了", Toast.LENGTH_LONG).show()
+                                createTaskSmart(res.url) { outcome ->
+                                    when (outcome) {
+                                        true -> Toast.makeText(
+                                            this, "已新建下载任务", Toast.LENGTH_LONG,
+                                        ).show()
+                                        false -> Toast.makeText(
+                                            this, "这个链接已经在任务列表里了",
+                                            Toast.LENGTH_LONG,
+                                        ).show()
+                                        null -> Unit
+                                    }
                                 }
                             }
                             .setNegativeButton("取消", null)
