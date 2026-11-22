@@ -21,6 +21,7 @@ import com.google.zxing.RGBLuminanceSource
 import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.qrcode.QRCodeReader
 import com.tuxundown.android.core.DownloadCenter
+import com.tuxundown.android.core.LinkSchemes
 import com.tuxundown.android.core.TaskStatus
 import com.tuxundown.android.core.ThunderLink
 
@@ -295,6 +296,17 @@ class ScanActivity : Activity() {
             ?: Regex("https?://\\S+").find(raw.trim())?.value
                 ?.trimEnd('.', ',', '，', '。', '"', '\'')
         if (url.isNullOrBlank()) {
+            Toast.makeText(
+                this, "二维码里不是链接：${raw.take(40)}", Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+        // v4.7 audit round 32: every other intake funnel passes
+        // the LinkSchemes gate before a task is created — the
+        // scan funnel does too, in depth (its own extraction in
+        // fact only yields http/https or a ThunderLink decode,
+        // whose inners are already restricted to http/https/ftp).
+        if (!LinkSchemes.isSupported(url)) {
             Toast.makeText(
                 this, "二维码里不是链接：${raw.take(40)}", Toast.LENGTH_LONG
             ).show()

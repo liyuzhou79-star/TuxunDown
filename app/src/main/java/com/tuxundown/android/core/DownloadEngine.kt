@@ -523,9 +523,20 @@ class DownloadEngine(
      * Open a connection and follow redirects MANUALLY (audit A5):
      * HttpURLConnection's built-in follower refuses http <-> https
      * hops, which real download servers use all the time. Session
-     * headers (UA / Cookie / Referer) and the caller's own headers
+     * headers (UA / Referer) and the caller's own headers
      * (Range) are re-applied on every hop. Returns the connection
      * after the final response code has been read.
+     *
+     * v4.7 audit round 32: the Cookie is the ONE header that does
+     * NOT ride every hop unconditionally. It is a credential for
+     * the host of task.url only, so each hop asks [SessionScope]
+     * with THIS hop's URL (`current`): a request to a mirror the
+     * user pasted for speed, a mirror validation probe / sample,
+     * a warmup over task.sources, or a redirect hop to a
+     * different host receives NO cookie, exactly like a browser
+     * scopes cookies by domain. Referer still rides every hop —
+     * it is the anti-hotlink signal servers check cross-host by
+     * design, a different sensitivity class from a credential.
      */
     private fun openFollowingRedirects(
         startUrl: String,
@@ -590,7 +601,11 @@ class DownloadEngine(
                     c.setRequestProperty("Authorization", "Basic $b64")
                 }
             }
-            task.headers["Cookie"]?.let { c.setRequestProperty("Cookie", it) }
+            // v4.7 audit round 32: host-scoped cookie (see the
+            // doc above and SessionScope) — consulted per hop
+            // with this hop's URL, never re-sent blindly.
+            SessionScope.cookieFor(task.headers["Cookie"], task.url, current)
+                ?.let { c.setRequestProperty("Cookie", it) }
             task.headers["Referer"]?.let { c.setRequestProperty("Referer", it) }
             apply(c)
             // v1.9: reading the response code is what actually
