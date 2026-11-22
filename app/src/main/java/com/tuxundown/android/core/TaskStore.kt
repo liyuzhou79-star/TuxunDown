@@ -62,7 +62,10 @@ class TaskRecord(
     /** Extra mirror URLs of the SAME file (multi-source download).
      *  Validated against the primary before use (see SourceCheck). */
     var sources: MutableList<String> = mutableListOf(),
-    /** Bandwidth-budget weight: 0 = normal, 1 = boosted （插队）. */
+    /** Priority tier (see TaskPriority): 1 = 高 (this is also
+     *  exactly what 插队 has written since v1.6 — legacy jumped
+     *  tasks ARE high tier), 0 = 中 (the default), -1 = 低 (v3.1).
+     *  Drives both queue order and the bandwidth-budget split. */
     var priority: Int = 0,
     /** HLS (m3u8) stream task: segments merge into one .ts file. */
     var isHls: Boolean = false,

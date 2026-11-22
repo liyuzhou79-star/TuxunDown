@@ -22,11 +22,30 @@ class BandwidthBudgetTest {
 
     @Test
     fun boostedTaskWeighsDouble() {
-        // priority 1 (插队) weighs 2, normal weighs 1 -> 2:1 split.
+        // priority 1 (插队/高） weighs 2x normal -> 2:1 split.
+        // (v3.1: the integer scale is 4 vs 2 — the RATIO is what
+        // v1.6 promised, and it is unchanged.)
         val shares = BandwidthBudget.shares(
             900, listOf(BandwidthBudget.weightOf(1), BandwidthBudget.weightOf(0))
         )
         assertEquals(listOf(600L, 300L), shares)
+    }
+
+    @Test
+    fun threeTiersSplitTwoOneHalf() {
+        // v3.1: 高：中：低 = 2 : 1 : 0.5 across a shared budget.
+        assertEquals(4, BandwidthBudget.weightOf(1))
+        assertEquals(2, BandwidthBudget.weightOf(0))
+        assertEquals(1, BandwidthBudget.weightOf(-1))
+        val shares = BandwidthBudget.shares(
+            700,
+            listOf(
+                BandwidthBudget.weightOf(1),
+                BandwidthBudget.weightOf(0),
+                BandwidthBudget.weightOf(-1),
+            ),
+        )
+        assertEquals(listOf(400L, 200L, 100L), shares)
     }
 
     @Test

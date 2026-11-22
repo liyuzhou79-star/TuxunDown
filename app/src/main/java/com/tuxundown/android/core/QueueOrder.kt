@@ -25,15 +25,33 @@ object QueueOrder {
         return true
     }
 
-    /** First task that may start right now: QUEUED and its scheduled
-     *  time (if any) has arrived, and not in [excludeIds]. */
+    /**
+     * Next task that may start right now: QUEUED, its scheduled
+     * time (if any) has arrived, and not in [excludeIds].
+     *
+     * v3.1: among the eligible tasks the highest priority tier
+     * goes first (see TaskPriority); list order breaks ties, so
+     * within one tier the queue stays FIFO and 插队's physical
+     * move still matters. Eligibility is judged BEFORE priority:
+     * a scheduled 高 task never blocks a due 中 task behind it.
+     */
     fun nextEligible(
         tasks: List<TaskRecord>,
         now: Long,
         excludeIds: Set<String> = emptySet(),
-    ): TaskRecord? = tasks.firstOrNull {
-        it.status == TaskStatus.QUEUED && it.id !in excludeIds && !it.netDeferred &&
-            (it.scheduledAt <= 0 || it.scheduledAt <= now)
+    ): TaskRecord? {
+        var best: TaskRecord? = null
+        for (t in tasks) {
+            if (t.status != TaskStatus.QUEUED || t.id in excludeIds || t.netDeferred) continue
+            if (t.scheduledAt > 0 && t.scheduledAt > now) continue
+            val b = best
+            if (b == null ||
+                TaskPriority.clamp(t.priority) > TaskPriority.clamp(b.priority)
+            ) {
+                best = t
+            }
+        }
+        return best
     }
 
     /** Earliest future scheduled start among QUEUED tasks, or 0. */

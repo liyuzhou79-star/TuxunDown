@@ -758,10 +758,26 @@ object DownloadCenter {
             QueueOrder.moveToFrontOfQueue(store.tasks, task)
         }
         if (changed) {
+            // v3.1: 插队 also raises the task to the 高 tier
+            // (priority 1 IS 高 — the same value v1.6 wrote).
             if (task.priority == 0) task.priority = 1
             store.save()
         }
         return changed
+    }
+
+    /**
+     * v3.1: set a task's priority tier （高/中/低， see
+     * TaskPriority). The drain order and the bandwidth split
+     * both read the record live, so the change applies to a
+     * queued task's next start and to a running task's budget
+     * share on the next limiter tick.
+     */
+    fun setPriority(task: TaskRecord, level: Int) {
+        val v = TaskPriority.clamp(level)
+        if (task.priority == v) return
+        task.priority = v
+        store.save()
     }
 
     @Synchronized

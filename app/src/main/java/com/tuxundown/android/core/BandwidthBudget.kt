@@ -5,15 +5,23 @@ package com.tuxundown.android.core
  * budget for the whole app, not a per-task allowance. When several
  * tasks run at once the budget is split in proportion to their
  * weights, so one task can never starve the others by grabbing the
- * full cap N times over — and a task the user pushed to the front
- * （插队， priority 1) weighs double. A single running task still
- * receives the entire budget, exactly like the old per-task cap.
+ * full cap N times over. A single running task still receives the
+ * entire budget, exactly like the old per-task cap.
  * Pure math — unit-tested.
  */
 object BandwidthBudget {
 
-    /** Priority weight: boosted （插队） tasks count double. */
-    fun weightOf(priority: Int): Int = if (priority > 0) 2 else 1
+    /**
+     * Priority weight (v3.1 three tiers, see TaskPriority):
+     * 高：中：低 = 2 : 1 : 0.5, expressed on a ×2 integer scale
+     * (4 / 2 / 1) so the shares math stays integral. v1.6's
+     * boosted-vs-normal ratio (2:1) is preserved exactly.
+     */
+    fun weightOf(priority: Int): Int = when (TaskPriority.clamp(priority)) {
+        TaskPriority.HIGH -> 4
+        TaskPriority.LOW -> 1
+        else -> 2
+    }
 
     /**
      * Split [totalBps] across [weights] proportionally. The shares

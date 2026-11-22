@@ -105,6 +105,7 @@ import com.tuxundown.android.core.Diagnostics
 import com.tuxundown.android.core.DownloadCenter
 import com.tuxundown.android.core.DownloadedFiles
 import com.tuxundown.android.core.DuplicateFinder
+import com.tuxundown.android.core.TaskPriority
 import com.tuxundown.android.core.Format
 import com.tuxundown.android.core.FtpClient
 import com.tuxundown.android.core.LinkExtract
@@ -1259,6 +1260,12 @@ fun DownApp() {
                 // engine's limiter reads it live on every tick.
                 task.taskLimitKBps = kbps
                 store.save()
+            },
+            onPriority = { level ->
+                // v3.1: three-tier priority — DownloadCenter
+                // clamps + persists; drain order and the budget
+                // split both read the record live.
+                DownloadCenter.setPriority(task, level)
             },
             onOpenInBrowser = {
                 // v2.7 (failure advice): open this task's page in
@@ -5160,6 +5167,7 @@ fun TaskCard(
     onHeaders: () -> Unit,
     onUserNote: () -> Unit,
     onTaskLimit: (Int) -> Unit,
+    onPriority: (Int) -> Unit,
     onOpenInBrowser: () -> Unit,
     onOpenFiles: () -> Unit,
 ) {
@@ -5568,6 +5576,27 @@ fun TaskCard(
                         ),
                         selected = task.taskLimitKBps,
                         onPick = onTaskLimit,
+                    )
+                }
+                // v3.1: three-tier priority. One switch, two
+                // effects, both stated on the label: the queue
+                // starts higher tiers first, and a shared speed
+                // limit splits 高：中：低 = 2 : 1 : 0.5.
+                if (task.status != TaskStatus.DONE) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "优先级（排队时先开始高的；多任务一起下又设了限速时，份额按 高：中：低 = 2：1：0.5 分）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    ChipRow(
+                        options = listOf(
+                            TaskPriority.HIGH to "高",
+                            TaskPriority.NORMAL to "中",
+                            TaskPriority.LOW to "低",
+                        ),
+                        selected = TaskPriority.clamp(task.priority),
+                        onPick = onPriority,
                     )
                 }
                 if (task.status != TaskStatus.DONE) {
