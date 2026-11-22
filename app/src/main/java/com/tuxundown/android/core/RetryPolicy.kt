@@ -18,4 +18,19 @@ object RetryPolicy {
         2 -> 90_000
         else -> 180_000
     }
+
+    /**
+     * Audit round 28: failures only the USER can fix — the
+     * custom (SAF) folder's grant expired or became unwritable
+     * (re-pick the folder in settings), or the storage device
+     * went away / turned read-only mid-run. Auto-retrying them
+     * cannot succeed: every attempt fails identically and the
+     * retry notes bury the real reason. Matching runs over the
+     * app's own plain error strings, like FailureAdvice.
+     */
+    fun needsUserAction(error: String): Boolean {
+        if (error.isBlank()) return false
+        return error.contains("重选") || error.contains("授权可能已失效") ||
+            error.contains("自定义文件夹") || error.contains("存储设备")
+    }
 }

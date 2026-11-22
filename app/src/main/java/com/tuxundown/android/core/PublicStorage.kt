@@ -35,6 +35,21 @@ object PublicStorage {
 
     class Obtained(val target: DownloadTarget, val fresh: Boolean)
 
+    /**
+     * Audit round 28: finalize found the .part entry GONE — it
+     * was deleted mid-download (file manager, cleaner app, the
+     * volume went away), so the downloaded bytes went into an
+     * unlinked entry and there is nothing left to rename. A
+     * distinct type so the service can fail the task honestly
+     * instead of reporting DONE with a savedUri pointing at a
+     * dead entry, and instead of the generic "rename failed"
+     * note (which promises a .part file that no longer exists).
+     */
+    class TargetGoneException(message: String) : IllegalStateException(message)
+
+    private const val TARGET_GONE_MESSAGE =
+        "文件在下载途中被删掉了，下载结果已经不在了，请重新下载。"
+
     fun mimeOf(fileName: String): String {
         val ext = fileName.substringAfterLast('.', "").lowercase()
         return MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
@@ -256,17 +271,35 @@ object PublicStorage {
                 val existing = tree?.findFile(candidate)
                 existing != null && existing.uri != uri
             }
+            // Audit round 28: the old code swallowed the rename
+            // result and fell back to the (possibly dead) part
+            // Uri, so a .part deleted mid-download — or a rename
+            // that silently did not happen — still reported DONE.
+            // Now: a missing document is TargetGone; a rename
+            // that failed while the bytes still sit there under
+            // the .part name throws, so the caller's catch keeps
+            // the task DONE with the honest ".part suffix" note
+            // instead of a success note naming a file that is
+            // not there under that name.
             val doc = DocumentFile.fromSingleUri(context, uri)
-            if (doc != null && doc.name != finalName) {
-                runCatching { doc.renameTo(finalName) }
+                ?: throw TargetGoneException(TARGET_GONE_MESSAGE)
+            if (!doc.exists()) throw TargetGoneException(TARGET_GONE_MESSAGE)
+            var renamed = doc.name == finalName
+            if (!renamed) {
+                renamed = runCatching { doc.renameTo(finalName) }
+                    .getOrDefault(false)
             }
             val found = tree?.findFile(finalName)
             if (found != null) {
                 task.savedUri = found.uri.toString()
                 displayName = finalName
-            } else {
+            } else if (renamed) {
                 task.savedUri = uri.toString()
-                displayName = doc?.name ?: partName(name)
+                displayName = finalName
+            } else if (doc.exists()) {
+                throw IllegalStateException("改名没成功")
+            } else {
+                throw TargetGoneException(TARGET_GONE_MESSAGE)
             }
         } else {
             // MediaStore, audit A1: v1.2 DELETED any same-name entry
@@ -288,7 +321,16 @@ object PublicStorage {
                 put(MediaStore.Downloads.DISPLAY_NAME, finalName)
                 put(MediaStore.Downloads.MIME_TYPE, mimeOf(finalName))
             }
-            resolver.update(uri, values, null, null)
+            // Audit round 28: the update's row count used to be
+            // ignored — when the .part entry was deleted
+            // mid-download, update() updates 0 rows and the task
+            // still reported DONE with a savedUri pointing at a
+            // dead entry. 0 rows is the honest signal the entry
+            // is gone (mid-download detection on an open pfd is
+            // not possible: writes keep landing in the unlinked
+            // entry), so fail loudly instead.
+            val rows = resolver.update(uri, values, null, null)
+            if (rows <= 0) throw TargetGoneException(TARGET_GONE_MESSAGE)
             task.savedUri = uri.toString()
             displayName = finalName
         }
@@ -337,19 +379,13 @@ object PublicStorage {
         return finalName
     }
 
-    /** First free variant of [name]: name, "name (1).ext", "name (2).ext"… */
-    private fun freeName(name: String, taken: (String) -> Boolean): String {
-        if (!taken(name)) return name
-        val dot = name.lastIndexOf('.')
-        val stem = if (dot > 0) name.substring(0, dot) else name
-        val ext = if (dot > 0) name.substring(dot) else ""
-        var n = 1
-        while (true) {
-            val candidate = "$stem ($n)$ext"
-            if (!taken(candidate)) return candidate
-            n++
-        }
-    }
+    /** First free variant of [name]: name, "name (1).ext", …
+     *  The search itself lives in [FreeName] (audit round 28:
+     *  bounded, with a timestamp fallback — the old unbounded
+     *  loop here spun one storage query per candidate for as
+     *  deep as a pile of numbered copies happened to be). */
+    private fun freeName(name: String, taken: (String) -> Boolean): String =
+        FreeName.pick(name, System.currentTimeMillis(), taken)
 
     // ---------- v1.7: orphan .part cleanup ----------
 
@@ -362,6 +398,16 @@ object PublicStorage {
      * store points at — leftovers from deleted tasks, crashed runs
      * or manual file-manager shuffles. Referenced .part files (any
      * live or paused task's target) are never reported.
+     *
+     * Audit round 28, two deliberate judgements:
+     * - The referenced set covers tasks of EVERY status, DONE and
+     *   FAILED included. A FAILED task's .part is its resume data
+     *   and a DONE task's leftover .part (finalize failed) is
+     *   still claimed by a visible card that can open/delete it —
+     *   neither is an orphan, and reporting them would let the
+     *   cleanup delete files a record still points at.
+     * - A .part modified within [OrphanGrace.GRACE_MS] is never
+     *   reported either (see OrphanGrace for the birth race).
      */
     fun scanOrphanParts(context: Context): List<OrphanPart> {
         val referenced = HashSet<String>()
@@ -370,6 +416,12 @@ object PublicStorage {
             if (t.savedUri.isNotBlank()) referenced.add(t.savedUri)
         }
         val out = mutableListOf<OrphanPart>()
+        // Audit round 28: modification-time grace — a .part
+        // touched within OrphanGrace.GRACE_MS may belong to a
+        // task whose targetUri assignment is still in flight
+        // (obtainTarget inserts the entry before the assignment
+        // lands), so it is never reported (see OrphanGrace).
+        val nowMs = System.currentTimeMillis()
         val custom = DownloadCenter.downloadDirUri
         if (custom.isNotBlank()) {
             val tree = runCatching {
@@ -380,6 +432,11 @@ object PublicStorage {
                     val name = f.name ?: continue
                     if (!name.endsWith(".part", ignoreCase = true)) continue
                     if (f.uri.toString() in referenced) continue
+                    if (OrphanGrace.isFresh(
+                            runCatching { f.lastModified() }.getOrDefault(0),
+                            nowMs,
+                        )
+                    ) continue
                     out.add(
                         OrphanPart(
                             f.uri, name,
@@ -396,6 +453,9 @@ object PublicStorage {
                         MediaStore.Downloads._ID,
                         MediaStore.Downloads.DISPLAY_NAME,
                         MediaStore.Downloads.SIZE,
+                        // Audit round 28: the grace check needs
+                        // the modification time (seconds here).
+                        MediaStore.Downloads.DATE_MODIFIED,
                     ),
                     "${MediaStore.Downloads.DISPLAY_NAME} LIKE ? AND " +
                         "${MediaStore.Downloads.RELATIVE_PATH} IN " +
@@ -408,11 +468,16 @@ object PublicStorage {
                 val idIdx = it.getColumnIndexOrThrow(MediaStore.Downloads._ID)
                 val nameIdx = it.getColumnIndexOrThrow(MediaStore.Downloads.DISPLAY_NAME)
                 val sizeIdx = it.getColumnIndexOrThrow(MediaStore.Downloads.SIZE)
+                val modIdx = it.getColumnIndexOrThrow(MediaStore.Downloads.DATE_MODIFIED)
                 while (it.moveToNext()) {
                     val uri = Uri.withAppendedPath(
                         downloadsCollection(), it.getLong(idIdx).toString()
                     )
                     if (uri.toString() in referenced) continue
+                    // MediaStore DATE_MODIFIED is SECONDS.
+                    val modifiedMs = runCatching { it.getLong(modIdx) * 1000 }
+                        .getOrDefault(0)
+                    if (OrphanGrace.isFresh(modifiedMs, nowMs)) continue
                     out.add(
                         OrphanPart(
                             uri,

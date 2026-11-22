@@ -36,6 +36,27 @@ object FailureAdvice {
                     "可以先去「已下载文件」里删掉不要的大文件。",
                 Action.OPEN_FILES, "去已下载文件清空间",
             )
+            // The custom folder's SAF grant expired or turned
+            // read-only (audit round 28): retrying cannot fix
+            // it — the only way out is re-picking the download
+            // folder in settings. No button: the failed card has
+            // no route that opens settings, and a button that
+            // goes nowhere is worse than honest text.
+            e.contains("重选") || e.contains("授权可能已失效") ||
+                e.contains("自定义文件夹") -> Advice(
+                    "下载文件夹的授权失效了，光重试没用：去设置里重新选一次" +
+                        "下载目录，选好后回来点继续就能接着下，已下载的进度还在。",
+                    Action.NONE, "",
+                )
+            // The storage device itself went away or turned
+            // read-only mid-download (audit round 28): an SD
+            // card pulled out, a volume unmounted. The progress
+            // survives — fix the device, then resume.
+            e.contains("存储设备") -> Advice(
+                "像是存储设备出问题了：SD 卡可能被拔出，或者存储变成了只读。" +
+                    "先确认卡还在、能正常写入，再点继续接着下。",
+                Action.RETRY, "再试一次",
+            )
             // The file changed under us (size / ETag / mirror
             // mismatch, or a checksum that does not match): the
             // old progress cannot be trusted.

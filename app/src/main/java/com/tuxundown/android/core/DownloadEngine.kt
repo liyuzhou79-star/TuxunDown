@@ -346,6 +346,8 @@ class DownloadEngine(
             // same sentence here.
             task.error = if (isStorageFull(e)) {
                 Notes.storageFull()
+            } else if (isStorageGone(e)) {
+                Notes.storageDeviceGone()
             } else {
                 Errors.human(e)
             }
@@ -1357,6 +1359,12 @@ class DownloadEngine(
                     task.error = Notes.storageFull()
                     break
                 }
+                if (isStorageGone(e)) {
+                    // Nor into a pulled card / read-only volume:
+                    // every chunk would fail the same way.
+                    task.error = Notes.storageDeviceGone()
+                    break
+                }
                 if (attempt >= 3) {
                     task.error = Errors.human(e)
                 }
@@ -2360,6 +2368,28 @@ class DownloadEngine(
                 if (task.error.isBlank()) task.error = "下载中断"
             }
         }
+    }
+
+    /**
+     * Audit round 28: the storage medium itself went away or
+     * turned read-only mid-run (SD card pulled, volume
+     * unmounted). The OS surfaces it as an errno-flavoured
+     * IOException ("pwrite failed: EROFS (Read-only file
+     * system)"); without this check Errors.human calls any
+     * IOException a network problem and sends the user off to
+     * debug their router while the card sits on the desk.
+     */
+    private fun isStorageGone(e: Throwable): Boolean {
+        var cur: Throwable? = e
+        while (cur != null) {
+            val m = cur.message ?: ""
+            if (m.contains("Read-only file system", true) || m.contains("EROFS") ||
+                m.contains("No such device", true) || m.contains("ENODEV") ||
+                m.contains("Input/output error", true) || m.contains("EIO")
+            ) return true
+            cur = cur.cause
+        }
+        return false
     }
 
     private fun isStorageFull(e: Throwable): Boolean {

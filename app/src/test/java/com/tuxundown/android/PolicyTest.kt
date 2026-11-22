@@ -12,6 +12,18 @@ import org.junit.Test
 class PolicyTest {
 
     @Test
+    fun userActionFailuresAreNeverAutoRetried() {
+        // Audit round 28: an expired SAF grant and a vanished
+        // storage device can only be fixed by the user.
+        assertTrue(RetryPolicy.needsUserAction("自定义文件夹不可写（授权可能已失效，请在设置里重选）"))
+        assertTrue(RetryPolicy.needsUserAction("自定义文件夹打不开，请在设置里重选下载目录"))
+        assertTrue(RetryPolicy.needsUserAction("存储设备好像出问题了（SD 卡可能被拔出），下载已停下。"))
+        assertFalse(RetryPolicy.needsUserAction("服务器那边出错了（HTTP 500）：不是你的问题，过一会儿再试"))
+        assertFalse(RetryPolicy.needsUserAction("找不到这个服务器：检查一下链接对不对，或者换个网络再试"))
+        assertFalse(RetryPolicy.needsUserAction(""))
+    }
+
+    @Test
     fun retryRespectsLimit() {
         assertFalse(RetryPolicy.shouldRetry(0, 0))
         assertTrue(RetryPolicy.shouldRetry(0, 3))

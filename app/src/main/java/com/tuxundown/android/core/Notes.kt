@@ -54,6 +54,14 @@ object Notes {
     fun storageFull(): String =
         "手机存储空间不足，下载已停下。清出空间后点继续即可续传。"
 
+    /** The storage device went away or turned read-only
+     *  mid-download (audit round 28: SD card pulled, volume
+     *  unmounted — the OS reports it as an errno IOException,
+     *  which used to be misread as a network problem). */
+    fun storageDeviceGone(): String =
+        "存储设备好像出问题了（SD 卡可能被拔出，或者存储变成了只读），" +
+            "下载已停下。确认存储设备正常后点继续即可续传。"
+
     /** The server swapped the file mid-download: total size no
      *  longer matches what the probe saw. */
     fun fileChangedSize(): String =

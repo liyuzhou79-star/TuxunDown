@@ -784,8 +784,14 @@ class DownloadService : Service() {
                 netAttempts.remove(task.id)
             }
             // v1.4: automatic whole-task retry with backoff.
+            // Audit round 28: failures only the user can fix
+            // (expired SAF grant, storage device gone) are never
+            // auto-retried — every attempt fails the same way and
+            // the retry notes bury the real reason. The task
+            // stays FAILED with its reason on the card.
             val limit = DownloadCenter.autoRetryCount
             if (task.status != TaskStatus.FAILED ||
+                RetryPolicy.needsUserAction(task.error) ||
                 !RetryPolicy.shouldRetry(task.autoRetriesUsed, limit)
             ) {
                 return
@@ -959,6 +965,17 @@ class DownloadService : Service() {
             // v2.1: the user's completion auto actions (both
             // default OFF; see runCompletionAction).
             runCompletionAction(task)
+        } catch (e: PublicStorage.TargetGoneException) {
+            // Audit round 28: the .part entry was deleted
+            // mid-download — the bytes are gone with it, so the
+            // DONE set just above would be a lie. Fail the task
+            // honestly, with the plain reason on the card; a
+            // resume re-checks the target and starts over (see
+            // obtainTarget's vanished-target reset).
+            task.status = TaskStatus.FAILED
+            task.error = e.message ?: "文件在下载途中被删掉了，请重新下载。"
+            task.note = ""
+            notifyAggregate()
         } catch (e: Exception) {
             task.note = "下载完成，但改名失败（${Errors.human(e)}），" +
                 "文件在下载目录里，名字带 .part 后缀，去掉后缀即可使用。"

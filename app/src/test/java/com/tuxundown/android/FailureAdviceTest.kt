@@ -4,6 +4,7 @@ import com.tuxundown.android.core.Errors
 import com.tuxundown.android.core.FailureAdvice
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FailureAdviceTest {
@@ -74,6 +75,29 @@ class FailureAdviceTest {
             FailureAdvice.Action.RETRY,
             FailureAdvice.forError(Errors.httpMessage(416), hasSources = false)?.action,
         )
+    }
+
+    @Test
+    fun expiredSafGrantPointsAtReselectingTheFolder() {
+        // Both obtainTarget wordings for a dead SAF grant.
+        for (err in listOf(
+            "自定义文件夹不可写（授权可能已失效，请在设置里重选）",
+            "自定义文件夹打不开，请在设置里重选下载目录",
+        )) {
+            val a = FailureAdvice.forError(err, hasSources = false)
+            assertEquals(FailureAdvice.Action.NONE, a?.action)
+            assertTrue(a!!.text.contains("重新选一次"))
+        }
+    }
+
+    @Test
+    fun storageDeviceGoneSuggestsCheckingThenRetrying() {
+        val a = FailureAdvice.forError(
+            "存储设备好像出问题了（SD 卡可能被拔出，或者存储变成了只读），" +
+                "下载已停下。确认存储设备正常后点继续即可续传。",
+            hasSources = false,
+        )
+        assertEquals(FailureAdvice.Action.RETRY, a?.action)
     }
 
     @Test
