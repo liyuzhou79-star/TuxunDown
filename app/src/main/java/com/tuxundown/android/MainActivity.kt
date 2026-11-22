@@ -103,6 +103,7 @@ import com.tuxundown.android.core.Changelog
 import com.tuxundown.android.core.Checksum
 import com.tuxundown.android.core.ChunkMap
 import com.tuxundown.android.core.ChunkPlanner
+import com.tuxundown.android.core.ConnCompare
 import com.tuxundown.android.core.CrashGuard
 import com.tuxundown.android.core.Errors
 import com.tuxundown.android.core.FailureAdvice
@@ -4702,6 +4703,81 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
     var lines by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
     var report by remember { mutableStateOf("") }
 
+    // ---- v4.2: connection-count comparison (knife 5) ----
+    // Prefilled ONCE with the most recently created task's URL
+    // (the link the user most likely wants to check); empty when
+    // there are no tasks yet.
+    var ccUrl by remember {
+        mutableStateOf(
+            DownloadCenter.store.tasks.maxByOrNull { it.createdAt }?.url ?: ""
+        )
+    }
+    var ccUrlError by remember { mutableStateOf(false) }
+    var ccRunning by remember { mutableStateOf(false) }
+    var ccPhase by remember { mutableStateOf("") }
+    var ccLiveBps by remember { mutableStateOf(0L) }
+    var ccResults by remember {
+        mutableStateOf<List<ConnCompare.TierResult>>(emptyList())
+    }
+    var ccShowConfirm by remember { mutableStateOf(false) }
+    var ccTestRef by remember { mutableStateOf<SpeedTest?>(null) }
+    // Leaving the screen stops the comparison (same rule as the
+    // speed-test page: it would keep burning data otherwise).
+    DisposableEffect(Unit) {
+        onDispose { ccTestRef?.cancel() }
+    }
+
+    fun ccPost(block: () -> Unit) {
+        android.os.Handler(android.os.Looper.getMainLooper()).post(block)
+    }
+
+    fun startConnCompare() {
+        if (ccRunning) return
+        val url = ccUrl.trim()
+        ccRunning = true
+        ccResults = emptyList()
+        ccLiveBps = 0
+        ccPhase = "准备实测…"
+        val test = SpeedTest()
+        ccTestRef = test
+        Thread {
+            val out = mutableListOf<ConnCompare.TierResult>()
+            var spent = 0L
+            for (tier in ConnCompare.TIERS) {
+                if (test.cancelled) break
+                // The four tiers share ONE traffic budget: each
+                // tier only gets what the earlier tiers left.
+                val budget = ConnCompare.tierBudget(spent)
+                ccPost {
+                    ccPhase = "正在测 $tier 条连接…"
+                    ccLiveBps = 0
+                }
+                val r = test.runPhase(
+                    url, tier, ConnCompare.PHASE_MS,
+                    totalCapBytes = budget,
+                ) { b -> ccPost { ccLiveBps = b } }
+                spent += r.bytes
+                out.add(
+                    ConnCompare.TierResult(tier, r.bps, r.windowMs, r.bytes)
+                )
+                // Publish per tier (a FRESH list instance, the
+                // v4.0 lesson) so finished tiers show while the
+                // next one runs — and survive a cancel.
+                val snapshot = out.toList()
+                ccPost { ccResults = snapshot }
+            }
+            ccPost {
+                ccRunning = false
+                ccLiveBps = 0
+                ccPhase = when {
+                    test.cancelled -> "已取消（已测完的档位保留在下面）"
+                    out.isEmpty() -> ""
+                    else -> "实测完成"
+                }
+            }
+        }.start()
+    }
+
     fun runChecks() {
         if (running) return
         running = true
@@ -4857,6 +4933,26 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
         }.start()
     }
 
+    // v4.2: the comparison burns real data — the shared traffic
+    // cap is stated and consented BEFORE anything runs (same
+    // pattern as the speed-test page's multi-point confirm).
+    if (ccShowConfirm) {
+        AlertDialog(
+            onDismissRequest = { ccShowConfirm = false },
+            title = { Text("连接数对比实测") },
+            text = { Text(ConnCompare.consentText()) },
+            confirmButton = {
+                TextButton(onClick = {
+                    ccShowConfirm = false
+                    startConnCompare()
+                }) { Text("开始") }
+            },
+            dismissButton = {
+                TextButton(onClick = { ccShowConfirm = false }) { Text("取消") }
+            },
+        )
+    }
+
     LazyColumn(
         Modifier
             .fillMaxSize()
@@ -4916,6 +5012,126 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
                     },
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("复制诊断结果全文") }
+            }
+        }
+        // ---- v4.2: connection-count comparison (knife 5) ----
+        item(key = "d-conncompare") {
+            SettingsGroup("连接数对比实测") {
+                Text(
+                    "这测的是这个链接在你当前网络下吃多少连接——越多越快，" +
+                        "说明服务器是按连接限速的；和测速页测到测速服务器的速度不是一回事。",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(Modifier.height(10.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    OutlinedTextField(
+                        value = ccUrl,
+                        onValueChange = {
+                            ccUrl = it
+                            ccUrlError = false
+                        },
+                        label = { Text("文件直链") },
+                        singleLine = true,
+                        enabled = !ccRunning,
+                        modifier = Modifier.weight(1f),
+                    )
+                    OutlinedButton(
+                        onClick = {
+                            runCatching {
+                                val cm = context.getSystemService(
+                                    android.content.Context.CLIPBOARD_SERVICE
+                                ) as android.content.ClipboardManager
+                                val clip = cm.primaryClip
+                                if (clip != null && clip.itemCount > 0) {
+                                    val text = clip.getItemAt(0)
+                                        .coerceToText(context)?.toString() ?: ""
+                                    if (text.isNotBlank()) {
+                                        ccUrl = text.trim()
+                                        ccUrlError = false
+                                    }
+                                }
+                            }
+                        },
+                        enabled = !ccRunning,
+                    ) { Text("粘贴") }
+                }
+                if (ccUrlError) {
+                    Text(
+                        "这个链接不对：要以 http:// 或 https:// 开头的文件直链。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+                if (ccPhase.isNotBlank()) {
+                    Text(
+                        ccPhase,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(top = 10.dp),
+                    )
+                }
+                if (ccRunning) {
+                    Text(
+                        Format.speed(ccLiveBps),
+                        color = WinPalette.ChartGreen,
+                        fontSize = 30.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+                if (ccResults.isNotEmpty()) {
+                    val best = ConnCompare.bestTier(ccResults)
+                    Spacer(Modifier.height(10.dp))
+                    ccResults.forEach { r ->
+                        if (r.bps > 0) {
+                            InfoRow(
+                                "${r.connections} 条连接：",
+                                "${Format.speed(r.bps)}（稳态约 " +
+                                    "${"%.1f".format(r.windowMs / 1000.0)} 秒）" +
+                                    (if (best != null && r.connections == best.connections) {
+                                        " ← 最快"
+                                    } else {
+                                        ""
+                                    }),
+                            )
+                        } else {
+                            InfoRow(
+                                "${r.connections} 条连接：",
+                                "没测出速度（链接可能不支持或已失效）",
+                            )
+                        }
+                    }
+                    if (best == null) {
+                        Text(
+                            "四档都没测出速度：这个链接多半已经失效，或者服务器不给数据。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 6.dp),
+                        )
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (ccRunning) {
+                        OutlinedButton(onClick = { ccTestRef?.cancel() }) {
+                            Text("取消")
+                        }
+                    } else {
+                        Button(onClick = {
+                            val u = ccUrl.trim().lowercase()
+                            if (u.startsWith("http://") || u.startsWith("https://")) {
+                                ccShowConfirm = true
+                            } else {
+                                ccUrlError = true
+                            }
+                        }) {
+                            Text(if (ccResults.isEmpty()) "开始实测" else "再测一次")
+                        }
+                    }
+                }
             }
         }
     }

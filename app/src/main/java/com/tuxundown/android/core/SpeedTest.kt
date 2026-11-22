@@ -129,11 +129,19 @@ class SpeedTest {
      * whose bps is the steady-state rate (see the class comment;
      * 0 when nothing moved). Blocking — call from a background
      * thread.
+     *
+     * [totalCapBytes] (v4.2) additionally ends the phase once the
+     * AGGREGATE bytes across all connections reach it — the
+     * connection-count comparison passes its shared remaining
+     * budget here so four phases together cannot exceed one hard
+     * traffic cap. The default is unlimited, so existing callers
+     * behave exactly as before.
      */
     fun runPhase(
         url: String,
         connections: Int,
         durationMs: Long,
+        totalCapBytes: Long = Long.MAX_VALUE,
         onSample: (Long) -> Unit,
     ): PhaseResult {
         val total = AtomicLong(0)
@@ -158,7 +166,14 @@ class SpeedTest {
                         var mine = 0L
                         while (!cancelled &&
                             System.currentTimeMillis() < deadline &&
-                            mine < PER_CONNECTION_CAP
+                            mine < PER_CONNECTION_CAP &&
+                            // v4.2 total cap: each worker checks
+                            // the SHARED aggregate before every
+                            // read, so the phase stops at (about)
+                            // totalCapBytes. Approximate by design:
+                            // workers already inside a read can
+                            // overshoot by at most one buffer each.
+                            total.get() < totalCapBytes
                         ) {
                             val n = input.read(buf)
                             if (n < 0) {
@@ -183,6 +198,10 @@ class SpeedTest {
         val samples = mutableListOf<Pair<Long, Long>>()
         samples.add(0L to 0L)
         while (!cancelled && System.currentTimeMillis() < deadline &&
+            // v4.2: once the shared total cap is reached the phase
+            // is over — exit and take the final sample instead of
+            // idling until the deadline while workers wind down.
+            total.get() < totalCapBytes &&
             threads.any { it.isAlive }
         ) {
             try {
