@@ -3150,6 +3150,20 @@ fun FileTypeBadge(kind: String, name: String) {
  */
 @androidx.compose.runtime.Composable
 fun StatsScreen(onBack: () -> Unit, onSpeedTest: () -> Unit) {
+    val context = LocalContext.current
+    // v3.4: the report is built at tap time from the live
+    // counters + the records still on the device (see
+    // DownloadReport for the honesty rules).
+    fun reportText(): String = com.tuxundown.android.core.DownloadReport.build(
+        DownloadCenter.store.tasks,
+        com.tuxundown.android.core.DownloadReport.Counters(
+            DownloadCenter.statsTotalBytes(),
+            DownloadCenter.statsDoneCount(),
+            DownloadCenter.statsAvgBps(),
+        ),
+        DownloadCenter.hostStatsTop(),
+        System.currentTimeMillis(),
+    )
     var refresh by remember { mutableStateOf(0) }
     @Suppress("UNUSED_EXPRESSION") refresh // re-read counters after a clear
     LazyColumn(
@@ -3232,6 +3246,39 @@ fun StatsScreen(onBack: () -> Unit, onSpeedTest: () -> Unit) {
                             "${h.host} · ${Format.size(h.bytes)} · ${h.count} 个文件",
                         )
                     }
+                }
+            }
+        }
+        item(key = "st-report") {
+            SettingsGroup("下载报告") {
+                Text(
+                    "把本月和全部的下载情况拼成一段文字，可以复制或分享给别人看。" +
+                        "数字全部来自这台手机上的统计和任务记录，现算现拼；" +
+                        "没有数据的部分直接省略，不编。报告只在本机生成，不上传。",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = {
+                        val cm = context.getSystemService(
+                            android.content.Context.CLIPBOARD_SERVICE,
+                        ) as android.content.ClipboardManager
+                        cm.setPrimaryClip(
+                            android.content.ClipData.newPlainText(
+                                "TuxunDown 下载报告", reportText(),
+                            ),
+                        )
+                        Toast.makeText(context, "报告已复制", Toast.LENGTH_SHORT).show()
+                    }) { Text("复制报告") }
+                    OutlinedButton(onClick = {
+                        val send = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_TEXT, reportText())
+                        }
+                        context.startActivity(
+                            Intent.createChooser(send, "分享下载报告"),
+                        )
+                    }) { Text("分享报告") }
                 }
             }
         }
