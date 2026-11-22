@@ -27,6 +27,15 @@ class SizeProbeTest {
     }
 
     @Test
+    fun remainingMsNeverGoesNegative() {
+        // v4.3: the overall probeAll budget arithmetic — time
+        // left shrinks to zero at the deadline and stays there.
+        assertEquals(5_000L, SizeProbe.remainingMs(deadlineMs = 10_000, nowMs = 5_000))
+        assertEquals(0L, SizeProbe.remainingMs(deadlineMs = 10_000, nowMs = 10_000))
+        assertEquals(0L, SizeProbe.remainingMs(deadlineMs = 10_000, nowMs = 99_000))
+    }
+
+    @Test
     fun bySizeDescPutsKnownBigFirstAndUnknownLast() {
         fun res(name: String, size: Long) =
             SniffedResource(url = "https://x/$name", name = name, kind = "other", size = size)

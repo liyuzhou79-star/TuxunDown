@@ -323,6 +323,7 @@ object SniffSession {
     val listState = mutableStateOf<List<SniffedResource>>(emptyList())
     val pageState = mutableStateOf("")
     val totalState = mutableStateOf(0)
+    val truncatedState = mutableStateOf(false)
     val openState = mutableStateOf(false)
 }
 
@@ -523,6 +524,7 @@ fun DownApp() {
     // screen can reopen it without sniffing again.
     var sniffList by SniffSession.listState
     var sniffTotal by SniffSession.totalState
+    var sniffTruncated by SniffSession.truncatedState
     var sniffPage by SniffSession.pageState
     var sniffOpen by SniffSession.openState
     var sniffChecked by remember { mutableStateOf<Set<String>>(emptySet()) }
@@ -993,6 +995,7 @@ fun DownApp() {
                 DownloadCenter.rememberSniffedPage(result.pageUrl)
                 sniffList = result.resources
                 sniffTotal = result.totalCount
+                sniffTruncated = result.truncated
                 sniffPage = result.pageUrl
                 sniffOpen = true
                 sniffShowNoise = false
@@ -2506,6 +2509,17 @@ fun DownApp() {
             },
             text = {
                 Column {
+                    // v4.3: the list is partial — the parse budget
+                    // stopped early or the page had more resources
+                    // than the shown cap. Say so up front.
+                    if (sniffTruncated || sniffTotal > sniffList.size) {
+                        Text(
+                            "这个页面资源太多，只列出了一部分（先找到的排在前面）",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(bottom = 4.dp),
+                        )
+                    }
                     // ---- filter + sort (v1.4 item 15) ----
                     // v2.0: both rows scroll sideways — a page can
                     // have many resource kinds, and at max font

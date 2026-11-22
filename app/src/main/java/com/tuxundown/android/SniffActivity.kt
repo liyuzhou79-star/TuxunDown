@@ -399,8 +399,19 @@ class SniffActivity : Activity() {
                         val names = result.resources.map {
                             it.name + if (it.looksLikeDownloadEntry) "（疑似下载入口）" else ""
                         }.toTypedArray()
-                        AlertDialog.Builder(this)
+                        // v4.3: say it when the list is only part
+                        // of the page (parse budget stopped early,
+                        // or more resources than the shown cap).
+                        val partial = result.truncated ||
+                            result.totalCount > result.resources.size
+                        val dialog = AlertDialog.Builder(this)
                             .setTitle("这个页面里的资源（点一个下载）")
+                        if (partial) {
+                            dialog.setMessage(
+                                "这个页面资源太多，只列出了一部分（先找到的排在前面）"
+                            )
+                        }
+                        dialog
                             .setItems(names) { _, which ->
                                 val res = result.resources[which]
                                 createTaskSmart(res.url) { outcome ->

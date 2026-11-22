@@ -63,6 +63,13 @@ sealed class SniffResult {
         val pageUrl: String,
         val resources: List<SniffedResource>,
         val totalCount: Int = resources.size,
+        /**
+         * v4.3: true when the list is only PART of what the page
+         * holds — the parse budget stopped extraction early, or
+         * the full result did not fit the shown cap. The UI says
+         * so in plain words instead of pretending completeness.
+         */
+        val truncated: Boolean = false,
     ) : SniffResult()
     data class Failure(val reason: String) : SniffResult()
 }
@@ -251,7 +258,71 @@ object SniffParser {
         return kindOf(stripped) ?: "other"
     }
 
-    fun extract(html: String, baseUrl: String): List<SniffedResource> {
+    /**
+     * v4.3 parse budget. The four findAll passes below run over a
+     * page body of up to 4 MB with no natural bound on their work:
+     * a pathological page (tens of thousands of anchors, one anchor
+     * whose text runs for megabytes under DOT_MATCHES_ALL) could
+     * wedge the background parse for a very long time. Two pure
+     * budgets cap that work without touching WHAT counts as a
+     * resource, the dedupe, or the sort:
+     * - [MAX_RAW_MATCHES]: raw regex matches across all four
+     *   passes. A real page — even a huge file index — has at most
+     *   a few thousand links; 20_000 is far above any honest page
+     *   and far below a wedged one.
+     * - [PARSE_BUDGET_MS]: wall-clock deadline, checked between
+     *   passes and every [DEADLINE_CHECK_EVERY] matches inside a
+     *   long pass. 3 s is generous for 4 MB of regex work on a
+     *   phone; anything slower is a page we should stop reading.
+     * When a budget runs out, extraction stops and returns what it
+     * already found (deduped + sorted as usual) with
+     * [ExtractResult.truncated] set, so the UI can say the list is
+     * partial. [deadlineMs] / [nowMs] are injectable for tests.
+     */
+    const val MAX_RAW_MATCHES = 20_000
+    const val PARSE_BUDGET_MS = 3_000L
+    private const val DEADLINE_CHECK_EVERY = 256
+
+    /** [extract] outcome: the resources found, plus whether a
+     *  parse budget cut the extraction short. */
+    data class ExtractResult(
+        val resources: List<SniffedResource>,
+        val truncated: Boolean,
+    )
+
+    fun extract(html: String, baseUrl: String): List<SniffedResource> =
+        extractWithBudget(html, baseUrl).resources
+
+    fun extractWithBudget(
+        html: String,
+        baseUrl: String,
+        maxMatches: Int = MAX_RAW_MATCHES,
+        deadlineMs: Long? = null,
+        nowMs: () -> Long = System::currentTimeMillis,
+    ): ExtractResult {
+        val deadline = deadlineMs ?: (nowMs() + PARSE_BUDGET_MS)
+        var rawMatches = 0
+        var truncated = false
+        // Spend one raw match against the budgets; false = stop now.
+        fun budgetLeft(): Boolean {
+            if (truncated) return false
+            rawMatches++
+            if (rawMatches > maxMatches) {
+                truncated = true
+                return false
+            }
+            if (rawMatches % DEADLINE_CHECK_EVERY == 0 && nowMs() > deadline) {
+                truncated = true
+                return false
+            }
+            return true
+        }
+        // Between passes (and before the first): the deadline alone
+        // can already be spent even when few matches were seen.
+        fun passExpired(): Boolean {
+            if (!truncated && nowMs() > deadline) truncated = true
+            return truncated
+        }
         val byUrl = linkedMapOf<String, SniffedResource>()
         fun add(url: String, kind: String?, entry: Boolean) {
             // v1.6: extensionless links on known file hosts (GitHub
@@ -271,44 +342,57 @@ object SniffParser {
         // Meta video tags first (v2.3): the page's headline video
         // is a download entry by definition; its kind comes from
         // the URL's extension when it has one, else "video".
-        for (m in META_TAG.findAll(html)) {
-            val tag = m.value
-            val name = META_NAME.find(tag)?.groupValues?.get(1)
-                ?.trim()?.lowercase() ?: continue
-            if (name !in VIDEO_META_NAMES) continue
-            val content = META_CONTENT.find(tag)?.groupValues?.get(1) ?: continue
-            val resolved = resolve(baseUrl, content) ?: continue
-            add(resolved, kindOf(resolved) ?: "video", true)
+        if (!passExpired()) {
+            for (m in META_TAG.findAll(html)) {
+                if (!budgetLeft()) break
+                val tag = m.value
+                val name = META_NAME.find(tag)?.groupValues?.get(1)
+                    ?.trim()?.lowercase() ?: continue
+                if (name !in VIDEO_META_NAMES) continue
+                val content = META_CONTENT.find(tag)?.groupValues?.get(1) ?: continue
+                val resolved = resolve(baseUrl, content) ?: continue
+                add(resolved, kindOf(resolved) ?: "video", true)
+            }
         }
         // Anchors next: their text tells us which link is the download entry.
-        for (m in ANCHOR.findAll(html)) {
-            val resolved = resolve(baseUrl, m.groupValues[1]) ?: continue
-            val text = m.groupValues[2].replace(Regex("<[^>]+>"), "").trim()
-            add(resolved, kindOf(resolved), isEntryLink(resolved, text))
+        if (!passExpired()) {
+            for (m in ANCHOR.findAll(html)) {
+                if (!budgetLeft()) break
+                val resolved = resolve(baseUrl, m.groupValues[1]) ?: continue
+                val text = m.groupValues[2].replace(Regex("<[^>]+>"), "").trim()
+                add(resolved, kindOf(resolved), isEntryLink(resolved, text))
+            }
         }
         // Then bare href/src/poster/data-* attributes (media tags, JS vars...).
-        for (m in ATTR.findAll(html)) {
-            val resolved = resolve(baseUrl, m.groupValues[1]) ?: continue
-            add(resolved, kindOf(resolved), false)
+        if (!passExpired()) {
+            for (m in ATTR.findAll(html)) {
+                if (!budgetLeft()) break
+                val resolved = resolve(baseUrl, m.groupValues[1]) ?: continue
+                add(resolved, kindOf(resolved), false)
+            }
         }
         // Finally raw URLs embedded in text or scripts (var downUrl = "http://...").
-        for (m in PLAIN_URL.findAll(html)) {
-            val raw = m.value.trimEnd('.', ',', ';')
-            val resolved = resolve(baseUrl, raw) ?: continue
-            // Audit A13: a bare script/text URL counts as a download
-            // ENTRY only when it really points at a file. v1.2 marked
-            // ANY raw URL containing "download" as an entry, so one
-            // stray analytics/CDN URL could become the "single path"
-            // that layer 2 auto-follows instead of listing choices.
-            val kind = kindOf(resolved)
-            add(resolved, kind, kind != null && resolved.contains("download", true))
+        if (!passExpired()) {
+            for (m in PLAIN_URL.findAll(html)) {
+                if (!budgetLeft()) break
+                val raw = m.value.trimEnd('.', ',', ';')
+                val resolved = resolve(baseUrl, raw) ?: continue
+                // Audit A13: a bare script/text URL counts as a download
+                // ENTRY only when it really points at a file. v1.2 marked
+                // ANY raw URL containing "download" as an entry, so one
+                // stray analytics/CDN URL could become the "single path"
+                // that layer 2 auto-follows instead of listing choices.
+                val kind = kindOf(resolved)
+                add(resolved, kind, kind != null && resolved.contains("download", true))
+            }
         }
         // Download entries first, files before images, images last.
-        return byUrl.values.sortedWith(
+        val sorted = byUrl.values.sortedWith(
             compareByDescending<SniffedResource> { it.looksLikeDownloadEntry }
                 .thenBy { KIND_ORDER[it.kind] ?: 5 }
                 .thenBy { it.name }
         )
+        return ExtractResult(sorted, truncated)
     }
 }
 
@@ -455,7 +539,8 @@ class Sniffer(private val userAgent: String = DownloadEngine.DEFAULT_UA) {
                 current = refresh
                 return@repeat
             }
-            val resources = SniffParser.extract(f.body, f.url)
+            val parsed = SniffParser.extractWithBudget(f.body, f.url)
+            val resources = parsed.resources
             if (resources.isEmpty()) {
                 return SniffResult.Failure(
                     "页面打开了，但里面没找到可下载的资源（可能是脚本动态加载的页面）。" +
@@ -470,7 +555,13 @@ class Sniffer(private val userAgent: String = DownloadEngine.DEFAULT_UA) {
             }
             if (single == null) {
                 val shown = resources.take(MAX_LIST)
-                return SniffResult.ResourceList(f.url, shown, resources.size)
+                return SniffResult.ResourceList(
+                    f.url, shown, resources.size,
+                    // v4.3: partial either way — the parse budget
+                    // stopped early, or the full list did not fit
+                    // the shown cap.
+                    truncated = parsed.truncated || shown.size < resources.size,
+                )
             }
             // If the single path points straight at a file, we are done;
             // otherwise it is an intermediate page: follow it.
@@ -610,6 +701,25 @@ object SizeProbe {
     const val THREADS = 8
     const val TIMEOUT_MS = 4_000
 
+    /**
+     * v4.3: overall wall-clock budget for one [probeAll] run.
+     * Before this cap, the worst case stacked up badly: each
+     * future was awaited for up to TIMEOUT_MS * 3 = 12 s one by
+     * one (50 futures = a 600 s sequential ceiling), and even the
+     * completion bound — ceil(50 / 8) = 7 pool rounds times a
+     * probeOne worst case of ~16 s (HEAD connect+read timeouts,
+     * then the same again for the Range fallback) — lands near
+     * 112 s of the UI sitting in its "measuring…" state. Probing
+     * is a best-effort second phase: 45 s is several full rounds
+     * of honest-but-slow servers, and anything still unmeasured
+     * after that simply stays size-unknown, as it does today.
+     */
+    const val TOTAL_BUDGET_MS = 45_000L
+
+    /** Milliseconds left before [deadlineMs] at [nowMs]; never negative. */
+    fun remainingMs(deadlineMs: Long, nowMs: Long): Long =
+        (deadlineMs - nowMs).coerceAtLeast(0)
+
     /** Total length out of a "bytes 0-0/12345" Content-Range, if any. */
     fun totalFromContentRange(contentRange: String?): Long {
         if (contentRange.isNullOrBlank()) return -1
@@ -638,10 +748,23 @@ object SizeProbe {
                     res.copy(size = probeOne(res.url, userAgent))
                 })
             }
+            // v4.3: each future is awaited only for what is left
+            // of the overall budget (and never more than the old
+            // per-future cap); once the budget is spent the rest
+            // stay unmeasured instead of stacking up waits.
+            val deadline = System.currentTimeMillis() + TOTAL_BUDGET_MS
             val probed = futures.map { f ->
-                runCatching {
-                    f.get(TIMEOUT_MS * 3L, java.util.concurrent.TimeUnit.MILLISECONDS)
-                }.getOrNull()
+                val wait = minOf(
+                    TIMEOUT_MS * 3L,
+                    remainingMs(deadline, System.currentTimeMillis()),
+                )
+                if (wait <= 0) {
+                    null
+                } else {
+                    runCatching {
+                        f.get(wait, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    }.getOrNull()
+                }
             }
             val byUrl = probed.filterNotNull().associateBy { it.url }
             return resources.map { byUrl[it.url] ?: it }

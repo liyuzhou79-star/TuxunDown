@@ -206,6 +206,75 @@ class SniffParserTest {
     }
 
     @Test
+    fun normalPageIsNotTruncatedAndMatchesLegacyExtract() {
+        // v4.3: a small honest page spends none of the budget —
+        // not truncated, and the budgeted entry point returns
+        // exactly what the legacy extract() returns.
+        val out = SniffParser.extractWithBudget(html, "https://example.com/page/index.html")
+        assertTrue(!out.truncated)
+        assertEquals(
+            SniffParser.extract(html, "https://example.com/page/index.html").map { it.url },
+            out.resources.map { it.url },
+        )
+    }
+
+    @Test
+    fun matchCountBudgetTruncatesAndKeepsPartialResults() {
+        // v4.3: 50 distinct file anchors but a budget of 10 raw
+        // matches — extraction stops at the cap, flags truncated,
+        // and still returns the 10 found so far (sorted as usual).
+        val page = (1..50).joinToString("") {
+            """<a href="/files/f$it.zip">file $it</a>"""
+        }
+        val out = SniffParser.extractWithBudget(
+            page, "https://example.com/", maxMatches = 10,
+        )
+        assertTrue(out.truncated)
+        assertEquals(10, out.resources.size)
+        assertTrue(out.resources.all { it.url.endsWith(".zip") })
+    }
+
+    @Test
+    fun hugeAnchorTextsStillHitTheMatchBudget() {
+        // v4.3 pathological shape: few anchors but each carrying
+        // a very long text (the DOT_MATCHES_ALL case). The count
+        // budget caps the pass count regardless of anchor size.
+        val filler = "x".repeat(50_000)
+        val page = (1..30).joinToString("") {
+            """<a href="/files/big$it.apk">$filler</a>"""
+        }
+        val out = SniffParser.extractWithBudget(
+            page, "https://example.com/", maxMatches = 5,
+        )
+        assertTrue(out.truncated)
+        assertEquals(5, out.resources.size)
+    }
+
+    @Test
+    fun expiredClockTruncatesBeforeAnyPass() {
+        // v4.3: an injected clock already past the deadline —
+        // no pass runs, the result is empty AND truncated (never
+        // an untruncated empty that would read as "no resources
+        // because the page has none").
+        val out = SniffParser.extractWithBudget(
+            html, "https://example.com/",
+            deadlineMs = 1_000L, nowMs = { 2_000L },
+        )
+        assertTrue(out.truncated)
+        assertTrue(out.resources.isEmpty())
+    }
+
+    @Test
+    fun resourceListTruncatedDefaultsToFalse() {
+        // v4.3: the new flag defaults off, so existing ResourceList
+        // constructions keep their old meaning.
+        val rl = com.tuxundown.android.sniff.SniffResult.ResourceList(
+            "https://example.com/", emptyList(),
+        )
+        assertTrue(!rl.truncated)
+    }
+
+    @Test
     fun entriesSortBeforeImages() {
         val page = """
             <img src="/a.png">
