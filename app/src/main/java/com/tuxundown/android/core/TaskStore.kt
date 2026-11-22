@@ -297,24 +297,28 @@ class TaskStore(context: Context) {
      * v1.4: import tasks from an exported JSON text. Records whose id
      * already exists, or whose URL is already an active task, are
      * skipped. Returns how many were actually added.
+     *
+     * v3.4 (audit round 20): the accept/skip decision is planned by
+     * the pure [planImport] in O(existing + incoming). The old loop
+     * ran two `any {}` scans of the live list PER incoming record —
+     * quadratic: importing a 1,000-record backup into a 1,000-task
+     * store was ~2M string comparisons, and every accepted record
+     * also paid a full copy-on-write array copy on `add`. Now the
+     * accepted records land with ONE addAll.
      */
     @Synchronized
     fun importJson(text: String): Int {
         val incoming = deserialize(text)
-        var added = 0
-        for (t in incoming) {
-            if (tasks.any { it.id == t.id }) continue
-            if (t.status != TaskStatus.DONE && tasks.any {
-                    it.url == t.url && it.status != TaskStatus.DONE && it.status != TaskStatus.FAILED
-                }
-            ) continue
+        val accepted = planImport(tasks, incoming)
+        for (t in accepted) {
             // Imported unfinished tasks must not pretend to be running.
             if (t.status == TaskStatus.QUEUED) t.status = TaskStatus.PAUSED
-            tasks.add(t)
-            added++
         }
-        if (added > 0) saveNow()
-        return added
+        if (accepted.isNotEmpty()) {
+            tasks.addAll(accepted)
+            saveNow()
+        }
+        return accepted.size
     }
 
     fun add(t: TaskRecord): TaskRecord {
@@ -342,6 +346,43 @@ class TaskStore(context: Context) {
         const val MAX_HLS_SEGMENTS = 200_000
         const val MAX_SOURCES = 20
         const val MAX_HEADERS = 50
+
+        /**
+         * v3.4 (audit round 20): the pure import plan — which of
+         * [incoming] would be added on top of [existing], under
+         * exactly the rules [importJson] has always applied:
+         * an id that already exists loses; a non-DONE record whose
+         * URL is already held by an ACTIVE (not DONE, not FAILED)
+         * task loses. Records accepted earlier in the same plan
+         * count as existing for both checks, so duplicates inside
+         * one backup file dedupe the same way they did when the
+         * live list grew record by record. Hash sets keep the
+         * whole plan linear instead of quadratic.
+         */
+        fun planImport(
+            existing: List<TaskRecord>,
+            incoming: List<TaskRecord>,
+        ): List<TaskRecord> {
+            val seenIds = HashSet<String>(existing.size + incoming.size)
+            val activeUrls = HashSet<String>()
+            for (t in existing) {
+                seenIds.add(t.id)
+                if (t.status != TaskStatus.DONE && t.status != TaskStatus.FAILED) {
+                    activeUrls.add(t.url)
+                }
+            }
+            val accepted = ArrayList<TaskRecord>()
+            for (t in incoming) {
+                if (t.id in seenIds) continue
+                if (t.status != TaskStatus.DONE && t.url in activeUrls) continue
+                accepted.add(t)
+                seenIds.add(t.id)
+                if (t.status != TaskStatus.DONE && t.status != TaskStatus.FAILED) {
+                    activeUrls.add(t.url)
+                }
+            }
+            return accepted
+        }
 
         /** Pure serialization — same format on disk and for export.
          *  [stripSensitiveHeaders] is for EXPORTS only (v1.9): the
