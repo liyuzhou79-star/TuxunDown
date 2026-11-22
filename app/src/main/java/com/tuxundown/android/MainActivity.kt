@@ -387,6 +387,8 @@ fun DownApp() {
     var autoInstallUi by remember { mutableStateOf(DownloadCenter.autoInstallApk) }
     var autoOpenUi by remember { mutableStateOf(DownloadCenter.autoOpenFile) }
     var autoVerifyUi by remember { mutableStateOf(DownloadCenter.autoVerifyHash) }
+    // v3.0: auto-extract finished .zip tasks (default off).
+    var autoExtractUi by remember { mutableStateOf(DownloadCenter.autoExtractZip) }
     var maxConc by remember { mutableStateOf(DownloadCenter.maxConcurrent) }
     var autoRetry by remember { mutableStateOf(DownloadCenter.autoRetryCount) }
     var trafficMB by remember { mutableStateOf(DownloadCenter.trafficThresholdMB) }
@@ -687,6 +689,7 @@ fun DownApp() {
                             autoInstallUi = DownloadCenter.autoInstallApk
                             autoOpenUi = DownloadCenter.autoOpenFile
                             autoVerifyUi = DownloadCenter.autoVerifyHash
+                            autoExtractUi = DownloadCenter.autoExtractZip
                             maxConc = DownloadCenter.maxConcurrent
                             autoRetry = DownloadCenter.autoRetryCount
                             trafficMB = DownloadCenter.trafficThresholdMB
@@ -1385,6 +1388,8 @@ fun DownApp() {
             onAutoOpen = { autoOpenUi = it; DownloadCenter.autoOpenFile = it },
             autoVerify = autoVerifyUi,
             onAutoVerify = { autoVerifyUi = it; DownloadCenter.autoVerifyHash = it },
+            autoExtract = autoExtractUi,
+            onAutoExtract = { autoExtractUi = it; DownloadCenter.autoExtractZip = it },
             batteryOk = batteryOk,
             onOpenBattery = {
                 // v1.5: ONLY guide the user to the system switch —
@@ -3482,6 +3487,8 @@ fun SettingsScreen(
     onAutoOpen: (Boolean) -> Unit,
     autoVerify: Boolean,
     onAutoVerify: (Boolean) -> Unit,
+    autoExtract: Boolean,
+    onAutoExtract: (Boolean) -> Unit,
     batteryOk: Boolean,
     onOpenBattery: () -> Unit,
     onShowGuide: () -> Unit,
@@ -3504,7 +3511,7 @@ fun SettingsScreen(
         "s-proxy" to "代理 proxy http socks 端口 地址 服务器 用户名 密码 认证",
         "s-look" to "外观 amoled 纯黑 深色 暗色 主题 黑色",
         "s-notify" to "提示 震动 声音 响铃 完成 自动安装 安装 自动打开 打开 静默 夜间 时段 勿扰 " +
-            "校验 哈希 完整性 sha md5",
+            "校验 哈希 完整性 sha md5 解压 zip 压缩包 自动解压",
         "s-power" to "后台运行 后台 保活 电池 白名单 省电 冻结",
         "s-data" to "引导与数据 引导 新手引导 帮助 常见问题 备份 导出 导入 " +
             "恢复 孤儿 清理 part 数据 诊断 自检 体检 归档",
@@ -4001,6 +4008,24 @@ fun SettingsScreen(
                         )
                     }
                     Switch(checked = autoVerify, onCheckedChange = onAutoVerify)
+                }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("下完自动解压 zip 压缩包")
+                        Text(
+                            "开启后，.zip 文件下完会自动解压到它所在文件夹里一个同名文件夹中，" +
+                                "原 zip 保留。任务填了校验值时，校验对上才解压，没对上不解并在卡片上说明。" +
+                                "只支持 zip，rar、7z 等其他格式不会动。解压有文件数和总大小上限，" +
+                                "压缩包里有不安全路径会整包停下并说明。默认关",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = autoExtract, onCheckedChange = onAutoExtract)
                 }
             }
         }

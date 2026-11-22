@@ -79,6 +79,19 @@ object DownloadCenter {
         get() = pBool("autoVerifyHash", true)
         set(v) { prefs().edit().putBoolean("autoVerifyHash", v).apply() }
 
+    /**
+     * v3.0: when a .zip task finishes, extract it automatically
+     * into a same-named folder next to the archive (see
+     * ZipExtractor). Default OFF — an archive unpacking itself
+     * is a behaviour the user opts into. The original .zip is
+     * always kept; a task whose hash check FAILED is never
+     * extracted (a mismatched file is suspect, not a gift).
+     * Only .zip: other archive formats are not touched.
+     */
+    var autoExtractZip: Boolean
+        get() = pBool("autoExtractZip", false)
+        set(v) { prefs().edit().putBoolean("autoExtractZip", v).apply() }
+
     /** Completion feedback switches (v1.3). */
     var completeVibrate: Boolean
         get() = pBool("completeVibrate", true)
@@ -308,6 +321,7 @@ object DownloadCenter {
         o.put("autoInstallApk", autoInstallApk)
         o.put("autoOpenFile", autoOpenFile)
         o.put("autoVerifyHash", autoVerifyHash)
+        o.put("autoExtractZip", autoExtractZip)
         o.put("bootResume", bootResume)
         o.put("sortSubfolders", sortSubfolders)
         o.put("archiveAfterDays", archiveAfterDays)
@@ -354,6 +368,9 @@ object DownloadCenter {
         if (o.has("autoOpenFile")) autoOpenFile = o.optBoolean("autoOpenFile", autoOpenFile)
         if (o.has("autoVerifyHash")) {
             autoVerifyHash = o.optBoolean("autoVerifyHash", autoVerifyHash)
+        }
+        if (o.has("autoExtractZip")) {
+            autoExtractZip = o.optBoolean("autoExtractZip", autoExtractZip)
         }
         if (o.has("bootResume")) bootResume = o.optBoolean("bootResume", bootResume)
         if (o.has("sortSubfolders")) {

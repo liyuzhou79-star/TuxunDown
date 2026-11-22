@@ -794,6 +794,30 @@ class DownloadService : Service() {
                 note += " 完整性校验：自动校验已关，可在任务详情里点「立即校验」。"
             }
             task.note = note
+            // v3.0: auto-extract (setting, default OFF; .zip
+            // only). Runs AFTER verification on purpose: a file
+            // that FAILED its hash check is never unpacked —
+            // the mismatch warning above is the last word on
+            // it. A verify that did not run (switch off / no
+            // hash attached) does not block extraction; the
+            // check the user disabled cannot gate silently.
+            // Progress and the outcome append to the note, so
+            // the completion notification below reports the
+            // final state of the whole job.
+            if (DownloadCenter.autoExtractZip &&
+                ZipExtract.isZipName(displayName)
+            ) {
+                if (task.checksumState == Checksum.STATE_MISMATCHED) {
+                    task.note = note +
+                        " 校验没对上，没有自动解压；确认文件没问题后可手动解压。"
+                } else {
+                    val res = ZipExtractor.extract(this, task) { count ->
+                        task.note = "$note 正在自动解压：已解出 $count 个文件…"
+                        store.save()
+                    }
+                    task.note = "$note ${res.text}"
+                }
+            }
             notifyCompletion(task, displayName)
             // v1.6: feed the statistics screen (local counters).
             DownloadCenter.recordCompletion(task)
