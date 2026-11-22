@@ -28,7 +28,9 @@ class BatchRenameTest {
             BatchRename.apply("video.part1.mkv", ".part", "-part", "", ""),
         )
         assertEquals(
-            "a-b-a.txt",
+            // EVERY dot goes, the extension's included — the
+            // rule runs over the whole name by design.
+            "a-b-a-txt",
             BatchRename.apply("a.b.a.txt", ".", "-", "", ""),
         )
         assertEquals(
