@@ -47,6 +47,80 @@ class ScheduleTimeTest {
         assertEquals(at(1, 10, 0), ScheduleTime.nextOccurrence(10, 0, now))
     }
 
+    /** An explicit local date (month is 0-based, like Calendar). */
+    private fun on(
+        year: Int, month0: Int, day: Int, hour: Int, minute: Int,
+    ): Long {
+        val cal = Calendar.getInstance().apply {
+            clear()
+            set(year, month0, day, hour, minute, 0)
+        }
+        return cal.timeInMillis
+    }
+
+    // ---- v4.6 (audit round 31): calendar boundaries. The
+    // arithmetic is Calendar DAY_OF_YEAR adds, never +24 h in
+    // milliseconds, so month / year / leap edges must land on
+    // the same wall-clock time of the correct next day. ----
+
+    @Test
+    fun advanceDailyCrossesMonthEnd() {
+        val slot = on(2025, 0, 31, 23, 30) // Jan 31
+        assertEquals(
+            on(2025, 1, 1, 23, 30), // Feb 1
+            ScheduleTime.advanceDaily(slot, on(2025, 1, 1, 0, 30)),
+        )
+    }
+
+    @Test
+    fun advanceDailyCrossesYearEnd() {
+        val slot = on(2025, 11, 31, 8, 0) // Dec 31 2025
+        // "Now" is past Jan 1 2026's slot too, so the next
+        // future slot is Jan 2 — never a past one.
+        assertEquals(
+            on(2026, 0, 2, 8, 0),
+            ScheduleTime.advanceDaily(slot, on(2026, 0, 1, 9, 0)),
+        )
+    }
+
+    @Test
+    fun advanceDailyLeapFebruaryHas29Days() {
+        val slot = on(2024, 1, 28, 23, 30) // Feb 28 2024 (leap)
+        assertEquals(
+            on(2024, 1, 29, 23, 30), // Feb 29 exists in 2024
+            ScheduleTime.advanceDaily(slot, on(2024, 1, 29, 0, 30)),
+        )
+    }
+
+    @Test
+    fun advanceDailyNonLeapFebruaryRollsToMarch() {
+        val slot = on(2025, 1, 28, 23, 30) // Feb 28 2025
+        assertEquals(
+            on(2025, 2, 1, 23, 30), // Mar 1 — no Feb 29 in 2025
+            ScheduleTime.advanceDaily(slot, on(2025, 2, 1, 0, 30)),
+        )
+    }
+
+    @Test
+    fun nextOccurrenceCrossesYearEnd() {
+        val now = on(2025, 11, 31, 23, 0) // Dec 31 2025, 23:00
+        assertEquals(
+            on(2026, 0, 1, 7, 0),
+            ScheduleTime.nextOccurrence(7, 0, now),
+        )
+    }
+
+    @Test
+    fun nextOccurrenceAtExactSlotCrossesMonthEnd() {
+        // Exactly at the slot is not strictly after it, so it
+        // rolls — across the month boundary here.
+        val now = on(2025, 0, 31, 10, 0) // Jan 31, 10:00
+        assertEquals(
+            on(2025, 1, 1, 10, 0), // Feb 1
+            ScheduleTime.nextOccurrence(10, 0, now),
+        )
+    }
+
     @Test
     fun advanceDailyLandsOnNextFutureSlot() {
         val slot = at(0, 23, 30)

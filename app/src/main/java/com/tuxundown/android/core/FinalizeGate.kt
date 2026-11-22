@@ -53,6 +53,29 @@ class FinalizeGate {
 
     companion object {
         /**
+         * v4.6 (audit round 31): is any QUEUED task parked —
+         * waiting on a condition only the live drain can notice
+         * returning (network back, portal login done, power
+         * plugged in)? ALL THREE park flags count. The drain
+         * used to inline this verdict counting only netDeferred
+         * and portalDeferred; a charge-only park was kept alive
+         * solely by the charge gate branch re-deriving its
+         * condition from a SECOND live battery read — and when
+         * that read disagreed with the start loop's first read
+         * (power landed between the two), the drain fell
+         * through to stopSelf with the task still QUEUED and
+         * parked, and no power-connected listener exists
+         * anywhere to restart the service. Judging the park
+         * FLAGS here makes the exit accounting agree with the
+         * parks the service actually set.
+         */
+        fun anyParked(tasks: List<TaskRecord>): Boolean =
+            tasks.any {
+                (it.netDeferred || it.portalDeferred || it.chargeDeferred) &&
+                    it.status == TaskStatus.QUEUED
+            }
+
+        /**
          * The drain loop's exit verdict, consulted when no
          * engine thread is running: the service may stop only
          * when there is no queued work, no deferred (parked)

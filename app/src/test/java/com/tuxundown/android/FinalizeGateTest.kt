@@ -1,6 +1,8 @@
 package com.tuxundown.android
 
 import com.tuxundown.android.core.FinalizeGate
+import com.tuxundown.android.core.TaskRecord
+import com.tuxundown.android.core.TaskStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -81,6 +83,71 @@ class FinalizeGateTest {
         assertFalse(
             FinalizeGate.drainMayExit(
                 anyQueued = true, anyDeferred = true, pendingFinalize = 3,
+            ),
+        )
+    }
+
+    // ---- v4.6 (audit round 31): the drain's park verdict ----
+
+    private fun parkedTask(status: TaskStatus, park: String): TaskRecord {
+        val t = TaskRecord(
+            url = "https://x/${System.nanoTime()}", status = status,
+        )
+        when (park) {
+            "net" -> t.netDeferred = true
+            "portal" -> t.portalDeferred = true
+            "charge" -> t.chargeDeferred = true
+        }
+        return t
+    }
+
+    @Test
+    fun anyParkedCountsEveryParkFlag() {
+        for (park in listOf("net", "portal", "charge")) {
+            assertTrue(
+                "a QUEUED task parked on $park keeps the drain alive",
+                FinalizeGate.anyParked(
+                    listOf(parkedTask(TaskStatus.QUEUED, park)),
+                ),
+            )
+        }
+        assertFalse(
+            FinalizeGate.anyParked(
+                listOf(parkedTask(TaskStatus.QUEUED, "none")),
+            ),
+        )
+        assertFalse(FinalizeGate.anyParked(emptyList()))
+    }
+
+    @Test
+    fun anyParkedIgnoresParksOnNonQueuedTasks() {
+        // A park flag left on a task the user paused (or one
+        // that already finished) must not pin the service
+        // alive: only a QUEUED park is waiting on the drain.
+        for (status in listOf(TaskStatus.PAUSED, TaskStatus.DONE, TaskStatus.FAILED)) {
+            assertFalse(
+                FinalizeGate.anyParked(listOf(parkedTask(status, "charge"))),
+            )
+            assertFalse(
+                FinalizeGate.anyParked(listOf(parkedTask(status, "net"))),
+            )
+        }
+    }
+
+    @Test
+    fun chargeOnlyParkBlocksTheDrainExit() {
+        // The audit-round-31 regression pin, composed exactly
+        // as the drain composes it: a charge-only park (power
+        // landed between the start loop's battery read and
+        // the gate branch's re-read, so neither gate branch
+        // held the service) must still veto the exit through
+        // the deferred accounting.
+        val tasks = listOf(parkedTask(TaskStatus.QUEUED, "charge"))
+        assertFalse(
+            FinalizeGate.drainMayExit(
+                anyQueued = tasks.any { it.status == TaskStatus.QUEUED },
+                anyDeferred = FinalizeGate.anyParked(tasks),
+                pendingFinalize = 0,
             ),
         )
     }

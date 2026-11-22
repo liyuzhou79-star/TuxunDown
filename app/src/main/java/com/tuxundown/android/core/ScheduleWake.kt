@@ -44,6 +44,22 @@ import android.content.Intent
  * The alarm is a backup for the poll, never the mechanism
  * of record: with the service alive it fires into a drain
  * loop that is already waiting, which is harmless.
+ *
+ * v4.6 (audit round 31, time & plans): scheduledAt is an
+ * ABSOLUTE epoch, and there is deliberately no
+ * TIMEZONE_CHANGED / TIME_SET listener. The alarm and the
+ * drain judge the same stored epoch, so the two never
+ * disagree with each other: a time-zone change silently
+ * re-reads a one-shot's wall-clock meaning (it still fires
+ * exactly once, at the stored instant), and a daily slot
+ * self-corrects at its next advanceDaily, which is computed
+ * in the then-current local calendar. A clock set FORWARD
+ * past a slot makes the task due, never lost — it starts
+ * late at the next drain pass / alarm fire, and
+ * advanceDaily lands strictly in the future, so missed
+ * days never burst. A clock set BACKWARD returns the slot
+ * to the future and it is simply re-armed; a task that
+ * already started has left QUEUED, so nothing double-fires.
  */
 object ScheduleWake {
 

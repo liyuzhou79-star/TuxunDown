@@ -711,9 +711,13 @@ class DownloadService : Service() {
                 // connectivity returns — they are QUEUED but not
                 // eligible, so without this branch the service would
                 // stop and nobody would ever un-park them.
-                val anyDeferred = store.tasks.any {
-                    (it.netDeferred || it.portalDeferred) && it.status == TaskStatus.QUEUED
-                }
+                // v4.6 (audit round 31): ALL park flags count,
+                // chargeDeferred included — see
+                // FinalizeGate.anyParked for the race this
+                // closes (a charge park whose second battery
+                // read flipped used to fall through to the
+                // nextAt<=0 exit below with nobody watching).
+                val anyDeferred = FinalizeGate.anyParked(store.tasks)
                 // v4.4 (finalize pipeline): the exit verdict goes
                 // through FinalizeGate — pending finalize work
                 // vetoes the exit even if this pass somehow
