@@ -25,6 +25,38 @@ data class SniffedResource(
     val size: Long = -1,
 )
 
+/**
+ * v4.1 (step A): the sniff-layer twin of the engine's
+ * releaseConnection discipline. Probe replies here are a HEAD
+ * (no body at all) or a 1-byte Range GET — draining that tiny
+ * body to EOF and closing the stream returns the socket to the
+ * platform keep-alive pool, where the old unconditional
+ * disconnect() threw it away. A body larger than [drainCap]
+ * (e.g. a server that ignored the Range and sent the whole
+ * file) is NOT reusable and is disconnected, as before; an
+ * error reply whose input stream cannot even be opened lands
+ * on the same disconnect. Best-effort throughout.
+ */
+private fun releaseProbeConnection(c: HttpURLConnection, drainCap: Int = 4096) {
+    val reusable = runCatching {
+        val input = c.inputStream
+        val buf = ByteArray(1024)
+        var drained = 0
+        var eof = false
+        while (drained <= drainCap) {
+            val n = input.read(buf, 0, minOf(buf.size, drainCap + 1 - drained))
+            if (n < 0) {
+                eof = true
+                break
+            }
+            drained += n
+        }
+        input.close()
+        eof
+    }.getOrDefault(false)
+    if (!reusable) runCatching { c.disconnect() }
+}
+
 sealed class SniffResult {
     data class DirectFile(val url: String, val fileName: String) : SniffResult()
     data class ResourceList(
@@ -62,7 +94,8 @@ object LinkRouter {
 
     /**
      * Lightweight network probe: HEAD first; servers that refuse HEAD get
-     * a 1-byte Range GET whose body is never read. Throws with a plain
+     * a 1-byte Range GET whose tiny body is only drained for connection
+     * reuse (v4.1), never used. Throws with a plain
      * reason on HTTP errors so the UI can say what happened.
      */
     fun probe(url: String, userAgent: String = DownloadEngine.DEFAULT_UA): Route {
@@ -80,7 +113,10 @@ object LinkRouter {
             val type = c.getHeaderField("Content-Type")
             val disp = c.getHeaderField("Content-Disposition")
             val finalUrl = c.url.toString()
-            c.disconnect()
+            // v4.1: HEAD has no body and the GET fallback's body
+            // is a single byte — release warm instead of the old
+            // unconditional disconnect (see releaseProbeConnection).
+            releaseProbeConnection(c)
             when {
                 // Audit A14: plenty of servers refuse HEAD (405/501,
                 // some even 401/403) but happily serve GET — fall back
@@ -332,14 +368,20 @@ class Sniffer(private val userAgent: String = DownloadEngine.DEFAULT_UA) {
                 c.disconnect()
                 return Fetched(finalUrl, type, "", isFile = true)
             }
-            val body = readBodyCapped(c)
-            c.disconnect()
+            val (body, pageEof) = readBodyCapped(c)
+            // v4.1: a page read to EOF had its stream closed by
+            // readBodyCapped — that already returns the socket to
+            // the keep-alive pool, so only a cap-truncated page
+            // (body left unread) is disconnected.
+            if (!pageEof) c.disconnect()
             return Fetched(finalUrl, type, body, isFile = false)
         }
         throw IllegalStateException("页面跳转次数太多，已停下")
     }
 
-    private fun readBodyCapped(c: HttpURLConnection): String {
+    /** Page text plus whether the body was read to EOF (v4.1:
+     *  the caller needs it for the keep-alive decision). */
+    private fun readBodyCapped(c: HttpURLConnection): Pair<String, Boolean> {
         var input: InputStream = c.inputStream
         if ((c.getHeaderField("Content-Encoding") ?: "").contains("gzip", true)) {
             input = GZIPInputStream(input)
@@ -347,9 +389,13 @@ class Sniffer(private val userAgent: String = DownloadEngine.DEFAULT_UA) {
         val out = ByteArrayOutputStream()
         val buf = ByteArray(32 * 1024)
         var total = 0
+        var eof = false
         while (total < MAX_PAGE_BYTES) {
             val n = input.read(buf, 0, minOf(buf.size, MAX_PAGE_BYTES - total))
-            if (n < 0) break
+            if (n < 0) {
+                eof = true
+                break
+            }
             out.write(buf, 0, n)
             total += n
         }
@@ -362,7 +408,7 @@ class Sniffer(private val userAgent: String = DownloadEngine.DEFAULT_UA) {
                 ?.groupValues?.get(1)
             ?: "UTF-8"
         val charset = runCatching { charset(charsetName) }.getOrDefault(Charsets.UTF_8)
-        return String(bytes, charset)
+        return String(bytes, charset) to eof
     }
 
     /**
@@ -615,7 +661,7 @@ object SizeProbe {
             c.setRequestProperty("User-Agent", userAgent)
             val code = c.responseCode
             val len = c.contentLengthLong
-            c.disconnect()
+            releaseProbeConnection(c) // v4.1: HEAD — no body to throw away
             if (code in 200..299 && len > 0) return len
         }
         // Range GET of a single byte: Content-Range reports the total
@@ -631,7 +677,10 @@ object SizeProbe {
             val code = c.responseCode
             val rangeTotal = totalFromContentRange(c.getHeaderField("Content-Range"))
             val len = c.contentLengthLong
-            c.disconnect()
+            // v4.1: the 1-byte Range body is drained warm; a
+            // Range-ignoring 200 body is too big to drain and
+            // releaseProbeConnection disconnects it, as before.
+            releaseProbeConnection(c)
             val picked = pickSize(if (code == 200) len else -1, rangeTotal)
             if (picked > 0) return picked
         }

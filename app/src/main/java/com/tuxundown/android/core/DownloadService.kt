@@ -197,8 +197,37 @@ class DownloadService : Service() {
             if (method == "GET") c.setRequestProperty("Range", "bytes=0-0")
             return c.responseCode
         } finally {
-            runCatching { c.disconnect() }
+            // v4.1 (step A): same keep-alive discipline as the
+            // engine's releaseConnection — a HEAD reply has no
+            // body and the GET fallback's body is a single byte,
+            // so drain-and-close returns the socket to the pool
+            // instead of the old unconditional disconnect. A body
+            // too big to drain (Range ignored) or an error stream
+            // that will not open is disconnected, as before.
+            releaseProbeConnection(c)
         }
+    }
+
+    /** Drain up to 4 KB to EOF and close; disconnect only when
+     *  the body did not end within the cap. Best-effort. */
+    private fun releaseProbeConnection(c: java.net.HttpURLConnection) {
+        val reusable = runCatching {
+            val input = c.inputStream
+            val buf = ByteArray(1024)
+            var drained = 0
+            var eof = false
+            while (drained <= 4096) {
+                val n = input.read(buf, 0, minOf(buf.size, 4096 + 1 - drained))
+                if (n < 0) {
+                    eof = true
+                    break
+                }
+                drained += n
+            }
+            input.close()
+            eof
+        }.getOrDefault(false)
+        if (!reusable) runCatching { c.disconnect() }
     }
 
     /**

@@ -1027,7 +1027,14 @@ class DownloadEngine(
             val range = c.getHeaderField("Content-Range") ?: return -1
             return range.substringAfter('/', "").trim().toLongOrNull() ?: -1
         } finally {
-            c.disconnect()
+            // v4.1 (step A): release warm like probe() does — a 206
+            // here carries the same 1-byte body, and the old
+            // unconditional disconnect() threw that socket out of
+            // the keep-alive pool on EVERY mirror validation. Any
+            // other reply (200 whole-file body, error) fails the
+            // drain inside releaseConnection and is disconnected
+            // there, exactly as before.
+            releaseConnection(c)
         }
     }
 

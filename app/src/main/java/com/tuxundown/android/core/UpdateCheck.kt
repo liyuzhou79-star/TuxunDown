@@ -117,6 +117,12 @@ object UpdateCheck {
      */
     fun fetchLatest(): Result {
         var conn: HttpURLConnection? = null
+        // v4.1 (step A): set only when the body was read to EOF;
+        // the finally below then leaves the (stream-closed)
+        // socket in the keep-alive pool instead of disconnecting
+        // a fully consumed reply. Error replies, cap-truncated
+        // bodies and exceptions keep the disconnect.
+        var bodyFullyRead = false
         return try {
             conn = ProxyState.open(URL(LATEST_API_URL))
             conn.requestMethod = "GET"
@@ -135,7 +141,10 @@ object UpdateCheck {
                 val buf = ByteArray(32 * 1024)
                 while (true) {
                     val n = input.read(buf)
-                    if (n < 0) break
+                    if (n < 0) {
+                        bodyFullyRead = true
+                        break
+                    }
                     out.write(buf, 0, n)
                     if (out.size() > MAX_BODY_BYTES) break
                 }
@@ -156,7 +165,7 @@ object UpdateCheck {
                 Result.Failed("没查到更新：${Errors.human(e)}")
             }
         } finally {
-            runCatching { conn?.disconnect() }
+            if (!bodyFullyRead) runCatching { conn?.disconnect() }
         }
     }
 }

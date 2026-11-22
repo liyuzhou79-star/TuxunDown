@@ -142,6 +142,12 @@ class SpeedTest {
         val threads = (0 until connections).map {
             Thread {
                 var conn: HttpURLConnection? = null
+                // v4.1 (step A): true only when the body ran to
+                // EOF — use{} has then closed a fully consumed
+                // stream and the socket belongs back in the
+                // keep-alive pool. A deadline / cancel / cap exit
+                // leaves bytes unread and keeps the disconnect.
+                var eof = false
                 try {
                     conn = URL(url).openConnection() as HttpURLConnection
                     conn.connectTimeout = 10_000
@@ -155,7 +161,10 @@ class SpeedTest {
                             mine < PER_CONNECTION_CAP
                         ) {
                             val n = input.read(buf)
-                            if (n < 0) break
+                            if (n < 0) {
+                                eof = true
+                                break
+                            }
                             mine += n
                             total.addAndGet(n.toLong())
                         }
@@ -164,7 +173,7 @@ class SpeedTest {
                     // One dead connection just contributes nothing;
                     // if ALL of them die the phase reports 0.
                 } finally {
-                    runCatching { conn?.disconnect() }
+                    if (!eof) runCatching { conn?.disconnect() }
                 }
             }.apply { isDaemon = true; start() }
         }
