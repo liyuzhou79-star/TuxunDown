@@ -6778,7 +6778,20 @@ fun SummaryCard(active: List<TaskRecord>, all: List<TaskRecord>, liveTick: Int) 
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "总速度：${Format.speed(totalSpeed)} · ${Format.size(totalDone)} / ${Format.size(totalSize)}",
+                    // v4.4: append the all-done ETA only when
+                    // WidgetState can prove one (eta > 0); an
+                    // unknown-size active task or a stalled
+                    // speed hides it instead of guessing.
+                    // Format.eta carries its own 「大约」 prefix,
+                    // so this reads 「… · 全部下完大约 3 分钟」.
+                    // liveTick above re-runs this every second,
+                    // so the ETA stays as fresh as the speed.
+                    buildString {
+                        append("总速度：${Format.speed(totalSpeed)}")
+                        append(" · ${Format.size(totalDone)} / ${Format.size(totalSize)}")
+                        val eta = WidgetState.etaSeconds(active)
+                        if (eta > 0) append(" · 全部下完${Format.eta(eta)}")
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
