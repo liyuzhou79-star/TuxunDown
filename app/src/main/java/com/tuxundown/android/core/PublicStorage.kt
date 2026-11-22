@@ -293,6 +293,47 @@ object PublicStorage {
         return displayName
     }
 
+    /**
+     * v3.2: write a small FINISHED text file (the sniff-list
+     * export) into the download location — the SAF folder when
+     * one is chosen, otherwise the public Download root (never
+     * a category subfolder: this is a document the user goes
+     * looking for, not a download). Name collisions take the
+     * first free "name (n).ext", like finalize (audit A1).
+     * Returns the display name actually used.
+     */
+    fun saveTextFile(context: Context, name: String, text: String): String {
+        val resolver = context.contentResolver
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        val custom = DownloadCenter.downloadDirUri
+        if (custom.isNotBlank()) {
+            val tree = DocumentFile.fromTreeUri(context, Uri.parse(custom))
+                ?: throw IllegalStateException("自定义文件夹打不开，请在设置里重选下载目录")
+            val finalName = freeName(name) { candidate -> tree.findFile(candidate) != null }
+            val doc = tree.createFile("text/plain", finalName)
+                ?: throw IllegalStateException("在自定义文件夹里建不了文件")
+            val out = resolver.openOutputStream(doc.uri, "w")
+                ?: throw IllegalStateException("写不进自定义文件夹")
+            out.use { it.write(bytes) }
+            return finalName
+        }
+        val finalName = freeName(name) { candidate ->
+            findDownloadsEntry(context, candidate, rootPath()) != null
+        }
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, finalName)
+            put(MediaStore.Downloads.MIME_TYPE, "text/plain")
+            put(MediaStore.Downloads.RELATIVE_PATH, rootPath())
+            put(MediaStore.Downloads.IS_PENDING, 0)
+        }
+        val uri = resolver.insert(downloadsCollection(), values)
+            ?: throw IllegalStateException("在公共下载目录里建不了文件")
+        val out = resolver.openOutputStream(uri, "w")
+            ?: throw IllegalStateException("写不进公共下载目录")
+        out.use { it.write(bytes) }
+        return finalName
+    }
+
     /** First free variant of [name]: name, "name (1).ext", "name (2).ext"… */
     private fun freeName(name: String, taken: (String) -> Boolean): String {
         if (!taken(name)) return name

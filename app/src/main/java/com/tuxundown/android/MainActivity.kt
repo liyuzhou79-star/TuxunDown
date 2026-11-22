@@ -128,6 +128,7 @@ import com.tuxundown.android.core.WidgetState
 import com.tuxundown.android.sniff.LinkRouter
 import com.tuxundown.android.sniff.SizeProbe
 import com.tuxundown.android.sniff.SniffEstimate
+import com.tuxundown.android.sniff.SniffExport
 import com.tuxundown.android.sniff.SniffFilter
 import com.tuxundown.android.sniff.SniffResult
 import com.tuxundown.android.sniff.SniffSort
@@ -2294,6 +2295,54 @@ fun DownApp() {
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 6.dp),
+                        )
+                    }
+                    // ---- v3.2: export this sniff session as a
+                    // .txt list in the download folder — the
+                    // checked resources when any are ticked,
+                    // otherwise the ones currently shown (filters
+                    // applied). Same format as the shared queue
+                    // list, so the .txt import eats it back. ----
+                    val exportRes = if (sniffChecked.isNotEmpty()) {
+                        sniffList.filter { it.url in sniffChecked }
+                    } else {
+                        shownSniff
+                    }
+                    TextButton(
+                        onClick = {
+                            val text = SniffExport.build(exportRes)
+                            Thread {
+                                val saved = runCatching {
+                                    PublicStorage.saveTextFile(
+                                        context, SniffExport.FILE_NAME, text,
+                                    )
+                                }
+                                activity.runOnUiThread {
+                                    saved.onSuccess { name ->
+                                        Toast.makeText(
+                                            context,
+                                            "已导出 $name 到下载目录（共 ${exportRes.size} 个链接），" +
+                                                "用「从 .txt 文件导入」就能整批建回来",
+                                            Toast.LENGTH_LONG,
+                                        ).show()
+                                    }.onFailure {
+                                        Toast.makeText(
+                                            context,
+                                            "导出失败：${Errors.human(it)}",
+                                            Toast.LENGTH_SHORT,
+                                        ).show()
+                                    }
+                                }
+                            }.start()
+                        },
+                        modifier = Modifier.padding(top = 2.dp),
+                    ) {
+                        Text(
+                            if (sniffChecked.isNotEmpty()) {
+                                "导出已选 ${exportRes.size} 个为 .txt 清单"
+                            } else {
+                                "导出当前列表 ${exportRes.size} 个为 .txt 清单"
+                            }
                         )
                     }
                 }
