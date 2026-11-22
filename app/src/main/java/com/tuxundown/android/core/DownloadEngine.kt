@@ -2413,7 +2413,7 @@ class DownloadEngine(
      * (the probe session is already closed, see [runFtp]).
      */
     private fun runFtpSingle(
-        ftp: FtpClient.FtpUrl,
+        ftp: FtpClient.Companion.FtpUrl,
         total: Long,
         serverChanged: Boolean,
         rest: Boolean,
@@ -2572,7 +2572,7 @@ class DownloadEngine(
      * the part's data socket.
      */
     private fun runFtpSegmented(
-        ftp: FtpClient.FtpUrl,
+        ftp: FtpClient.Companion.FtpUrl,
         total: Long,
         serverChanged: Boolean,
     ): TaskStatus {
@@ -2817,7 +2817,7 @@ class DownloadEngine(
     }
 
     /** One worker's fresh FTP session (connect + login + binary). */
-    private fun newFtpSession(ftp: FtpClient.FtpUrl): FtpClient {
+    private fun newFtpSession(ftp: FtpClient.Companion.FtpUrl): FtpClient {
         val c = FtpClient()
         try {
             c.connect(ftp.host, ftp.port)
@@ -2843,7 +2843,7 @@ class DownloadEngine(
      * from its current position, at most 3 attempts.
      */
     private fun ftpWorkerLoop(
-        ftp: FtpClient.FtpUrl,
+        ftp: FtpClient.Companion.FtpUrl,
         grid: ChunkGrid,
         count: Int,
         cursor: AtomicInteger,
