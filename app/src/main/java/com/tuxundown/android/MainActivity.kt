@@ -710,6 +710,16 @@ fun DownApp() {
                             autoRetry = DownloadCenter.autoRetryCount
                             trafficMB = DownloadCenter.trafficThresholdMB
                             dualChan = DownloadCenter.dualChannel
+                            // v3.1 audit (round 17): these two
+                            // mirrors were missing from this
+                            // refresh — after a restore the
+                            // settings screen kept showing the
+                            // pre-restore values while
+                            // DownloadCenter already held the
+                            // restored ones (the value WAS
+                            // applied; only the display lied).
+                            bootResumeUi = DownloadCenter.bootResume
+                            sortFoldersUi = DownloadCenter.sortSubfolders
                             archiveDaysUi = DownloadCenter.archiveAfterDays
                             userAgentUi = DownloadCenter.userAgent
                             amoledUi = DownloadCenter.amoledBlack

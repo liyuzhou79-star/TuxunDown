@@ -150,6 +150,73 @@ class TaskStoreJsonTest {
     }
 
     @Test
+    fun roundTripKeepsEveryRemainingFieldV31Audit() {
+        // v3.1 audit (round 17): ONE test pins the whole task-field
+        // backup matrix — every serialized field must survive the
+        // shared serializer (disk + backup export use the same one),
+        // so a future field cannot silently drop out of backups.
+        val t = TaskRecord(
+            url = "https://example.com/big.iso",
+            fileName = "big.iso",
+            totalSize = 8192,
+            chunkSize = 4096,
+            chunkDone = booleanArrayOf(true, false),
+            singleThreadOnly = true,
+            threads = 7,
+            status = TaskStatus.PAUSED,
+            note = "系统行",
+            error = "上次的错误",
+            savedUri = "content://media/1",
+            savedName = "big.iso",
+            targetUri = "content://media/2",
+            etag = "\"abc123\"",
+            lastModified = "Wed, 01 Jan 2025 00:00:00 GMT",
+            priority = -1, // v3.1: 低优先级 (legacy: 0 中 / 1 高=插队)
+            expectedSha256 = "a".repeat(64),
+            expectedMd5 = "b".repeat(32),
+            checksumState = 2,
+            scheduleDaily = true,
+            taskLimitKBps = 1024,
+            archived = true,
+        )
+        t.sources.addAll(listOf("https://mirror1.example.com/big.iso"))
+        t.headers["Referer"] = "https://example.com/page"
+        t.headers["Cookie"] = "session=secret"
+        t.headers["Authorization"] = "Bearer token123"
+        val r = TaskStore.deserialize(TaskStore.serialize(listOf(t)))[0]
+        assertEquals(8192, r.totalSize)
+        assertEquals(4096, r.chunkSize)
+        assertEquals(listOf(true, false), r.chunkDone.toList())
+        assertTrue(r.singleThreadOnly)
+        assertEquals(7, r.threads)
+        assertEquals("上次的错误", r.error)
+        assertEquals("content://media/1", r.savedUri)
+        assertEquals("big.iso", r.savedName)
+        assertEquals("content://media/2", r.targetUri)
+        assertEquals("\"abc123\"", r.etag)
+        assertEquals("Wed, 01 Jan 2025 00:00:00 GMT", r.lastModified)
+        assertEquals(-1, r.priority)
+        assertEquals(listOf("https://mirror1.example.com/big.iso"), r.sources.toList())
+        assertEquals("a".repeat(64), r.expectedSha256)
+        assertEquals("b".repeat(32), r.expectedMd5)
+        assertEquals(2, r.checksumState)
+        assertTrue(r.scheduleDaily)
+        assertEquals(1024, r.taskLimitKBps)
+        assertTrue(r.archived)
+        // On-disk format keeps credentials (resume needs them)…
+        assertEquals("session=secret", r.headers["Cookie"])
+        assertEquals("Bearer token123", r.headers["Authorization"])
+        // …but the EXPORT form strips all three credential headers
+        // while keeping the harmless ones.
+        val exported = TaskStore.deserialize(
+            TaskStore.serialize(listOf(t), stripSensitiveHeaders = true)
+        )[0]
+        assertEquals("https://example.com/page", exported.headers["Referer"])
+        assertEquals(null, exported.headers["Cookie"])
+        assertEquals(null, exported.headers["Authorization"])
+    }
+
+    @Test
     fun oldFormatWithoutV14FieldsStillLoads() {
         // A v1.3-era record: none of the v1.4 keys exist.
         val old = """[{"id":"x1","url":"https://a.b/c.bin","fileName":"c.bin","status":"DONE"}]"""
