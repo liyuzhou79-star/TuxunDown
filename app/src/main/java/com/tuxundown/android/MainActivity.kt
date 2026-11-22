@@ -1371,6 +1371,7 @@ fun DownApp() {
     val TaskCardFor: @androidx.compose.runtime.Composable (TaskRecord) -> Unit = { task ->
         TaskCard(
             task = task,
+            liveTick = tick,
             selecting = selecting,
             selected = task.id in selectedIds,
             onToggleSelect = {
@@ -1702,6 +1703,7 @@ fun DownApp() {
         StatsScreen(
             onBack = { screen = "home" },
             onSpeedTest = { screen = "speedtest" },
+            tick = tick,
         )
     } else if (screen == "files") {
         FilesScreen(onBack = { screen = "home" })
@@ -1816,7 +1818,7 @@ fun DownApp() {
             if (activeTasks.size >= 2 ||
                 BulkControl.resumeTargets(store.tasks).size >= 2
             ) {
-                item(key = "summary") { SummaryCard(activeTasks, store.tasks) }
+                item(key = "summary") { SummaryCard(activeTasks, store.tasks, liveTick = tick) }
             }
 
             // ---- tabs (v1.4 item 2) ----
@@ -3494,7 +3496,14 @@ fun FileTypeBadge(kind: String, name: String) {
  * completed tasks; nothing is uploaded anywhere.
  */
 @androidx.compose.runtime.Composable
-fun StatsScreen(onBack: () -> Unit, onSpeedTest: () -> Unit) {
+fun StatsScreen(onBack: () -> Unit, onSpeedTest: () -> Unit, tick: Int) {
+    // v4.0: tick exists so this screen subscribes to DownApp's 1 s
+    // tick and its parameters change every second, so Compose
+    // cannot skip it. Totals only move when a task completes, but
+    // without this a user sitting on the stats screen (whose other
+    // parameters are two stable lambdas) would never see a
+    // completion land; this (otherwise no-op) read fixes that.
+    @Suppress("UNUSED_EXPRESSION") tick
     val context = LocalContext.current
     // v3.4: the report is built at tap time from the live
     // counters + the records still on the device (see
@@ -6307,7 +6316,14 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
  *  large files could put its percent one point off the other
  *  two surfaces; now all three print the identical number. */
 @androidx.compose.runtime.Composable
-fun SummaryCard(active: List<TaskRecord>, all: List<TaskRecord>) {
+fun SummaryCard(active: List<TaskRecord>, all: List<TaskRecord>, liveTick: Int) {
+    // v4.0: liveTick exists so the caller's item scope subscribes
+    // to DownApp's 1 s tick and this function's parameters change
+    // every second, so Compose cannot skip it. The body reads the
+    // tasks' plain fields, which the engine sampler mutates in
+    // place; this (otherwise no-op) read is what lets each
+    // recomposition pick up the fresh aggregate values.
+    @Suppress("UNUSED_EXPRESSION") liveTick
     val agg = WidgetState.summary(active)
     val totalSize = agg.totalBytes
     val totalDone = agg.doneBytes
@@ -6538,6 +6554,7 @@ fun InfoRow(label: String, value: String) {
 @androidx.compose.runtime.Composable
 fun TaskCard(
     task: TaskRecord,
+    liveTick: Int,
     selecting: Boolean,
     selected: Boolean,
     onToggleSelect: () -> Unit,
@@ -6561,6 +6578,13 @@ fun TaskCard(
     onOpenInBrowser: () -> Unit,
     onOpenFiles: () -> Unit,
 ) {
+    // v4.0: liveTick exists so the caller's item scope subscribes
+    // to DownApp's 1 s tick and this function's parameters change
+    // every second, so Compose cannot skip it. The card body reads
+    // task's plain fields, which the engine sampler mutates in
+    // place; this (otherwise no-op) read is what lets each
+    // recomposition pick up the fresh speed/downloaded values.
+    @Suppress("UNUSED_EXPRESSION") liveTick
     var expanded by remember(task.id) {
         mutableStateOf(DownloadCenter.detailsExpanded)
     }
