@@ -99,6 +99,19 @@
                 <action android:name="com.tuxundown.android.action.SCHEDULE_WAKE" />
             </intent-filter>
         </receiver>
+        <!-- v3.8 audit round 24: post-upgrade tidy-up — the
+             system delivers MY_PACKAGE_REPLACED to the updated
+             app itself; the receiver re-arms the scheduled-start
+             backup alarm and refreshes placed widgets from the
+             new APK's resources (see UpgradeReceiver).
+             exported=false: only the system can deliver it. -->
+        <receiver
+            android:name=".core.UpgradeReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
         <!-- v2.1: home-screen widget (in-flight task count + total
              progress). Updates are pushed by the download service;
              the provider only answers the launcher's broadcasts,
