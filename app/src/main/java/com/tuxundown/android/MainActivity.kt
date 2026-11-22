@@ -94,6 +94,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import com.tuxundown.android.core.Backup
+import com.tuxundown.android.core.BatchRename
 import com.tuxundown.android.core.BulkControl
 import com.tuxundown.android.core.Checksum
 import com.tuxundown.android.core.CrashGuard
@@ -526,6 +527,13 @@ fun DownApp() {
     // ---- rename dialog (v1.4 item 18) ----
     var renameTask by remember { mutableStateOf<TaskRecord?>(null) }
     var renameText by remember { mutableStateOf("") }
+
+    // ---- v3.2: batch rename over the multi-selection ----
+    var batchRenameOpen by remember { mutableStateOf(false) }
+    var batchFind by remember { mutableStateOf("") }
+    var batchReplace by remember { mutableStateOf("") }
+    var batchPrefix by remember { mutableStateOf("") }
+    var batchSuffix by remember { mutableStateOf("") }
 
     // ---- v1.8: swipe-right delete asks first (the X button keeps
     // its old immediate behaviour; a swipe is easier to trigger by
@@ -1771,6 +1779,9 @@ fun DownApp() {
                                         ).show()
                                     }) { Text("取消归档") }
                                 }
+                                OutlinedButton(onClick = { batchRenameOpen = true }) {
+                                    Text("批量改名")
+                                }
                                 OutlinedButton(onClick = {
                                     // v2.9: share the selected tasks
                                     // as a plain-text link list (the
@@ -2339,6 +2350,120 @@ fun DownApp() {
             },
             dismissButton = {
                 TextButton(onClick = { renameTask = null }) { Text("取消") }
+            },
+        )
+    }
+
+    // ---- v3.2: batch rename dialog (multi-select) ----
+    if (batchRenameOpen) {
+        val picked = store.tasks.filter { it.id in selectedIds }
+        val plan = BatchRename.plan(picked, batchFind, batchReplace, batchPrefix, batchSuffix)
+        val willChange = plan.count { it.changed }
+        val skipped = plan.count { !it.eligible }
+        AlertDialog(
+            onDismissRequest = { batchRenameOpen = false },
+            title = { Text("批量改名（已选 ${picked.size} 个）") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text(
+                        "改的是这些任务之后保存时用的文件名：查找替换是纯文字匹配" +
+                            "（不是正则），后缀加在扩展名前面。正在下载和已完成的不会改；" +
+                            "已经下好的文件也不会动。改完重名也没关系，保存时会自动加 (1)。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = batchFind,
+                        onValueChange = { batchFind = it },
+                        label = { Text("查找（可留空）") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = batchReplace,
+                        onValueChange = { batchReplace = it },
+                        label = { Text("替换为（可留空）") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = batchPrefix,
+                            onValueChange = { batchPrefix = it },
+                            label = { Text("前缀（可留空）") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                        OutlinedTextField(
+                            value = batchSuffix,
+                            onValueChange = { batchSuffix = it },
+                            label = { Text("后缀（可留空）") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "预览：",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    for (p in plan.take(8)) {
+                        Text(
+                            when {
+                                !p.eligible -> "${p.oldName}（正在下载或已完成，不改）"
+                                p.changed -> "${p.oldName} → ${p.newName}"
+                                else -> "${p.oldName}（不变）"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 3.dp),
+                        )
+                    }
+                    if (plan.size > 8) {
+                        Text(
+                            "……还有 ${plan.size - 8} 个，规则相同",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 3.dp),
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        var n = 0
+                        for (p in plan) {
+                            if (!p.changed) continue
+                            val t = store.byId(p.id) ?: continue
+                            t.fileName = p.newName
+                            n++
+                        }
+                        if (n > 0) store.saveNow()
+                        batchRenameOpen = false
+                        selectedIds = emptySet()
+                        selecting = false
+                        Toast.makeText(
+                            context,
+                            when {
+                                n > 0 && skipped > 0 ->
+                                    "已改名 $n 个；$skipped 个正在下载或已完成，没改"
+                                n > 0 -> "已改名 $n 个"
+                                skipped > 0 -> "选中的都在下载中或已完成，没改"
+                                else -> "没有名字发生变化"
+                            },
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    },
+                    enabled = plan.isNotEmpty(),
+                ) { Text("改名（$willChange 个）") }
+            },
+            dismissButton = {
+                TextButton(onClick = { batchRenameOpen = false }) { Text("取消") }
             },
         )
     }
