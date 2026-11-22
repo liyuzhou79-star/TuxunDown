@@ -921,6 +921,30 @@ object DownloadCenter {
         if (CrashGuard.safeMode) return
         Thread {
             runCatching { applyArchiveSweep() }
+            // v3.9 audit round 25: Android 15 forbids a
+            // BOOT_COMPLETED receiver from starting a dataSync
+            // foreground service at all, so on those devices the
+            // boot receiver's kick silently fails (it is
+            // runCatching-wrapped) and 开机恢复 would never fire.
+            // The in-rules fallback: when the user's 开机恢复
+            // switch is ON, the first process start after the
+            // reboot — the user opening the app — performs the
+            // same recovery and starts the service from a
+            // foreground context, which is allowed. The tasks
+            // were never lost either way; this only decides
+            // whether they resume at boot or at first open.
+            // Switch OFF keeps the standing rule untouched:
+            // interrupted tasks stay paused for the user.
+            runCatching {
+                if (bootResume && recoverInterrupted() > 0) {
+                    val ctx = appContext
+                    if (ctx != null) {
+                        ContextCompat.startForegroundService(
+                            ctx, Intent(ctx, DownloadService::class.java)
+                        )
+                    }
+                }
+            }
         }.apply {
             isDaemon = true
             name = "deferred-startup"
@@ -1099,6 +1123,34 @@ object DownloadCenter {
     fun resumeAll(): Int {
         val targets = BulkControl.resumeTargets(store.tasks)
         for (t in targets) runCatching { enqueue(t) }
+        return targets.size
+    }
+
+    /**
+     * v3.9 audit round 25: Android 15 caps dataSync foreground
+     * services at roughly 6 hours per 24-hour window in the
+     * background; when the budget runs out the system gives the
+     * service a moment (Service.onTimeout) to stop itself. The
+     * graceful stop is a plain pause of everything in flight —
+     * same targets as 全部暂停， engines halt at chunk
+     * boundaries and all progress is already on disk — plus a
+     * card note that tells the truth about WHO stopped it and
+     * how to carry on, so the pause is never mistaken for a
+     * crash or a finished download. Returns how many were paused.
+     */
+    fun pauseAllForSystemTimeout(): Int {
+        val targets = BulkControl.pauseTargets(store.tasks)
+        for (t in targets) pauseTask(t)
+        var stamped = 0
+        for (t in targets) {
+            if (t.status == TaskStatus.PAUSED) {
+                t.note = "安卓 15 对后台下载服务有每天约 6 小时的时长上限，" +
+                    "刚才额度用满、系统把服务停了，任务已自动暂停，进度都在。" +
+                    "点「继续」就能接着下；把 App 打开到前台，这个计时会重新算。"
+                stamped++
+            }
+        }
+        if (stamped > 0) store.saveNow()
         return targets.size
     }
 

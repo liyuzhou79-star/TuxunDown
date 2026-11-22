@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkRequest
@@ -329,9 +330,50 @@ class DownloadService : Service() {
                 }
             }
         }
-        startForeground(NOTIF_ID, buildNotification("准备下载…", "", 0))
+        // v3.9 audit round 25: pass the foreground-service type
+        // EXPLICITLY. The manifest has declared dataSync (and the
+        // FOREGROUND_SERVICE_DATA_SYNC permission) all along, and
+        // the two-arg call would inherit it — but Android 14+
+        // judges the type at this call, and naming it here keeps
+        // the declaration and the call from ever drifting apart.
+        // The typed overload and the constant both exist since
+        // API 29, which is exactly minSdk.
+        startForeground(
+            NOTIF_ID,
+            buildNotification("准备下载…", "", 0),
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+        )
         ensureWorker()
         return START_STICKY
+    }
+
+    /**
+     * v3.9 audit round 25: Android 15 puts a cumulative runtime
+     * budget on dataSync foreground services — about 6 hours in
+     * any 24-hour window while the app stays in the background
+     * (the counter resets when the app comes to the foreground).
+     * When the budget runs out the system calls this and expects
+     * the service to stop itself promptly; ignoring it gets the
+     * service force-stopped with the work in an unknown state.
+     * Our answer is the graceful one: pause everything through
+     * the normal path (engines stop at chunk boundaries, every
+     * byte of progress is already persisted, the cards explain
+     * what happened) and stop. Nothing is lost — the user taps
+     * 继续 to resume, exactly like a manual pause. Both overloads
+     * are overridden; the system calls the two-arg form for a
+     * typed service. On API < 35 neither is ever called.
+     */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        onSystemTimeout()
+    }
+
+    override fun onTimeout(startId: Int) {
+        onSystemTimeout()
+    }
+
+    private fun onSystemTimeout() {
+        runCatching { DownloadCenter.pauseAllForSystemTimeout() }
+        runCatching { stopSelf() }
     }
 
     private fun drainQueue() {
