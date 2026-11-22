@@ -52,6 +52,13 @@ object Format {
     fun percent(progress: Float): Int =
         (progress.coerceIn(0f, 1f) * 100).toInt()
 
+    /**
+     * Speed-up multiple for the speed-test verdict ("3.2 倍"):
+     * one decimal, always via this function so the whole app
+     * rounds the same way (v2.9 audit round 15).
+     */
+    fun ratio(x: Double): String = "%.1f".format(x)
+
     /** "2026-11-22 14:30" label for a finished file (v1.9). */
     fun dateTime(epochMs: Long): String {
         if (epochMs <= 0) return ""

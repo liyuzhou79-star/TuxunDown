@@ -55,4 +55,11 @@ class FormatTest {
         assertEquals(47, Format.percent(0.47f))
         assertEquals(100, Format.percent(1.5f))
     }
+
+    @Test
+    fun ratioOneDecimal() {
+        assertEquals("1.0", Format.ratio(1.0))
+        assertEquals("3.2", Format.ratio(3.24))
+        assertEquals("12.8", Format.ratio(12.75))
+    }
 }

@@ -2973,7 +2973,7 @@ fun SpeedTestScreen(onBack: () -> Unit) {
                     InfoRow(
                         "对比：",
                         if (ratio >= 1.05) {
-                            "多线程约为单线程的 ${"%.1f".format(ratio)} 倍——" +
+                            "多线程约为单线程的 ${Format.ratio(ratio)} 倍——" +
                                 "连接数加上去确实能提速，这正是本 App 多线程下载的原理"
                         } else {
                             "多线程没比单线程快多少——当前网络或测速服务器是按总量给速度的，" +
@@ -4299,7 +4299,7 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
         "提速小贴士" to
             "· 优先用 WiFi，并尽量靠近路由器\n" +
             "· 同一个文件浏览器下很慢、这里快很多，是正常现象：浏览器只有一条连接\n" +
-            "· 如果加线程后速度不再涨，卡片上会明说——那是服务器按总量限速，谁都绕不过去\n" +
+            "· 如果加连接后速度不再涨，卡片上会明说——那是服务器按总量限速，谁都绕不过去\n" +
             "· 大文件下到一半可以放心暂停，回来点继续会接着下，不用重来",
         "说明" to
             "· 本软件免费开源（GPLv3），不收集、不上传你的任何数据，所有任务记录只存在你的手机里\n" +
@@ -5007,7 +5007,7 @@ fun TaskCard(
                     val total = (task.totalSize + task.chunkSize - 1) / task.chunkSize
                     InfoRow(
                         "分片：",
-                        "已完成 ${task.chunkDone.count { it }}/$total 块 · ${task.threads} 线程",
+                        "已完成 ${task.chunkDone.count { it }}/$total 块 · ${task.threads} 条连接",
                     )
                 }
                 // v1.6: HLS merge progress + multi-source state.

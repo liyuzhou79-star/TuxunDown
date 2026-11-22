@@ -63,7 +63,7 @@ object FailureAdvice {
                 )
             e.contains("HTTP 429") || e.contains("限流") -> Advice(
                 "服务器嫌请求太频繁，暂时不给下。等几分钟再点继续就好；" +
-                    "不用改线程——线程数是自动调的，限流过去自然恢复。",
+                    "不用改连接数——连接数是自动调的，限流过去了自然恢复。",
                 Action.RETRY, "等会儿再试",
             )
             e.contains("HTTP 404") || e.contains("HTTP 410") ||

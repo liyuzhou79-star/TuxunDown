@@ -650,7 +650,7 @@ class DownloadService : Service() {
                     notifyUpdate(
                         "网络断开，等待恢复",
                         task.fileName,
-                        (task.progress * 100).toInt(),
+                        Format.percent(task.progress),
                     )
                     return
                 }
@@ -671,7 +671,7 @@ class DownloadService : Service() {
             notifyUpdate(
                 "下载失败，稍后自动重试",
                 "${task.fileName} · 第 ${task.autoRetriesUsed}/$limit 次",
-                (task.progress * 100).toInt(),
+                Format.percent(task.progress),
             )
             if (!sleepBackoff(waitMs, task)) return
             // v2.1 audit (round 7, C2): a delete that landed DURING
@@ -1041,13 +1041,13 @@ class DownloadService : Service() {
             val text = buildString {
                 append(Format.speed(running.speedBps))
                 if (eta > 0) append(" · 还剩 ${Format.eta(eta)}")
-                append(" · 已完成 ${(running.progress * 100).toInt()}%")
+                append(" · 已完成 ${Format.percent(running.progress)}%")
             }
             // v1.8: a single running task earns pause/cancel
             // buttons right on the notification.
             notifyUpdate(
                 "正在下载 · ${running.fileName}", text,
-                (running.progress * 100).toInt(),
+                Format.percent(running.progress),
                 actionTask = running,
             )
         } else {
@@ -1060,7 +1060,7 @@ class DownloadService : Service() {
             // that could only ever name one of them.
             val lines = active.take(5).joinToString("\n") { t ->
                 val name = t.fileName.ifBlank { t.url }
-                val pct = (t.progress * 100).toInt()
+                val pct = Format.percent(t.progress)
                 if (t.status == TaskStatus.RUNNING) {
                     "$name · $pct% · ${Format.speed(t.speedBps)}"
                 } else {

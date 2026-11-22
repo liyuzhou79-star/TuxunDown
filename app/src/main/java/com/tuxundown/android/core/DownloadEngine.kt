@@ -669,7 +669,7 @@ class DownloadEngine(
                         if (wasProbing && !sc.probing && chunksLeft &&
                             newTarget <= 8 && task.note.isBlank()
                         ) {
-                            task.note = "加线程后速度不再提升，服务器可能按 IP 总限速，已用最优线程数。"
+                            task.note = "加连接后速度不再提升，服务器可能按 IP 总限速，已用最优连接数。"
                         }
                         // task.threads IS the card's live thread
                         // display and, at DONE, the value HostMemory
@@ -740,7 +740,7 @@ class DownloadEngine(
         )
         scaler = sc
         if (hint > 0 && task.note.isBlank()) {
-            task.note = "这个服务器上次的最佳线程数是 $hint，已直接用它下载，跳过试探。"
+            task.note = "这个服务器上次的最佳连接数是 $hint，已直接用它下载，跳过试探。"
         }
         if (cap > 0 && cap < MAX_THREADS) {
             appendNote("这个服务器之前在多线程下载时限流过，这次最多用 $cap 条连接，免得又被拒绝。")
