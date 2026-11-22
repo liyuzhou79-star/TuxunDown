@@ -30,6 +30,24 @@ package com.tuxundown.android.core
  * otherwise, so a corrupt cap can never squeeze the range shut.
  * This object does not decide the scaler's max — the engine
  * still sets that from the validated cap exactly as before.
+ *
+ * v4.7 verdict — the v4.6 server profile (peakBps / peakConns /
+ * per-source bytes) deliberately does NOT feed back into this
+ * decision. HostMemory is the ONE per-host learning system, and
+ * its settled count already answers the only question asked
+ * here — how many connections to open — because the scaler
+ * reached it by whole-run marginal-gain verdicts (a grow is
+ * kept only when the speed actually responds). The profile's
+ * peak-per-connection figure is a weaker signal of a different
+ * kind: peakBps and peakConns are independent maxima (of a
+ * smoothed speed and of a worker count, accumulated across
+ * every run of one task), so their ratio is not even one
+ * moment's average, and turning a rate back into a count would
+ * need a target speed nothing supplies. The profile is also
+ * per-TASK display data, never aggregated or persisted per
+ * host; feeding it back would require a second per-host store
+ * with its own expiry / forgetting rules, running in parallel
+ * to HostMemory's. Argued not done (audit round 32, step C).
  */
 object StartPlan {
 
