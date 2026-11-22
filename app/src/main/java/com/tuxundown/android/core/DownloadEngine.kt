@@ -2644,14 +2644,17 @@ class DownloadEngine(
         // its unwritten remainder cannot be told from its written
         // head without a bitmap); downloadedBytes is then derived
         // from the bitmap below, like every segmented resume.
-        // L >= total never reaches here as a partial (the grid
-        // decision required L < total to matter); L unmeasurable
-        // (< 0) adopts nothing. serverChanged excludes adoption
-        // too: those bytes belong to the OLD server file, not
-        // this grid's file.
-        if (!serverChanged && !hadGrid && !hadBitmap &&
-            entryPartSize > 0 && entryPartSize < total
-        ) {
+        // L >= total is the alreadyComplete case in bitmap
+        // form: every chunk lies wholly inside L, so all are
+        // marked done and the normal completion check below
+        // (all done AND downloaded == total, after
+        // truncate(total) cuts any excess) seals it without a
+        // single transfer — the single-stream path's semantics,
+        // reached through the bitmap. L unmeasurable (< 0)
+        // adopts nothing. serverChanged excludes adoption too:
+        // those bytes belong to the OLD server file, not this
+        // grid's file.
+        if (!serverChanged && !hadGrid && !hadBitmap && entryPartSize > 0) {
             var adopted = 0
             synchronized(task.chunkDone) {
                 for (i in 0 until count) {
@@ -2665,10 +2668,14 @@ class DownloadEngine(
                 }
             }
             if (adopted > 0) {
-                appendNote(
-                    "接上了之前单连接下好的进度（约 ${Format.size(entryPartSize)}），" +
-                        "剩下的部分用多连接接着下。"
-                )
+                if (entryPartSize >= total) {
+                    appendNote("FTP：文件其实已经下完了，直接收尾。")
+                } else {
+                    appendNote(
+                        "接上了之前单连接下好的进度（约 ${Format.size(entryPartSize)}），" +
+                            "剩下的部分用多连接接着下。"
+                    )
+                }
             }
         }
         // Resume cursor: first unfinished chunk.
