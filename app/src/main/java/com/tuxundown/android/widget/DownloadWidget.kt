@@ -6,9 +6,11 @@ import android.appwidget.AppWidgetProvider
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.view.View
 import android.widget.RemoteViews
 import com.tuxundown.android.MainActivity
 import com.tuxundown.android.R
+import com.tuxundown.android.core.BulkControl
 import com.tuxundown.android.core.DownloadCenter
 import com.tuxundown.android.core.WidgetState
 
@@ -18,6 +20,14 @@ import com.tuxundown.android.core.WidgetState
  * RemoteViews on the platform widget framework, no new
  * dependency (deliberately NOT Glance: a whole Compose-runtime
  * stack for two text lines would break the size red line).
+ *
+ * v4.1: the widget gains a 全部暂停 / 全部继续 button. Its label
+ * and visibility come from the pure [BulkControl] decision the
+ * quick-settings tile and the home summary card already share,
+ * and its tap is a broadcast back to this provider that runs
+ * the exact tile path — BulkControl.action over the store,
+ * then DownloadCenter.pauseAll() / resumeAll(). No second
+ * implementation of the semantics lives here.
  *
  * Updates are PUSHED by the download service (every notification
  * post refreshes the widget too) and by DownloadCenter after
@@ -34,6 +44,39 @@ class DownloadWidgetProvider : AppWidgetProvider() {
     ) {
         WidgetUpdater.refresh(context)
     }
+
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action == ACTION_BULK_TOGGLE) {
+            // Same calls, same order as DownloadTileService
+            // .onClick. Wrapped like everything widget-side:
+            // a toggle must never crash broadcast delivery.
+            runCatching {
+                DownloadCenter.init(context)
+                when (BulkControl.action(DownloadCenter.store.tasks)) {
+                    BulkControl.Action.PAUSE_ALL -> DownloadCenter.pauseAll()
+                    BulkControl.Action.RESUME_ALL -> DownloadCenter.resumeAll()
+                    BulkControl.Action.NONE -> Unit
+                }
+            }
+            // pauseTask / enqueue already push a widget refresh
+            // through DownloadCenter, but on NONE (or a call
+            // that failed midway) nothing else would repaint —
+            // refresh once more from the store's current truth
+            // so the button never sits on its pre-tap label
+            // (the v4.0 stale-value lesson).
+            WidgetUpdater.refresh(context)
+            return
+        }
+        super.onReceive(context, intent)
+    }
+
+    companion object {
+        /** Explicit-component broadcast action for the widget's
+         *  bulk-toggle button; only our own PendingIntent (sent
+         *  with this app's identity, provider exported=false)
+         *  can deliver it. */
+        const val ACTION_BULK_TOGGLE = "com.tuxundown.android.widget.BULK_TOGGLE"
+    }
 }
 
 object WidgetUpdater {
@@ -46,7 +89,8 @@ object WidgetUpdater {
             // before anything else in the app ran — the store
             // must exist before it can be read.
             DownloadCenter.init(context)
-            val s = WidgetState.summary(DownloadCenter.store.tasks)
+            val tasks = DownloadCenter.store.tasks
+            val s = WidgetState.summary(tasks)
             val views = RemoteViews(context.packageName, R.layout.widget_download)
             views.setTextViewText(
                 R.id.widget_title,
@@ -58,6 +102,25 @@ object WidgetUpdater {
                 else "没有进行中的任务，点这里打开",
             )
             views.setProgressBar(R.id.widget_progress, 100, s.totalPct, false)
+            // v4.1: bulk-toggle button, driven by the same
+            // BulkControl decision as every refresh — the label
+            // is recomputed here, never remembered, so it cannot
+            // go stale. NONE hides the button outright (a dead
+            // button on the home screen would just be noise).
+            val bulkLabel = BulkControl.buttonLabel(BulkControl.action(tasks))
+            if (bulkLabel == null) {
+                views.setViewVisibility(R.id.widget_bulk_button, View.GONE)
+            } else {
+                views.setViewVisibility(R.id.widget_bulk_button, View.VISIBLE)
+                views.setTextViewText(R.id.widget_bulk_button, bulkLabel)
+                val togglePi = PendingIntent.getBroadcast(
+                    context, 1,
+                    Intent(context, DownloadWidgetProvider::class.java)
+                        .setAction(DownloadWidgetProvider.ACTION_BULK_TOGGLE),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                )
+                views.setOnClickPendingIntent(R.id.widget_bulk_button, togglePi)
+            }
             val pi = PendingIntent.getActivity(
                 context, 0,
                 Intent(context, MainActivity::class.java),

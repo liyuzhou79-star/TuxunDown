@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- v4.1: widget bulk-toggle button surface (day) — the same
+     light neutral as the progress track (#E1E1E1) on the white
+     card; the transfer green stays reserved for the progress
+     fill itself. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <corners android:radius="10dp" />
+    <solid android:color="#E1E1E1" />
+</shape>

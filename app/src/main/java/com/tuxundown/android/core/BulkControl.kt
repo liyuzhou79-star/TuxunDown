@@ -3,9 +3,10 @@ package com.tuxundown.android.core
 /**
  * 全部暂停 / 全部继续 decision logic (v2.7) — pure, unit-tested.
  *
- * One implementation shared by the home summary card's button
- * and the quick-settings tile, so the two surfaces can never
- * disagree about what a tap would do. The semantics mirror the
+ * One implementation shared by the home summary card's button,
+ * the quick-settings tile and (v4.1) the home-screen widget's
+ * button, so the three surfaces can never disagree about what
+ * a tap would do. The semantics mirror the
  * multi-select bar (v1.4) exactly:
  * - If anything is RUNNING or QUEUED, the offered action is
  *   PAUSE_ALL (pausing is the urgent direction; a mixed list
@@ -46,4 +47,18 @@ object BulkControl {
 
     /** Paused/failed count for the tile subtitle. */
     fun resumableCount(tasks: List<TaskRecord>): Int = resumeTargets(tasks).size
+
+    /**
+     * v4.1: the widget button's label for an [action], or null
+     * when the button must hide (NONE — nothing to toggle).
+     * The widget has room for the bare verb only (the tile and
+     * the card add counts around the same words); keeping the
+     * label decision here means the widget's wording and its
+     * visibility can never drift from the shared semantics.
+     */
+    fun buttonLabel(action: Action): String? = when (action) {
+        Action.PAUSE_ALL -> "全部暂停"
+        Action.RESUME_ALL -> "全部继续"
+        Action.NONE -> null
+    }
 }

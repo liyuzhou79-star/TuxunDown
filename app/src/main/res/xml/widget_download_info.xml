@@ -1,11 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- updatePeriodMillis = 0: the download service PUSHES updates
-     (throttled with its notification posts); no periodic polling. -->
+     (throttled with its notification posts); no periodic polling.
+     v4.1: minHeight 80 -> 104dp and targetCellHeight 1 -> 2 —
+     the new 全部暂停/全部继续 button row (36dp) cannot fit a
+     one-cell-tall widget without squeezing the title/progress
+     lines, so the widget now asks for two rows of height. -->
 <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
     android:minWidth="180dp"
-    android:minHeight="80dp"
+    android:minHeight="104dp"
     android:targetCellWidth="3"
-    android:targetCellHeight="1"
+    android:targetCellHeight="2"
     android:updatePeriodMillis="0"
     android:initialLayout="@layout/widget_download"
     android:previewImage="@drawable/app_icon"
