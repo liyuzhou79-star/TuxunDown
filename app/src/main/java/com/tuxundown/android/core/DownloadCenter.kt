@@ -981,6 +981,49 @@ object DownloadCenter {
         return true
     }
 
+    /**
+     * v3.7: batch "retry differently" (see RetryStrategy for the
+     * pure decisions). Applies the chosen changes to every
+     * FAILED task in [tasks], then re-queues each through the
+     * normal enqueue (which clears the error and resets the
+     * auto-retry budget). Downloaded progress is untouched.
+     * [uaPreset] null = keep each task's UA; "" = the 默认 preset
+     * (drop the task-level UA header); [uaLabel] is the preset's
+     * display name for the note. Returns how many tasks were
+     * actually retried.
+     */
+    fun retryWithStrategy(
+        tasks: List<TaskRecord>,
+        uaPreset: String?,
+        uaLabel: String,
+        singleThread: Boolean,
+    ): Int {
+        var n = 0
+        val changes = mutableListOf<String>()
+        if (uaPreset != null) changes += "浏览器标识换成「$uaLabel」"
+        if (singleThread) changes += "改用单线程"
+        for (t in tasks) {
+            if (!RetryStrategy.eligible(t.status)) continue
+            if (uaPreset != null) {
+                val newHeaders = RetryStrategy.headersWithUa(t.headers, uaPreset)
+                t.headers.clear()
+                t.headers.putAll(newHeaders)
+            }
+            t.singleThreadOnly = RetryStrategy.singleThreadAfter(t.singleThreadOnly, singleThread)
+            enqueue(t)
+            // enqueue may replace the note (the wifi-only wait
+            // message); stamp ours only over a note that is not
+            // that more-urgent explanation.
+            if (changes.isNotEmpty() && !t.note.startsWith("已开启")) {
+                t.note = "已换个方式重试：" + changes.joinToString("、") +
+                    "。已下载的进度保留，不会白下。"
+            }
+            n++
+        }
+        if (n > 0) store.saveNow()
+        return n
+    }
+
     /** v1.4 插队： move a queued task to the front of the queue.
      *  v1.6: a jumped task also gains bandwidth-budget weight.
      *  v2.1 audit (C5): the reorder is a compound indexOf/remove/add

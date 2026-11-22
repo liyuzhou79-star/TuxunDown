@@ -60,6 +60,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -541,6 +542,10 @@ fun DownApp() {
 
     // ---- v3.2: batch rename over the multi-selection ----
     var batchRenameOpen by remember { mutableStateOf(false) }
+    // v3.7: batch strategy-retry dialog (multi-select, FAILED only).
+    var retryStrategyOpen by remember { mutableStateOf(false) }
+    var retryUaChoice by remember { mutableStateOf(-1) } // -1 = 不改 UA
+    var retrySingleThread by remember { mutableStateOf(false) }
     var batchFind by remember { mutableStateOf("") }
     var batchReplace by remember { mutableStateOf("") }
     var batchPrefix by remember { mutableStateOf("") }
@@ -1929,6 +1934,18 @@ fun DownApp() {
                                 OutlinedButton(onClick = { batchRenameOpen = true }) {
                                     Text("批量改名")
                                 }
+                                if (store.tasks.any {
+                                        it.id in selectedIds && it.status == TaskStatus.FAILED
+                                    }
+                                ) {
+                                    OutlinedButton(onClick = {
+                                        retryUaChoice = -1
+                                        retrySingleThread = false
+                                        retryStrategyOpen = true
+                                    }) {
+                                        Text("换个方式重试")
+                                    }
+                                }
                                 OutlinedButton(onClick = {
                                     // v2.9: share the selected tasks
                                     // as a plain-text link list (the
@@ -2699,6 +2716,109 @@ fun DownApp() {
             },
             dismissButton = {
                 TextButton(onClick = { renameTask = null }) { Text("取消") }
+            },
+        )
+    }
+
+    // ---- v3.7: batch strategy-retry dialog (multi-select) ----
+    // Shown only when the selection contains a FAILED task.
+    // The pure decisions live in RetryStrategy; applying them
+    // (headers / single-thread / enqueue) is
+    // DownloadCenter.retryWithStrategy.
+    if (retryStrategyOpen) {
+        val failedPicked = store.tasks.filter {
+            it.id in selectedIds && it.status == TaskStatus.FAILED
+        }
+        // retryUaChoice: -1 = 不改 UA; 0..PRESETS.lastIndex picks that preset.
+        val uaChoice = retryUaChoice
+        val singleThread = retrySingleThread
+        val canApply = uaChoice >= 0 || singleThread
+        AlertDialog(
+            onDismissRequest = { retryStrategyOpen = false },
+            title = { Text("换个方式重试（${failedPicked.size} 个失败任务）") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text(
+                        "有些失败不是链接坏了，是「谈法」不对：\n" +
+                            "· 换浏览器标识（UA）：有些服务器按 UA 区别对待——" +
+                            "只认浏览器、防盗链挡下载工具，或者反过来。换个身份再谈一次。\n" +
+                            "· 改单线程：有些服务器连接一多就不稳（断流、拒绝），" +
+                            "一条连接慢慢下反而能下完。\n" +
+                            "改完会统一重新排队，已下载的进度保留，不会白下。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        "浏览器标识（UA）",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Row(
+                        Modifier.fillMaxWidth().clickable { retryUaChoice = -1 },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = uaChoice == -1, onClick = { retryUaChoice = -1 })
+                        Text("不改（沿用每个任务现在的）")
+                    }
+                    UserAgents.PRESETS.forEachIndexed { idx, (label, _) ->
+                        Row(
+                            Modifier.fillMaxWidth().clickable { retryUaChoice = idx },
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(selected = uaChoice == idx, onClick = { retryUaChoice = idx })
+                            Text(if (idx == 0) "$label（去掉任务自己的 UA）" else label)
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("改用单线程重试")
+                            Text(
+                                "每个任务只开一条连接从头下，速度会慢一些",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(checked = singleThread, onCheckedChange = { retrySingleThread = it })
+                    }
+                    if (!canApply) {
+                        Text(
+                            "先选至少一种改法（换 UA 或改单线程），不然和普通重试没区别。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = WinPalette.Red,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = canApply,
+                    onClick = {
+                        val uaPreset =
+                            if (uaChoice >= 0) UserAgents.PRESETS[uaChoice].second else null
+                        val uaLabel =
+                            if (uaChoice >= 0) UserAgents.PRESETS[uaChoice].first else ""
+                        val n = DownloadCenter.retryWithStrategy(
+                            failedPicked, uaPreset, uaLabel, singleThread,
+                        )
+                        retryStrategyOpen = false
+                        selectedIds = emptySet()
+                        selecting = false
+                        Toast.makeText(
+                            context, "已让 $n 个失败任务换个方式重试",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    },
+                ) { Text("改好并重试") }
+            },
+            dismissButton = {
+                TextButton(onClick = { retryStrategyOpen = false }) { Text("取消") }
             },
         )
     }
