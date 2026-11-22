@@ -954,6 +954,24 @@ object DownloadCenter {
         )
     }
 
+    /** v4.3: the user picked [threads] for this URL's host in
+     *  the diagnostics connection-count comparison — remember it
+     *  as that host's starting count (see HostMemory.recordManual
+     *  for the cap/fails rules). */
+    fun applyHostThreads(url: String, threads: Int) {
+        saveHostEntries(
+            HostMemory.recordManual(
+                hostEntries(), HostMemory.hostOf(url), threads, System.currentTimeMillis()
+            )
+        )
+    }
+
+    /** v4.3: forget every per-host learned optimum and rate-limit
+     *  ceiling; the next download from each host re-probes. */
+    fun clearHostMemory() {
+        prefs().edit().putString("hostThreads", "").apply()
+    }
+
     fun recordHostFailure(url: String) {
         saveHostEntries(
             HostMemory.recordFailure(hostEntries(), HostMemory.hostOf(url), System.currentTimeMillis())

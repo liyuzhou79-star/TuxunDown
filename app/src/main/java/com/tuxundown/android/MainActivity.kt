@@ -3562,6 +3562,17 @@ fun StatsScreen(onBack: () -> Unit, onSpeedTest: () -> Unit, tick: Int) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 6.dp),
                 )
+                Spacer(Modifier.height(10.dp))
+                OutlinedButton(onClick = {
+                    DownloadCenter.clearHostMemory()
+                    refresh++
+                }) { Text("清除按主机学习数据") }
+                Text(
+                    "每个站点记住的最佳连接数和限流上限都会清掉，下次下载重新试探；只存本机，不上传。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
             }
         }
         item(key = "st-week") {
@@ -4720,6 +4731,12 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
         mutableStateOf<List<ConnCompare.TierResult>>(emptyList())
     }
     var ccShowConfirm by remember { mutableStateOf(false) }
+    // v4.3: applying the winning tier as this host's remembered
+    // starting count — the confirm dialog's visibility and the
+    // applied count (0 = nothing applied yet this visit; a fresh
+    // measurement clears it, see startConnCompare).
+    var ccShowApplyConfirm by remember { mutableStateOf(false) }
+    var ccAppliedThreads by remember { mutableStateOf(0) }
     // v4.2 audit round 27: RUNNING tasks at the moment the
     // comparison STARTED (read once in startConnCompare — a
     // snapshot the results below are judged against, not a
@@ -4746,6 +4763,7 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
         }
         ccRunning = true
         ccResults = emptyList()
+        ccAppliedThreads = 0
         ccLiveBps = 0
         ccPhase = "准备实测…"
         val test = SpeedTest()
@@ -4963,6 +4981,39 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
         )
     }
 
+    // v4.3: applying the winning tier writes a per-host memory —
+    // say exactly what that does and does not change BEFORE it
+    // happens (the settings page can undo it, see clearHostMemory).
+    if (ccShowApplyConfirm) {
+        val bestTier = ConnCompare.bestTier(ccResults)
+        val host = com.tuxundown.android.core.HostMemory.hostOf(ccUrl.trim())
+        AlertDialog(
+            onDismissRequest = { ccShowApplyConfirm = false },
+            title = { Text("应用最快档") },
+            text = {
+                Text(
+                    "以后从这个站点（$host）新下载时，起步就用 " +
+                        "${bestTier?.connections ?: 0} 条连接，不再从头慢慢试。\n\n" +
+                        "只是起步值：真实下载还会受全局连接上限限制；" +
+                        "如果这个站点以前学到过限流上限，也仍然不会超过它。\n\n" +
+                        "想反悔随时可以：在「下载统计」页点「清除按主机学习数据」就能全部清掉、回到自动试探。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    ccShowApplyConfirm = false
+                    if (bestTier != null) {
+                        DownloadCenter.applyHostThreads(ccUrl.trim(), bestTier.connections)
+                        ccAppliedThreads = bestTier.connections
+                    }
+                }) { Text("应用") }
+            },
+            dismissButton = {
+                TextButton(onClick = { ccShowApplyConfirm = false }) { Text("取消") }
+            },
+        )
+    }
+
     LazyColumn(
         Modifier
             .fillMaxSize()
@@ -5133,6 +5184,23 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 6.dp),
                         )
+                    }
+                    // v4.3: close the loop — let the measured
+                    // winner become this host's remembered
+                    // starting count instead of dying on screen.
+                    if (best != null && !ccRunning) {
+                        Spacer(Modifier.height(10.dp))
+                        Button(onClick = { ccShowApplyConfirm = true }) {
+                            Text("把最快档应用到这个站点（${best.connections} 条）")
+                        }
+                        if (ccAppliedThreads > 0) {
+                            Text(
+                                "已应用：这个站点下次下载起步 $ccAppliedThreads 条",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 6.dp),
+                            )
+                        }
                     }
                 }
                 Spacer(Modifier.height(12.dp))

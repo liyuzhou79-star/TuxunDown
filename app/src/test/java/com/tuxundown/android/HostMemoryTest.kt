@@ -158,6 +158,67 @@ class HostMemoryTest {
         assertEquals(0, HostMemory.capOf(legacy, "old.com", now))
     }
 
+    // ---- v4.3: manual apply from the connection-count comparison ----
+
+    @Test
+    fun manualApplyWritesThePickedCountVerbatim() {
+        // 4 is below the usual probing settle range, but it is
+        // what the user measured and picked: stored as-is.
+        var entries = HostMemory.recordManual(emptyList(), "a.com", 4, now)
+        assertEquals(4, HostMemory.lookup(entries, "a.com", now))
+        entries = HostMemory.recordManual(entries, "a.com", 16, now)
+        assertEquals(16, HostMemory.lookup(entries, "a.com", now))
+        entries = HostMemory.recordManual(entries, "a.com", 64, now)
+        assertEquals(64, HostMemory.lookup(entries, "a.com", now))
+    }
+
+    @Test
+    fun manualApplyPreservesTheLearnedCap() {
+        var entries = HostMemory.recordRateLimit(emptyList(), "a.com", 32, now) // cap 16
+        entries = HostMemory.recordManual(entries, "a.com", 64, now)
+        assertEquals(64, HostMemory.lookup(entries, "a.com", now))
+        // A manual pick is not completion evidence: the ceiling
+        // is NOT relaxed even though the pick sits above it.
+        assertEquals(16, HostMemory.capOf(entries, "a.com", now))
+    }
+
+    @Test
+    fun manualApplyResetsTheFailureStreak() {
+        var entries = HostMemory.recordSuccess(emptyList(), "a.com", 16, now)
+        entries = HostMemory.recordFailure(entries, "a.com", now)
+        assertEquals(1, entries.first { it.host == "a.com" }.fails)
+        entries = HostMemory.recordManual(entries, "a.com", 8, now)
+        assertEquals(0, entries.first { it.host == "a.com" }.fails)
+    }
+
+    @Test
+    fun manualApplyClampsToTheEngineRange() {
+        val over = HostMemory.recordManual(emptyList(), "a.com", 999, now)
+        assertEquals(DownloadEngine.MAX_THREADS, HostMemory.lookup(over, "a.com", now))
+        val under = HostMemory.recordManual(emptyList(), "a.com", 0, now)
+        assertEquals(1, HostMemory.lookup(under, "a.com", now))
+    }
+
+    @Test
+    fun manualApplyBlankHostAndOtherHostsUntouched() {
+        var entries = HostMemory.recordSuccess(emptyList(), "a.com", 16, now)
+        entries = HostMemory.recordSuccess(entries, "b.com", 8, now)
+        val before = entries
+        assertEquals(before, HostMemory.recordManual(entries, "  ", 32, now))
+        entries = HostMemory.recordManual(entries, "a.com", 4, now)
+        assertEquals(4, HostMemory.lookup(entries, "a.com", now))
+        assertEquals(8, HostMemory.lookup(entries, "b.com", now))
+    }
+
+    @Test
+    fun manualApplySurvivesSerializationRoundTrip() {
+        var entries = HostMemory.recordRateLimit(emptyList(), "a.com", 32, now)
+        entries = HostMemory.recordManual(entries, "a.com", 4, now)
+        val back = HostMemory.parse(HostMemory.serialize(entries))
+        assertEquals(4, HostMemory.lookup(back, "a.com", now))
+        assertEquals(16, HostMemory.capOf(back, "a.com", now))
+    }
+
     @Test
     fun serializeParseRoundTripAndGarbageTolerance() {
         var entries = HostMemory.recordSuccess(emptyList(), "a.com", 16, now)

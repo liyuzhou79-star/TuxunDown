@@ -95,6 +95,34 @@ object HostMemory {
         return (listOf(Entry(host, t, 0, nowMs, cap)) + rest).take(MAX_ENTRIES)
     }
 
+    /**
+     * v4.3: the user measured the tiers themselves (diagnostics
+     * connection-count comparison) and picked [threads] as this
+     * host's starting count — write it as the remembered optimum
+     * verbatim, clamped to 1..[DownloadEngine.MAX_THREADS] (a
+     * manual pick of 4 is a real answer, not a probing artifact,
+     * so the recordSuccess floor of 2 does not apply here; the
+     * floor is 1 so a stored optimum is never the "unknown" 0).
+     *
+     * Unlike [recordSuccess] this is NOT completion evidence, so
+     * the cap-relax logic must not run: a learned rate-limit
+     * ceiling is preserved exactly as it was (StartPlan still
+     * bounds the actual start by it). The failure streak resets —
+     * the user just proved this count works on this host.
+     */
+    fun recordManual(
+        entries: List<Entry>,
+        host: String,
+        threads: Int,
+        nowMs: Long,
+    ): List<Entry> {
+        if (host.isBlank()) return entries
+        val t = threads.coerceIn(1, DownloadEngine.MAX_THREADS)
+        val cap = entries.firstOrNull { it.host == host }?.cap ?: 0
+        val rest = entries.filter { it.host != host }
+        return (listOf(Entry(host, t, 0, nowMs, cap)) + rest).take(MAX_ENTRIES)
+    }
+
     /** v2.8: the remembered rate-limit ceiling for [host], or 0. */
     fun capOf(entries: List<Entry>, host: String, nowMs: Long): Int {
         if (host.isBlank()) return 0
