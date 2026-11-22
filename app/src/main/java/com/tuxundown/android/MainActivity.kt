@@ -398,6 +398,8 @@ fun DownApp() {
 
     // ---- settings state (mirrors DownloadCenter prefs) ----
     var wifiOnly by remember { mutableStateOf(DownloadCenter.wifiOnly) }
+    // v3.9: charge-only downloads switch mirror.
+    var chargeOnlyUi by remember { mutableStateOf(DownloadCenter.chargeOnlyDownload) }
     var dirName by remember { mutableStateOf(DownloadCenter.downloadDirName) }
     var limitKBps by remember { mutableStateOf(DownloadCenter.speedLimitKBps) }
     // v3.0: speed-limit schedule (switch + HH:MM window + window limit).
@@ -774,6 +776,7 @@ fun DownApp() {
                             // Refresh the settings mirrors so the
                             // settings page shows the restored values.
                             wifiOnly = DownloadCenter.wifiOnly
+                            chargeOnlyUi = DownloadCenter.chargeOnlyDownload
                             limitKBps = DownloadCenter.speedLimitKBps
                             schedOn = DownloadCenter.speedSchedEnabled
                             schedStartUi =
@@ -1546,6 +1549,8 @@ fun DownApp() {
             version = appVersion,
             wifiOnly = wifiOnly,
             onWifiOnly = { wifiOnly = it; DownloadCenter.wifiOnly = it },
+            chargeOnly = chargeOnlyUi,
+            onChargeOnly = { chargeOnlyUi = it; DownloadCenter.chargeOnlyDownload = it },
             dirName = dirName,
             onPickDir = { dirPicker.launch(null) },
             onResetDir = {
@@ -4826,6 +4831,8 @@ fun SettingsScreen(
     version: String,
     wifiOnly: Boolean,
     onWifiOnly: (Boolean) -> Unit,
+    chargeOnly: Boolean,
+    onChargeOnly: (Boolean) -> Unit,
     dirName: String,
     onPickDir: () -> Unit,
     onResetDir: () -> Unit,
@@ -4908,7 +4915,7 @@ fun SettingsScreen(
     // string, so searching 限速/代理/备份 lands on the right group.
     var settingsQuery by remember { mutableStateOf("") }
     val settingsKeywords = mapOf(
-        "s-download" to "下载 仅wifi wifi 同时下载 任务数 并发 连接上限 总连接 连接数 上限 全局限速 限速 速度 " +
+        "s-download" to "下载 仅wifi wifi 充电 电源 同时下载 任务数 并发 连接上限 总连接 连接数 上限 全局限速 限速 速度 " +
             "限速计划 计划 时段 夜间 分时 " +
             "自动重试 重试 流量保护 流量 阈值 双通道 user-agent ua 浏览器标识 " +
             "下载目录 文件夹 保存位置 开机 自启 恢复 重启 续传 分类 分文件夹 类型",
@@ -5091,6 +5098,31 @@ fun SettingsScreen(
                     }
                     Switch(checked = wifiOnly, onCheckedChange = onWifiOnly)
                 }
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("充电时才下载")
+                        Text(
+                            "开启后没插电源时任务只排队不下载，插上电源自动开始",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = chargeOnly, onCheckedChange = onChargeOnly)
+                }
+                Text(
+                    "只管还没开始的任务：已经在下的不会因为拔掉电源被打断。" +
+                        "和「仅 WiFi 下载」一起开时，两个条件都要满足才开始；" +
+                        "都在等的时候，卡片上先写等 WiFi、WiFi 有了再写等充电。" +
+                        "等充电时下载服务会留在后台，插上电源几秒内就会开始。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
                 HorizontalDivider(Modifier.padding(vertical = 10.dp))
                 Text("同时下载任务数")
                 ChipRow(

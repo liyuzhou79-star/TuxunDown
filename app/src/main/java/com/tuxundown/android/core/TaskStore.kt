@@ -148,6 +148,13 @@ class TaskRecord(
     /** v1.5: parked by the service after a network-outage failure;
      *  the queue skips it until connectivity returns (see NetRetry). */
     @Transient var netDeferred: Boolean = false,
+    /** v3.9: parked by the service's charge gate (see
+     *  ChargeGuard) — the 充电时才下载 switch is on and power
+     *  is disconnected. The service's idle loop keeps polling
+     *  the battery state and the task starts on its own when
+     *  power returns. Transient like netDeferred: the battery
+     *  state is re-read live, never remembered. */
+    @Transient var chargeDeferred: Boolean = false,
     /** v2.8: queue pre-check (see LinkPrecheck) — the service's
      *  background HEAD check found this QUEUED task's link
      *  already dead (404/410). A warning on the card, never a

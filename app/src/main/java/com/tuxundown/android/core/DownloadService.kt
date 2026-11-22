@@ -397,6 +397,32 @@ class DownloadService : Service() {
                     store.save()
                     break
                 }
+                // v3.9: the charge gate (see ChargeGuard), checked
+                // AFTER the Wi-Fi gate on purpose: when both are
+                // shut, the card names the first closed gate
+                // (Wi-Fi, re-stamped on every pass above), and
+                // each gate's release is announced on its own.
+                // Like Wi-Fi, this holds only tasks that have not
+                // started — unplugging never interrupts a running
+                // transfer.
+                if (ChargeGuard.shouldPark(
+                        DownloadCenter.chargeOnlyDownload,
+                        DownloadCenter.isCharging(),
+                    )
+                ) {
+                    task.chargeDeferred = true
+                    task.note = "已开启「充电时才下载」：现在没接电源，" +
+                        "这个任务先等着，插上电源会自动开始。"
+                    store.save()
+                    break
+                }
+                // Both gates passed: if this task was parked
+                // waiting for power, say it is starting now.
+                if (task.chargeDeferred) {
+                    task.chargeDeferred = false
+                    task.note = "已接通电源，开始下载。"
+                    store.save()
+                }
                 val th = Thread {
                     runOne(task)
                     rescheduleDailyIfNeeded(task)
@@ -421,6 +447,24 @@ class DownloadService : Service() {
                     notifyUpdate(
                         "等待 WiFi",
                         "已开启「仅 WiFi 下载」，连上 WiFi 后自动开始",
+                        0,
+                    )
+                    try { Thread.sleep(5000) } catch (e: InterruptedException) { break }
+                    continue
+                }
+                // v3.9: the same idle wait for the charge gate —
+                // tasks parked for power keep the service alive
+                // on the same 5 s poll until plugged in.
+                val chargeBlocked = DownloadCenter.chargeOnlyDownload &&
+                    !DownloadCenter.isCharging() &&
+                    store.tasks.any {
+                        it.status == TaskStatus.QUEUED && !it.netDeferred &&
+                            it.scheduledAt <= System.currentTimeMillis()
+                    }
+                if (chargeBlocked) {
+                    notifyUpdate(
+                        "等待充电",
+                        "已开启「充电时才下载」，插上电源后自动开始",
                         0,
                     )
                     try { Thread.sleep(5000) } catch (e: InterruptedException) { break }

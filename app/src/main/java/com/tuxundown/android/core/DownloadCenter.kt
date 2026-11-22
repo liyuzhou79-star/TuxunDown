@@ -2,8 +2,10 @@ package com.tuxundown.android.core
 
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.os.BatteryManager
 import androidx.core.content.ContextCompat
 
 /** App-wide task registry: one store, engines reachable for pause/resume. */
@@ -27,6 +29,33 @@ object DownloadCenter {
     var wifiOnly: Boolean
         get() = pBool("wifiOnly", false)
         set(v) { prefs().edit().putBoolean("wifiOnly", v).apply() }
+
+    /**
+     * v3.9: charge-only downloads (see ChargeGuard) — while
+     * unplugged, tasks that have not started yet park in the
+     * queue; plugging power in starts them on their own.
+     * Default off, like the other protective switches.
+     */
+    var chargeOnlyDownload: Boolean
+        get() = pBool("chargeOnlyDownload", false)
+        set(v) { prefs().edit().putBoolean("chargeOnlyDownload", v).apply() }
+
+    /**
+     * v3.9: is external power connected right now? Read from
+     * the sticky ACTION_BATTERY_CHANGED broadcast — querying it
+     * with a null receiver returns the last broadcast without
+     * registering anything and needs no permission. A state
+     * that cannot be read counts as charging: a gate that
+     * cannot tell must never strand the queue.
+     */
+    fun isCharging(): Boolean {
+        val ctx = appContext ?: return true
+        val sticky = runCatching {
+            ctx.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        }.getOrNull() ?: return true
+        val status = sticky.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+        return ChargeGuard.isCharging(status)
+    }
 
     /** Custom download folder (SAF tree Uri string); "" = the public Download folder root itself. */
     var downloadDirUri: String
@@ -518,6 +547,7 @@ object DownloadCenter {
     fun settingsSnapshotJson(): org.json.JSONObject {
         val o = org.json.JSONObject()
         o.put("wifiOnly", wifiOnly)
+        o.put("chargeOnlyDownload", chargeOnlyDownload)
         o.put("speedLimitKBps", speedLimitKBps)
         o.put("speedSchedEnabled", speedSchedEnabled)
         o.put("speedSchedStartMin", speedSchedStartMin)
@@ -568,6 +598,9 @@ object DownloadCenter {
     /** Apply a settings object from a backup; absent keys keep their current values. */
     fun applySettingsJson(o: org.json.JSONObject) {
         if (o.has("wifiOnly")) wifiOnly = o.optBoolean("wifiOnly", wifiOnly)
+        if (o.has("chargeOnlyDownload")) {
+            chargeOnlyDownload = o.optBoolean("chargeOnlyDownload", chargeOnlyDownload)
+        }
         if (o.has("speedLimitKBps")) speedLimitKBps = o.optInt("speedLimitKBps", speedLimitKBps)
         if (o.has("speedSchedEnabled")) {
             speedSchedEnabled = o.optBoolean("speedSchedEnabled", speedSchedEnabled)
@@ -1016,6 +1049,7 @@ object DownloadCenter {
     fun enqueue(task: TaskRecord): Boolean {
         task.autoRetriesUsed = 0
         task.netDeferred = false // v1.5: user action always wins over the outage park
+        task.chargeDeferred = false // v3.9: same for the charge park
         // v2.8: a manual （重新）排队 also retires a stale pre-check
         // warning — the user has decided to try this link again.
         task.precheckDead = false
