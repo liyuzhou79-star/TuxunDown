@@ -7084,6 +7084,35 @@ fun TaskCard(
                 OutlinedButton(onClick = onUserNote) {
                     Text(if (task.userNote.isBlank()) "加备注" else "改备注")
                 }
+                // v3.8: copy a redacted per-task diagnostic for
+                // bug reports (see TaskDiagnostics — link query
+                // and header VALUES never leave the phone).
+                Spacer(Modifier.height(6.dp))
+                OutlinedButton(onClick = {
+                    val ctx = LocalContext.current
+                    val version = runCatching {
+                        ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+                            .versionName
+                    }.getOrNull() ?: "3.8.0"
+                    val cm = ctx.getSystemService(
+                        android.content.Context.CLIPBOARD_SERVICE,
+                    ) as android.content.ClipboardManager
+                    cm.setPrimaryClip(
+                        android.content.ClipData.newPlainText(
+                            "TuxunDown 任务诊断",
+                            com.tuxundown.android.core.TaskDiagnostics.build(
+                                task, version, DownloadCenter.userAgent,
+                            ),
+                        ),
+                    )
+                    Toast.makeText(
+                        ctx,
+                        "诊断信息已复制（链接已去参数、请求头只有名字没有值）",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }) {
+                    Text("复制诊断信息")
+                }
                 if (task.note.isNotBlank()) {
                     Spacer(Modifier.height(4.dp))
                     Text(
