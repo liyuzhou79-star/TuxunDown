@@ -6491,6 +6491,10 @@ fun TaskCard(
     var expanded by remember(task.id) {
         mutableStateOf(DownloadCenter.detailsExpanded)
     }
+    // v3.8: captured in composition so click handlers (which
+    // are NOT composable context) can use it — the diagnostics
+    // copy button below needs it.
+    val context = LocalContext.current
     val pct = Format.percent(task.progress)
     val barState = when (task.status) {
         TaskStatus.RUNNING -> BarState.RUNNING
@@ -7089,7 +7093,7 @@ fun TaskCard(
                 // and header VALUES never leave the phone).
                 Spacer(Modifier.height(6.dp))
                 OutlinedButton(onClick = {
-                    val ctx = LocalContext.current
+                    val ctx = context
                     val version = runCatching {
                         ctx.packageManager.getPackageInfo(ctx.packageName, 0)
                             .versionName
