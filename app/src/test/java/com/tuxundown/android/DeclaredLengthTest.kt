@@ -52,4 +52,22 @@ class DeclaredLengthTest {
         assertFalse(DeclaredLength.exceedsKnownTotal(0, 1_000_000))
         assertFalse(DeclaredLength.exceedsKnownTotal(-1, 1_000_000))
     }
+
+    @Test
+    fun wholeRangeAcceptsFullBodyFromZero() {
+        assertTrue(DeclaredLength.wholeRange(0, 1_000, 1_000))
+        // Total quoted as "*" (unknown): start + EOF must do.
+        assertTrue(DeclaredLength.wholeRange(0, -1, 1_000))
+    }
+
+    @Test
+    fun wholeRangeRejectsSlices() {
+        // A slice starting mid-resource, however self-consistent.
+        assertFalse(DeclaredLength.wholeRange(500, 2_000, 500))
+        // Starts at 0 but the quoted total is bigger than the
+        // body in hand: the rest of the resource never arrived.
+        assertFalse(DeclaredLength.wholeRange(0, 2_000, 1_000))
+        // No parseable range at all (start -1) is not a whole.
+        assertFalse(DeclaredLength.wholeRange(-1, -1, 1_000))
+    }
 }

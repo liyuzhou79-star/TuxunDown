@@ -41,4 +41,16 @@ object DeclaredLength {
      */
     fun exceedsKnownTotal(knownTotal: Long, actual: Long): Boolean =
         knownTotal > 0 && actual > knownTotal
+
+    /**
+     * True when a 206 response's Content-Range describes the
+     * WHOLE resource and the body in hand is that whole: the
+     * range starts at byte 0 and its quoted total (when the
+     * server quoted one at all — "*" never condemns) equals
+     * [actual]. Used where no Range was requested (HLS fetches):
+     * a partial slice posing as the whole body fails here even
+     * though its own Content-Length is self-consistent.
+     */
+    fun wholeRange(rangeStart: Long, rangeTotal: Long, actual: Long): Boolean =
+        rangeStart == 0L && (rangeTotal < 0 || rangeTotal == actual)
 }

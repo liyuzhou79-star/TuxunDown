@@ -1403,6 +1403,14 @@ class DownloadEngine(
 
     // ---------- HLS (m3u8) path (v1.6) ----------
 
+    /** v4.1 audit round 26: does this Content-Range describe the
+     *  whole resource, of which [actual] bytes are in hand? The
+     *  parsing is the companion's; the verdict is DeclaredLength's. */
+    private fun wholeRange(contentRange: String?, actual: Long): Boolean =
+        DeclaredLength.wholeRange(
+            contentRangeStart(contentRange), contentRangeTotal(contentRange), actual
+        )
+
     /** Read a small text resource (playlist) with the usual headers. */
     private fun fetchText(url: String, capBytes: Int = 4 * 1024 * 1024): String {
         val c = openFollowingRedirects(url) { }
@@ -1440,6 +1448,15 @@ class DownloadEngine(
             // never claimed to be complete (see DeclaredLength).
             if (consumed && !DeclaredLength.eofMatches(c.contentLengthLong, readTotal)) {
                 throw IllegalStateException("播放列表长度对不上（服务器声明和实际发来的不一样），已停下")
+            }
+            // Same round: a 206 answer to a request that carried
+            // no Range is only the whole resource when its range
+            // starts at 0 and its quoted total is the body in
+            // hand — anything else is a slice posing as the whole.
+            if (c.responseCode == HttpURLConnection.HTTP_PARTIAL &&
+                !wholeRange(c.getHeaderField("Content-Range"), readTotal)
+            ) {
+                throw IllegalStateException("播放列表只发来了一部分，已停下")
             }
             return text
         } finally {
@@ -1482,6 +1499,16 @@ class DownloadEngine(
             // judged and never condemns.
             if (!DeclaredLength.eofMatches(c.contentLengthLong, data.size.toLong())) {
                 throw IllegalStateException("分片长度对不上（服务器声明和实际发来的不一样），已重试")
+            }
+            // Same round: a 206 answer to a request that carried
+            // no Range is only the whole segment when its range
+            // starts at 0 and its quoted total is the body in
+            // hand — a slice's own Content-Length would pass the
+            // check above while the segment is silently short.
+            if (c.responseCode == HttpURLConnection.HTTP_PARTIAL &&
+                !wholeRange(c.getHeaderField("Content-Range"), data.size.toLong())
+            ) {
+                throw IllegalStateException("分片只发来了一部分，已重试")
             }
             return data
         } finally {
