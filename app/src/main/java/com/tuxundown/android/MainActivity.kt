@@ -585,7 +585,7 @@ fun DownApp() {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "3.9.0"
+        }.getOrNull() ?: "4.0.0"
     }
     var showGuide by remember {
         // v2.2 safe mode: after 2+ consecutive crashes, first-
@@ -6230,9 +6230,9 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 全局连接上限（新）：设置 → 下载新增——所有同时下载的任务加起来，最多开多少条连接（8–64 条，默认 32，正好是以前一个任务自己就能开满的数，所以单任务下载和以前完全一样）。多个任务一起下时总数封顶、按优先级分摊，被压住的任务卡片上会写明\n" +
-            "· 充电时才下载（新）：设置 → 下载新增开关——没插电源时，新任务先排队等着，插上电源自动开始；已经在下的任务不会因为拔电被打断。和「仅 WiFi」一起开时，两个条件都要满足才开始，卡片会写明在等哪一个\n" +
-            "· 第 25 轮审计（适配新系统）：安卓 15 给后台下载服务上了每天约 6 小时的额度，整夜连着下大文件时可能被系统叫停——现在被叫停时会先把全部任务稳稳暂停、进度一点不丢，卡片上写清原因，点继续就接着下（把 App 切回前台，额度会重新算）；开机自动恢复在安卓 15 上也改走了新路子，不再被开机限制挡住。帮助里新增了一条，专门讲这件事",
+            "· 进度实时刷新（修）：以前在主页看下载进度，数字要切到别的页面再回来才更新——已经修好：停在主页，进度条、速度、剩余时间每秒自己刷新，展开的详细信息（分片图、每条连接的速度）也同步；统计页同理\n" +
+            "· 下载再提速：分片下载的连接改成复用——以前每块下完连接就断、下一块重新握手，现在读完的连接回连接池接着用，省掉反复握手的时间；另外一处内部卡顿也顺手修了（淘汰卡死连接的动作不再堵着其他连接干活）。大文件、块数多时更明显\n" +
+            "· 测速更准：内置测速换了算法——以前把连接建立和开头爬坡的时间也算进平均速度，多线程那段被拖得偏低；现在两段都只算稳态速度，口径一致；结论也改成三档（多线程明显更快 / 差不多 / 反而更慢），每档都把原因和建议说清，结果旁标出每段的实测时长",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
             "· 文件直链 → 直接开始多线程下载，还能预先改好保存文件名\n" +
@@ -7236,7 +7236,7 @@ fun TaskCard(
                     val version = runCatching {
                         ctx.packageManager.getPackageInfo(ctx.packageName, 0)
                             .versionName
-                    }.getOrNull() ?: "3.9.0"
+                    }.getOrNull() ?: "4.0.0"
                     val cm = ctx.getSystemService(
                         android.content.Context.CLIPBOARD_SERVICE,
                     ) as android.content.ClipboardManager
