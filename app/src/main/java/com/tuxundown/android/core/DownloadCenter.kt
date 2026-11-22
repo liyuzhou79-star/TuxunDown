@@ -204,6 +204,23 @@ object DownloadCenter {
     }
 
     /**
+     * v3.1: the sniff result dialog's remembered filter — the
+     * kind and minimum size picked last time are offered again
+     * on the next sniff instead of resetting to "everything"
+     * (the dialog writes these on every filter change and
+     * restores them when a new result list opens).
+     * [sniffFilterMinMB] is whole MB, 0 = no minimum; the byte
+     * conversion lives with the filter (SniffFilter).
+     */
+    var sniffFilterKind: String
+        get() = pString("sniffFilterKind", "")
+        set(v) { prefs().edit().putString("sniffFilterKind", v).apply() }
+
+    var sniffFilterMinMB: Int
+        get() = pInt("sniffFilterMinMB", 0).coerceIn(0, 102_400)
+        set(v) { prefs().edit().putInt("sniffFilterMinMB", v.coerceIn(0, 102_400)).apply() }
+
+    /**
      * v1.6: WiFi+mobile dual channel (best effort). Default OFF.
      * When on, the service asks the system for a cellular network
      * and the engine alternates connections between the two; when
@@ -369,6 +386,8 @@ object DownloadCenter {
         o.put("archiveAfterDays", archiveAfterDays)
         o.put("detailsExpanded", detailsExpanded)
         o.put("sniffHistory", org.json.JSONArray(sniffHistory))
+        o.put("sniffFilterKind", sniffFilterKind)
+        o.put("sniffFilterMinMB", sniffFilterMinMB)
         // v1.9: proxy settings travel with the backup EXCEPT the
         // password — a credential does not belong in a file the
         // user may store or send anywhere. It must be re-entered
@@ -441,6 +460,12 @@ object DownloadCenter {
             sniffHistory = (0 until hist.length())
                 .map { hist.optString(it) }
                 .filter { it.isNotBlank() }
+        }
+        if (o.has("sniffFilterKind")) {
+            sniffFilterKind = o.optString("sniffFilterKind", sniffFilterKind)
+        }
+        if (o.has("sniffFilterMinMB")) {
+            sniffFilterMinMB = o.optInt("sniffFilterMinMB", sniffFilterMinMB)
         }
         // v1.9: proxy (password deliberately not in backups).
         if (o.has("proxyEnabled")) proxyEnabled = o.optBoolean("proxyEnabled", proxyEnabled)

@@ -489,6 +489,18 @@ object SniffFilter {
      * exact size is a strong "same file listed twice" signal
      * (pages often link a file from both a button and a banner).
      */
+    /**
+     * v3.1: the minimum-size filter (最小大小）. A resource
+     * passes when its MEASURED size is at least [minBytes] —
+     * or when its size is unknown: the probe measures only the
+     * first N resources, so an unmeasured one proves nothing
+     * either way, and hiding it would gut long lists. The row
+     * label in the dialog says exactly this （未知的不限）.
+     * minBytes <= 0 disables the filter.
+     */
+    fun passesMinSize(res: SniffedResource, minBytes: Long): Boolean =
+        minBytes <= 0 || res.size < 0 || res.size >= minBytes
+
     fun duplicateCounts(list: List<SniffedResource>): Map<String, Int> {
         val groups = list.filter { it.size > 0 }
             .groupBy { it.name.lowercase() to it.size }
@@ -499,6 +511,31 @@ object SniffFilter {
             }
         }
         return out
+    }
+}
+
+/**
+ * v3.1: what the ticked set will cost, shown BEFORE the user
+ * commits to creating the batch — how many tasks, the sum of
+ * the sizes the probe actually measured, and how many of the
+ * ticked resources have no measured size (counted separately,
+ * never folded into the sum as a guess).
+ */
+object SniffEstimate {
+
+    data class Estimate(
+        val count: Int,
+        val knownBytes: Long,
+        val unknownCount: Int,
+    )
+
+    fun of(list: List<SniffedResource>): Estimate {
+        var known = 0L
+        var unknown = 0
+        for (r in list) {
+            if (r.size >= 0) known += r.size else unknown++
+        }
+        return Estimate(list.size, known, unknown)
     }
 }
 

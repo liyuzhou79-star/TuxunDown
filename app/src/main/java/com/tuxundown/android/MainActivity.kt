@@ -125,6 +125,7 @@ import com.tuxundown.android.core.UserAgents
 import com.tuxundown.android.core.WidgetState
 import com.tuxundown.android.sniff.LinkRouter
 import com.tuxundown.android.sniff.SizeProbe
+import com.tuxundown.android.sniff.SniffEstimate
 import com.tuxundown.android.sniff.SniffFilter
 import com.tuxundown.android.sniff.SniffResult
 import com.tuxundown.android.sniff.SniffSort
@@ -494,6 +495,7 @@ fun DownApp() {
     var sniffChecked by remember { mutableStateOf<Set<String>>(emptySet()) }
     var sniffKind by remember { mutableStateOf("") } // "" = all kinds
     var sniffSort by remember { mutableStateOf(0) } // 0 默认 1 名称 2 类型 3 大小
+    var sniffMinMB by remember { mutableStateOf(0) } // v3.1: minimum-size filter, MB (0 = off)
     var sniffProbing by remember { mutableStateOf(false) } // v1.6 size probe phase
     var sniffShowNoise by remember { mutableStateOf(false) } // v1.9 noise folding
 
@@ -831,7 +833,17 @@ fun DownApp() {
                 sniffChecked = result.resources
                     .filter { it.looksLikeDownloadEntry }
                     .map { it.url }.toSet()
-                sniffKind = ""
+                // v3.1: restore the remembered filter (kind +
+                // minimum size, see DownloadCenter) instead of
+                // always resetting to "everything". A remembered
+                // kind this page does not have falls back to
+                // 全部 — restoring it blindly would filter the
+                // fresh list to empty with no chip to undo it.
+                val savedKind = DownloadCenter.sniffFilterKind
+                sniffKind = if (result.resources.any { it.kind == savedKind }) {
+                    savedKind
+                } else ""
+                sniffMinMB = DownloadCenter.sniffFilterMinMB
                 sniffSort = 0
                 showAdd = false
                 // v1.6: second phase — measure sizes in the
@@ -2044,6 +2056,9 @@ fun DownApp() {
         val noiseCount = sniffList.count { SniffFilter.isNoise(it) }
         val shownSniff = sniffList
             .filter { sniffKind.isBlank() || it.kind == sniffKind }
+            .filter {
+                SniffFilter.passesMinSize(it, sniffMinMB.toLong() * 1024 * 1024)
+            }
             .filter { sniffShowNoise || !SniffFilter.isNoise(it) }
             .let { list ->
                 when (sniffSort) {
@@ -2075,15 +2090,53 @@ fun DownApp() {
                         if (sniffKind.isBlank()) {
                             Button(onClick = { }) { Text("全部") }
                         } else {
-                            OutlinedButton(onClick = { sniffKind = "" }) { Text("全部") }
+                            OutlinedButton(onClick = {
+                                sniffKind = ""
+                                DownloadCenter.sniffFilterKind = ""
+                            }) { Text("全部") }
                         }
                         for (k in kindsPresent) {
                             if (k == sniffKind) {
                                 Button(onClick = { }) { Text(kindLabel(k)) }
                             } else {
-                                OutlinedButton(onClick = { sniffKind = k }) { Text(kindLabel(k)) }
+                                OutlinedButton(onClick = {
+                                    sniffKind = k
+                                    DownloadCenter.sniffFilterKind = k
+                                }) { Text(kindLabel(k)) }
                             }
                         }
+                    }
+                    // ---- v3.1: minimum-size filter (remembered
+                    // across sniffs, like the kind above) ----
+                    Row(
+                        Modifier.padding(top = 6.dp)
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "最小大小：",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        val minModes = listOf(
+                            0 to "不限", 1 to "≥1MB", 10 to "≥10MB", 100 to "≥100MB",
+                        )
+                        for ((mb, label) in minModes) {
+                            if (mb == sniffMinMB) {
+                                Button(onClick = { }) { Text(label) }
+                            } else {
+                                OutlinedButton(onClick = {
+                                    sniffMinMB = mb
+                                    DownloadCenter.sniffFilterMinMB = mb
+                                }) { Text(label) }
+                            }
+                        }
+                        Text(
+                            "（大小未知的照常显示）",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                     Row(
                         Modifier.padding(top = 6.dp)
@@ -2211,6 +2264,25 @@ fun DownApp() {
                             }
                             HorizontalDivider()
                         }
+                    }
+                    // ---- v3.1: pre-commit estimate — what the
+                    // ticked set will actually create, with the
+                    // measured total; unmeasured resources are
+                    // counted, never guessed into the sum. ----
+                    if (sniffChecked.isNotEmpty()) {
+                        val est = SniffEstimate.of(
+                            sniffList.filter { it.url in sniffChecked }
+                        )
+                        Text(
+                            "已选 ${est.count} 个：已知大小合计约 " +
+                                Format.size(est.knownBytes) +
+                                if (est.unknownCount > 0) {
+                                    "（另有 ${est.unknownCount} 个大小未知，未计入）"
+                                } else "",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 6.dp),
+                        )
                     }
                 }
             },
