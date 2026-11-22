@@ -67,6 +67,35 @@ object Warmup {
         return out
     }
 
+    /**
+     * v4.4 (start-latency): the host to PRE-RESOLVE when a task
+     * is enqueued (see DownloadCenter.enqueue), or null when no
+     * pre-resolve should happen. Enqueue happens before the
+     * service cold-starts, the drain wakes and the engine is
+     * even constructed, so resolving there lets the DNS answer
+     * land in the platform cache while all of that is still
+     * going on; the engine's own warmup (above) and the probe
+     * then usually find it warm. The decision mirrors the
+     * warmup rules exactly:
+     * - Proxy active -> null. Behind a proxy the resolution
+     *   happens on the PROXY side; a local lookup is useless
+     *   AND would be a local network action taken behind the
+     *   proxy's back — the v1.9 never-go-direct rule binds
+     *   pure optimisations just as much.
+     * - Only http / https: FTP resolves inside its own client
+     *   when it connects, and other schemes have no host
+     *   lookup on the download path at all.
+     * Pure URL parsing — no network happens here.
+     */
+    fun hostToPreResolve(url: String, proxyActive: Boolean): String? {
+        if (proxyActive) return null
+        val trimmed = url.trim()
+        if (!isHttpOrHttps(trimmed)) return null
+        val host = runCatching { java.net.URL(trimmed).host }
+            .getOrNull() ?: return null
+        return host.ifBlank { null }
+    }
+
     /** http / https in absolute "scheme://" form only. */
     private fun isHttpOrHttps(url: String): Boolean {
         if (url.isEmpty()) return false

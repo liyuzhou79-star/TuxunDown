@@ -34,6 +34,18 @@ class DownloadService : Service() {
     private val workerLock = Object()
     private val notifyLock = Object()
 
+    /** v4.4 (start-latency): the drain loop's wake-up signal
+     *  (see DrainWakeSignal). Every drain wait is a timed wait
+     *  on this signal instead of a plain sleep, so a start
+     *  command that arrives while the drain is parked in the
+     *  scheduled / gate / deferred waits wakes it to re-judge
+     *  the queue at once instead of up to ~30 s late. Signalled
+     *  from onStartCommand (the convergence point of EVERY
+     *  service start — enqueue kicks, boot, schedule wake,
+     *  notification actions) and from the connectivity
+     *  callbacks when they release parked tasks. */
+    private val drainWake = DrainWakeSignal()
+
     /** v2.5: recent completions, for the merge window (see
      *  CompletionMerge). Guarded by [completionLock]. */
     private val completionLock = Object()
@@ -340,6 +352,10 @@ class DownloadService : Service() {
                     // login completes (see onCapabilitiesChanged).
                     if (clearDeferredParks(portal = false)) {
                         DownloadCenter.store.save()
+                        // v4.4: the parks are cleared (state
+                        // visible) BEFORE the signal — wake a
+                        // drain parked in the deferred wait.
+                        drainWake.signal()
                         ensureWorker()
                     }
                 }
@@ -361,6 +377,7 @@ class DownloadService : Service() {
                     ) return
                     if (clearDeferredParks(portal = true)) {
                         DownloadCenter.store.save()
+                        drainWake.signal()
                         ensureWorker()
                     }
                 }
@@ -469,6 +486,19 @@ class DownloadService : Service() {
             buildNotification("准备下载…", "", 0),
             ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
         )
+        // v4.4 (start-latency): wake the drain. EVERY service
+        // start converges here — DownloadCenter.enqueue's kick
+        // (both branches), BootReceiver, ScheduleReceiver, the
+        // deferred-startup recovery kick, notification actions —
+        // and the state each of them changed (a freshly QUEUED
+        // task, a released park, the recovery re-queue above)
+        // is already visible in the store at this point, which
+        // is exactly the sender ordering DrainWakeSignal's
+        // no-lost-signal paradigm requires: state first, signal
+        // second. A drain parked in a wait re-loops and
+        // re-judges at once; a drain not yet started is covered
+        // by ensureWorker + its first evaluation.
+        drainWake.signal()
         ensureWorker()
         return START_STICKY
     }
@@ -502,12 +532,39 @@ class DownloadService : Service() {
         runCatching { stopSelf() }
     }
 
+    /**
+     * v4.4 (start-latency): one drain wait — block on the wake
+     * signal for at most [timeoutMs], against the pass's
+     * snapshot [since]. Returns false ONLY on a real thread
+     * interrupt, which keeps its pre-v4.4 meaning (the caller
+     * breaks the loop into stopSelf, exactly as the old
+     * sleeps' catches did). A signal or a natural timeout both
+     * return true: either way the loop re-judges from the top.
+     * The wait is a blocking monitor wait for the full timeout
+     * when nothing happens — never a shortened poll.
+     */
+    private fun drainWait(timeoutMs: Long, since: Long): Boolean {
+        return try {
+            drainWake.await(timeoutMs, since)
+            true
+        } catch (e: InterruptedException) {
+            false
+        }
+    }
+
     private fun drainQueue() {
         val store = DownloadCenter.store
         // v1.6: dual channel is negotiated once per drain session.
         acquireCellularIfWanted()
         val running = mutableMapOf<String, Thread>()
         while (true) {
+            // v4.4 (start-latency): snapshot the wake generation
+            // BEFORE this pass evaluates anything (see
+            // DrainWakeSignal's doc for the paradigm): a signal
+            // landing anywhere in this pass — before, during or
+            // after the evaluation — either is covered by what
+            // the evaluation sees, or cuts the pass's wait short.
+            val wakeGen = drainWake.snapshot()
             // Reap finished engine threads.
             val iter = running.entries.iterator()
             while (iter.hasNext()) {
@@ -576,7 +633,7 @@ class DownloadService : Service() {
                 // Poll briefly; the lane's completion path owns
                 // everything that happens next for that task.
                 if (finalizeGate.pendingCount() > 0) {
-                    try { Thread.sleep(500) } catch (e: InterruptedException) { break }
+                    if (!drainWait(500, wakeGen)) break
                     continue
                 }
                 // v1.7 audit (B2): tasks that are eligible but blocked
@@ -595,7 +652,7 @@ class DownloadService : Service() {
                         "已开启「仅 WiFi 下载」，连上 WiFi 后自动开始",
                         0,
                     )
-                    try { Thread.sleep(5000) } catch (e: InterruptedException) { break }
+                    if (!drainWait(5000, wakeGen)) break
                     continue
                 }
                 // v3.9: the same idle wait for the charge gate —
@@ -613,7 +670,7 @@ class DownloadService : Service() {
                         "已开启「充电时才下载」，插上电源后自动开始",
                         0,
                     )
-                    try { Thread.sleep(5000) } catch (e: InterruptedException) { break }
+                    if (!drainWait(5000, wakeGen)) break
                     continue
                 }
                 // v1.5: tasks parked by a network outage keep the
@@ -654,7 +711,7 @@ class DownloadService : Service() {
                         "断网的任务已排队，网络一回来就自动继续",
                         0,
                     )
-                    try { Thread.sleep(5000) } catch (e: InterruptedException) { break }
+                    if (!drainWait(5000, wakeGen)) break
                     continue
                 }
                 // Only future-scheduled tasks remain: wait for the
@@ -668,7 +725,7 @@ class DownloadService : Service() {
                     // reason (defensive — the wait at the top of this
                     // branch normally catches it first).
                     if (anyDeferred || finalizeGate.pendingCount() > 0) {
-                        try { Thread.sleep(5000) } catch (e: InterruptedException) { break }
+                        if (!drainWait(5000, wakeGen)) break
                         continue
                     }
                     break
@@ -678,10 +735,18 @@ class DownloadService : Service() {
                     "下一个任务将在 ${Format.clockTime(nextAt)} 开始",
                     0,
                 )
-                val waitMs = (nextAt - System.currentTimeMillis()).coerceIn(2_000, 30_000)
-                try { Thread.sleep(waitMs) } catch (e: InterruptedException) { break }
+                // v4.4: the wait quantum itself is unchanged
+                // (DrainWakeSignal.scheduledWaitMs — the same
+                // 2 s..30 s clamp), but the wait is now a timed
+                // signal wait: a task enqueued while the drain
+                // sits here starts on the next pass, not up to
+                // 30 s later when the sleep happened to expire.
+                val waitMs = DrainWakeSignal.scheduledWaitMs(
+                    nextAt, System.currentTimeMillis()
+                )
+                if (!drainWait(waitMs, wakeGen)) break
             } else {
-                try { Thread.sleep(400) } catch (e: InterruptedException) { break }
+                if (!drainWait(400, wakeGen)) break
             }
         }
         releaseCellular()

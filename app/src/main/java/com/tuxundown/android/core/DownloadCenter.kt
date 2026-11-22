@@ -1106,6 +1106,30 @@ object DownloadCenter {
             caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
     }
 
+    /**
+     * v4.4 (start-latency): fire-and-forget DNS pre-resolve for
+     * a freshly enqueued task's host, on a short-lived daemon
+     * thread — enqueue itself is called on the UI thread and
+     * must never block on a lookup. The decision (proxy active
+     * -> skip, http/https only) is Warmup.hostToPreResolve;
+     * every failure is silent, because this is pure
+     * optimisation: the engine's warmup and probe resolve for
+     * real regardless. A task that ends up waiting (scheduled,
+     * gated, queued behind others) may outlive the cached
+     * answer — harmless: the worst case is the lookup happens
+     * again later, exactly as before v4.4.
+     */
+    private fun preResolveHost(url: String) {
+        val host = Warmup.hostToPreResolve(url, proxySettings().active) ?: return
+        Thread {
+            runCatching { java.net.InetAddress.getAllByName(host) }
+        }.apply {
+            isDaemon = true
+            name = "dns-preresolve"
+            start()
+        }
+    }
+
     /** Queue a task and kick the foreground service. Returns false if blocked. */
     fun enqueue(task: TaskRecord): Boolean {
         task.autoRetriesUsed = 0
@@ -1116,6 +1140,11 @@ object DownloadCenter {
         task.portalDeferred = false
         task.portalHit = false
         task.netOutage = false
+        // v4.4 (start-latency): warm the DNS cache for this
+        // task's host NOW, in parallel with the service kick
+        // below (see preResolveHost). Placed before the
+        // wifi-only branch so both enqueue exits benefit.
+        preResolveHost(task.url)
         // v2.8: a manual （重新）排队 also retires a stale pre-check
         // warning — the user has decided to try this link again.
         task.precheckDead = false

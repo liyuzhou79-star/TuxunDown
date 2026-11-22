@@ -112,6 +112,54 @@ class WarmupTest {
         )
     }
 
+    // ---- v4.4: enqueue-time DNS pre-resolve decision ----
+
+    @Test
+    fun preResolveExtractsTheHost() {
+        assertEquals(
+            "a.example.com",
+            Warmup.hostToPreResolve(
+                "https://a.example.com/some/path/file.zip?x=1",
+                proxyActive = false,
+            ),
+        )
+        assertEquals(
+            "b.example.com",
+            Warmup.hostToPreResolve(
+                "http://user@b.example.com:8080/file.zip",
+                proxyActive = false,
+            ),
+        )
+    }
+
+    @Test
+    fun preResolveSkipsBehindAProxy() {
+        // Behind a proxy, resolution belongs to the proxy side;
+        // a local lookup is useless and must not happen.
+        assertEquals(
+            null,
+            Warmup.hostToPreResolve(
+                "https://a.example.com/file.zip",
+                proxyActive = true,
+            ),
+        )
+    }
+
+    @Test
+    fun preResolveSkipsNonHttpAndHostlessUrls() {
+        assertEquals(
+            null,
+            Warmup.hostToPreResolve("ftp://a.example.com/file.zip", proxyActive = false),
+        )
+        assertEquals(
+            null,
+            Warmup.hostToPreResolve("magnet:?xt=urn:btih:abc", proxyActive = false),
+        )
+        assertEquals(null, Warmup.hostToPreResolve("", proxyActive = false))
+        assertEquals(null, Warmup.hostToPreResolve("https://", proxyActive = false))
+        assertEquals(null, Warmup.hostToPreResolve("not a url", proxyActive = false))
+    }
+
     @Test
     fun nonHttpSchemesAndBlanksAreFiltered() {
         assertEquals(
