@@ -113,7 +113,7 @@ class ServerProfileTest {
         val rows2 = ServerProfile.rows(t, 0)
         assertEquals("8 条", valueOf(rows2, "实际峰值连接："))
         assertEquals(
-            Format.speed(2L * 1024 * 1024),
+            Format.speed(1L * 1024 * 1024), // 8 MiB/s over 8 conns
             valueOf(rows2, "峰值时平均每条连接："),
         )
     }
