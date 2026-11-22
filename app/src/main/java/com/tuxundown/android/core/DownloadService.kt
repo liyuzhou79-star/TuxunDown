@@ -1858,9 +1858,19 @@ class DownloadService : Service() {
                 actionTask = running,
             )
         } else {
+            // v4.9: the multi-task text gains the aggregate ETA
+            // the single-task text above already had — the v4.4
+            // WidgetState.etaSeconds口径 over the same store.tasks
+            // list WidgetState.summary just consumed (remaining
+            // bytes of the whole active set / the running tasks'
+            // total speed). -1 means no honest answer (an active
+            // task's size unknown, nothing running, or no speed):
+            // the text is then left as it was, no fake precision.
+            val eta = WidgetState.etaSeconds(store.tasks)
             val text = buildString {
                 append("总速度 ${Format.speed(totalSpeed)}")
                 append(" · 已完成 $totalPct%")
+                if (eta > 0) append(" · 全部还剩 ${Format.eta(eta)}")
             }
             // v1.8: several tasks — the expanded notification
             // lists each one's own progress instead of buttons
