@@ -1471,6 +1471,34 @@ fun DownApp() {
                 ) { Text("已下载文件") }
             }
 
+            // v2.9: share every UNFINISHED task as one link list
+            // (the multi-select bar shares just the selection).
+            // The list re-imports through 新建下载's batch paste
+            // or the .txt import — ShareList's header says so.
+            val unfinishedForShare =
+                com.tuxundown.android.core.ShareList.unfinished(store.tasks)
+            if (unfinishedForShare.isNotEmpty()) {
+                item(key = "sharelistbtn") {
+                    OutlinedButton(
+                        onClick = {
+                            val send = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(
+                                    Intent.EXTRA_TEXT,
+                                    com.tuxundown.android.core.ShareList
+                                        .build(unfinishedForShare),
+                                )
+                                putExtra(Intent.EXTRA_SUBJECT, "TuxunDown 链接清单")
+                            }
+                            context.startActivity(
+                                Intent.createChooser(send, "分享链接清单")
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("分享未完成任务的链接清单（${unfinishedForShare.size} 个）") }
+                }
+            }
+
             // v1.9: reopen the retained sniff session (closing
             // the result dialog no longer discards it).
             if (sniffList.isNotEmpty() && !sniffOpen) {
@@ -1651,6 +1679,31 @@ fun DownApp() {
                                         ).show()
                                     }) { Text("取消归档") }
                                 }
+                                OutlinedButton(onClick = {
+                                    // v2.9: share the selected tasks
+                                    // as a plain-text link list (the
+                                    // import side is batch paste /
+                                    // .txt import — see ShareList).
+                                    val picked = store.tasks.filter { it.id in selectedIds }
+                                    if (picked.isEmpty()) {
+                                        Toast.makeText(
+                                            context, "先选几个任务再分享",
+                                            Toast.LENGTH_SHORT,
+                                        ).show()
+                                    } else {
+                                        val send = Intent(Intent.ACTION_SEND).apply {
+                                            type = "text/plain"
+                                            putExtra(
+                                                Intent.EXTRA_TEXT,
+                                                com.tuxundown.android.core.ShareList.build(picked),
+                                            )
+                                            putExtra(Intent.EXTRA_SUBJECT, "TuxunDown 链接清单")
+                                        }
+                                        context.startActivity(
+                                            Intent.createChooser(send, "分享链接清单")
+                                        )
+                                    }
+                                }) { Text("分享清单") }
                                 OutlinedButton(onClick = {
                                     val victims = store.tasks.filter { it.id in selectedIds }
                                     victims.forEach { deleteTask(it) }
