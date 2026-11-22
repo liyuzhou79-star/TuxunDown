@@ -584,7 +584,7 @@ fun DownApp() {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "3.8.0"
+        }.getOrNull() ?: "3.9.0"
     }
     var showGuide by remember {
         // v2.2 safe mode: after 2+ consecutive crashes, first-
@@ -6197,9 +6197,9 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 选清晰度（新）：新建下载或嗅探时遇到流媒体主播放列表（一个链接里藏着 360p、720p、1080p 好几档的那种 m3u8），会先让你选一档再下，不再默默替你选最高档。卡片上会写明选了哪一档；只有一个档位、或读取失败时，照旧自动处理，不耽误下载\n" +
-            "· 复制诊断信息（新）：任务详情里多了这个按钮——某个任务下不动、报错看不懂时，点它把诊断复制下来发给开发者：状态、大小、连接数、错误原文都在，但链接的参数已去掉、请求头只列名字（Cookie 的值绝不外带）\n" +
-            "· 第 24 轮审计（升级后入口）：覆盖升级后，新增的系统接收器会立刻把预约下载的兜底闹钟重设好、把桌面小部件用新版样式刷新一遍，不用等你先打开一次 App；磁贴、长按快捷方式、开机接收、文件夹授权逐项核过，升级后都自动就位",
+            "· 全局连接上限（新）：设置 → 下载新增——所有同时下载的任务加起来，最多开多少条连接（8–64 条，默认 32，正好是以前一个任务自己就能开满的数，所以单任务下载和以前完全一样）。多个任务一起下时总数封顶、按优先级分摊，被压住的任务卡片上会写明\n" +
+            "· 充电时才下载（新）：设置 → 下载新增开关——没插电源时，新任务先排队等着，插上电源自动开始；已经在下的任务不会因为拔电被打断。和「仅 WiFi」一起开时，两个条件都要满足才开始，卡片会写明在等哪一个\n" +
+            "· 第 25 轮审计（适配新系统）：安卓 15 给后台下载服务上了每天约 6 小时的额度，整夜连着下大文件时可能被系统叫停——现在被叫停时会先把全部任务稳稳暂停、进度一点不丢，卡片上写清原因，点继续就接着下（把 App 切回前台，额度会重新算）；开机自动恢复在安卓 15 上也改走了新路子，不再被开机限制挡住。帮助里新增了一条，专门讲这件事",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
             "· 文件直链 → 直接开始多线程下载，还能预先改好保存文件名\n" +
@@ -7188,7 +7188,7 @@ fun TaskCard(
                     val version = runCatching {
                         ctx.packageManager.getPackageInfo(ctx.packageName, 0)
                             .versionName
-                    }.getOrNull() ?: "3.8.0"
+                    }.getOrNull() ?: "3.9.0"
                     val cm = ctx.getSystemService(
                         android.content.Context.CLIPBOARD_SERVICE,
                     ) as android.content.ClipboardManager
