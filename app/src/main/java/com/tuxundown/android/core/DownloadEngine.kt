@@ -180,6 +180,21 @@ class DownloadEngine(
      */
     private val chunkParts = mutableMapOf<Int, Int>()
 
+    /** v4.8: one in-flight chunk of an FTP segmented run — the
+     *  FTP counterpart of [ActiveChunk] (which is HTTP-shaped:
+     *  its eviction handle is an HttpURLConnection). The eviction
+     *  handle here is the worker's [FtpClient], whose data socket
+     *  the sampler closes via abortTransfer. */
+    private class FtpPart(val index: Int, start: Long, end: Long) {
+        @Volatile var pos: Long = start // next byte to write
+        val start: Long = start
+        val end: Long = end // exclusive
+        @Volatile var lastSamplePos: Long = start
+        @Volatile var lastAdvanceMs: Long = System.currentTimeMillis()
+        /** The session currently transferring this part. */
+        @Volatile var client: FtpClient? = null
+    }
+
     fun pause() {
         paused = true
     }
@@ -2277,15 +2292,30 @@ class DownloadEngine(
         return (if (base.isBlank()) "stream" else base) + ".ts"
     }
 
-    // ---------- FTP path (v1.7) ----------
+    // ---------- FTP path (v1.7, segmented v4.8) ----------
 
     /**
-     * Download an ftp:// file with the hand-written [FtpClient]:
-     * one data stream (FTP has no Range-style chunking), resumed
-     * with REST when the server supports it — the resume offset is
-     * the length the existing .part already has, measured through
-     * the target itself. A server file whose SIZE changed since
-     * the last run restarts the transfer instead of mixing bytes.
+     * Download an ftp:// file with the hand-written [FtpClient].
+     *
+     * v4.8: the run opens ONE probe session (connect / login /
+     * binary / SIZE, then the traffic + space guards, then the
+     * REST probe — the v1.7 order and wording unchanged), and the
+     * probe session is CLOSED before any worker starts, so it
+     * never counts against the server's session cap. The probe
+     * results decide the shape of the run ([FtpSegmented.decide]):
+     * known total + REST + at least 2 chunks → the segmented path
+     * ([runFtpSegmented]); anything else → the v1.7 single-stream
+     * body ([runFtpSingle]) with an honest note saying why. Either
+     * way [TaskRecord.singleThreadOnly] is rewritten truthfully
+     * (the persisted flag cannot be trusted as a verdict: runFtp
+     * set it on EVERY ftp task from v1.7 to v4.7).
+     *
+     * There is deliberately NO second fallback: if every
+     * segmented worker fails, the run is FAILED with progress
+     * kept, exactly like the HTTP segmented path. A server whose
+     * session cap is 1 still lets worker 0 transfer — the other
+     * workers retire quietly at login — so the realistic refusal
+     * modes never reach that failure.
      */
     private fun runFtp(): TaskStatus {
         val ftp = FtpClient.parseUrl(task.url)
@@ -2293,6 +2323,101 @@ class DownloadEngine(
         if (task.fileName.isBlank()) {
             task.fileName = fileNameFrom(null, task.url)
         }
+        val probe = FtpClient()
+        try {
+            probe.connect(ftp.host, ftp.port)
+            probe.login(ftp.user, ftp.password)
+            probe.binary()
+            val total = probe.size(ftp.path)
+            var serverChanged = false
+            if (total >= 0) {
+                if (task.totalSize > 0 && task.totalSize != total) {
+                    serverChanged = true
+                    task.note = "服务器上的文件大小变了，旧进度作废，已重新开始下载。"
+                }
+                task.totalSize = total
+            }
+            // Traffic protection can only judge once the size is known.
+            if (!trafficGuard()) {
+                trafficBlocked = true
+                task.status = TaskStatus.PAUSED
+                task.note = Notes.trafficGuardAtStart(task.totalSize)
+                return task.status
+            }
+            // v2.3 space pre-check (FTP learns its size from SIZE).
+            if (total > 0) {
+                val spaceMsg = runCatching { spaceGuard() }.getOrNull()
+                if (spaceMsg != null) {
+                    task.status = TaskStatus.PAUSED
+                    task.note = spaceMsg
+                    return task.status
+                }
+            }
+            val rest = probe.restSupported()
+            // The chunk count the grid WOULD have (an existing
+            // grid keeps its persisted count; a fresh one is the
+            // gridFor decision runFtpSegmented will persist).
+            val wouldCount = if (total > 0) {
+                if (task.chunkSize > 0 && task.chunkDone.isNotEmpty()) {
+                    task.chunkDone.size
+                } else {
+                    ChunkPlanner.chunkCount(
+                        ChunkPlanner.gridFor(
+                            total,
+                            ChunkPlanner.chunkSizeFor(total, 16),
+                            StartPlan.BURST_START,
+                        )
+                    )
+                }
+            } else {
+                0
+            }
+            val block = FtpSegmented.decide(total > 0, rest, wouldCount)
+            // v4.8 ruling: the probe session closes BEFORE the
+            // workers start — it must not hold one of the server's
+            // sessions while the run tries to open its own.
+            runCatching { probe.close() }
+            if (block == null) {
+                return runFtpSegmented(ftp, total, serverChanged)
+            }
+            when (block) {
+                FtpSegmented.Block.SIZE_UNKNOWN ->
+                    if (!task.note.contains("已用单连接下载")) {
+                        appendNote("这个 FTP 服务器不报文件大小（SIZE），没法分片，已用单连接下载。")
+                    }
+                FtpSegmented.Block.TOO_FEW_CHUNKS ->
+                    if (!task.note.contains("已用单连接下载")) {
+                        appendNote("文件太小，分片没有意义，已用单连接下载。")
+                    }
+                // REST: runFtpSingle writes the existing REST
+                // note, which now also states the single
+                // connection consequence.
+                FtpSegmented.Block.REST_UNSUPPORTED -> Unit
+            }
+            return runFtpSingle(ftp, total, serverChanged, rest)
+        } finally {
+            // Idempotent: the explicit close above already ran on
+            // the decide path; this covers the guard early-returns
+            // and probe failures.
+            runCatching { probe.close() }
+        }
+    }
+
+    /**
+     * The v1.7 single-stream FTP body, unchanged in behaviour:
+     * one data stream resumed with REST when the server supports
+     * it — the resume offset is the length the existing .part
+     * already has, measured through the target itself. A server
+     * file whose SIZE changed since the last run restarts the
+     * transfer instead of mixing bytes. Runs on a FRESH session
+     * (the probe session is already closed, see [runFtp]).
+     */
+    private fun runFtpSingle(
+        ftp: FtpClient.FtpUrl,
+        total: Long,
+        serverChanged: Boolean,
+        rest: Boolean,
+    ): TaskStatus {
         task.singleThreadOnly = true
         val client = FtpClient()
         // Speed sampler on the same fixed 1 s grid as the other
@@ -2342,32 +2467,6 @@ class DownloadEngine(
             client.connect(ftp.host, ftp.port)
             client.login(ftp.user, ftp.password)
             client.binary()
-            val total = client.size(ftp.path)
-            var serverChanged = false
-            if (total >= 0) {
-                if (task.totalSize > 0 && task.totalSize != total) {
-                    serverChanged = true
-                    task.note = "服务器上的文件大小变了，旧进度作废，已重新开始下载。"
-                }
-                task.totalSize = total
-            }
-            // Traffic protection can only judge once the size is known.
-            if (!trafficGuard()) {
-                trafficBlocked = true
-                task.status = TaskStatus.PAUSED
-                task.note = Notes.trafficGuardAtStart(task.totalSize)
-                return task.status
-            }
-            // v2.3 space pre-check (FTP learns its size from SIZE).
-            if (total > 0) {
-                val spaceMsg = runCatching { spaceGuard() }.getOrNull()
-                if (spaceMsg != null) {
-                    task.status = TaskStatus.PAUSED
-                    task.note = spaceMsg
-                    return task.status
-                }
-            }
-            val rest = client.restSupported()
             target = targetProvider()
             var offset = 0L
             // v1.8 audit: a .part that already holds the WHOLE file
@@ -2392,7 +2491,7 @@ class DownloadEngine(
                 appendNote("FTP 断点续传：从 ${Format.size(offset)} 处接着下。")
             }
             if (!rest && !task.note.contains("不支持断点续传")) {
-                appendNote("这个 FTP 服务器不支持断点续传（REST），暂停后重新开始会从头下载。")
+                appendNote("这个 FTP 服务器不支持断点续传（REST），没法分片，已用单连接下载；暂停后重新开始会从头下载。")
             }
             downloadedBytes.set(offset)
             task.downloaded = offset
@@ -2456,6 +2555,398 @@ class DownloadEngine(
                 task.status = it
                 if (task.error.isBlank()) task.error = "FTP 下载中断"
             }
+        }
+    }
+
+    /**
+     * v4.8: the FTP segmented run — the HTTP segmented path's
+     * DISCIPLINE on FTP transport (see [FtpSegmented] for the
+     * recorded narrowings: no endgame split, no ThreadScaler, no
+     * mirrors, no HostMemory). The ChunkPlanner grid is decided
+     * once and persisted exactly like runSegmented's, the
+     * PartIntegrity gate is the same, workers claim chunk indexes
+     * from a shared atomic cursor starting at the first unfinished
+     * chunk, each chunk gets at most 3 attempts resuming at its
+     * current position, and the 1 s sampler publishes per-part
+     * connInfos, tracks peakConns and evicts stalls by closing
+     * the part's data socket.
+     */
+    private fun runFtpSegmented(
+        ftp: FtpClient.FtpUrl,
+        total: Long,
+        serverChanged: Boolean,
+    ): TaskStatus {
+        task.singleThreadOnly = false
+        target = targetProvider()
+        // Entry state for the rulings below, captured BEFORE any
+        // reset: did a grid / bitmap already exist, and how long
+        // is the .part right now (measured before truncate(total)
+        // rewrites its length)?
+        val hadGrid = task.chunkSize > 0 && task.chunkDone.isNotEmpty()
+        val hadBitmap = task.chunkDone.any { it }
+        val entryPartSize = runCatching { target.size() }.getOrDefault(-1)
+        // Ruling: a persisted totalSize that disagrees with this
+        // run's SIZE means the server file changed — the grid,
+        // the bitmap and the per-source accounting reset, with
+        // the note runFtp's probe already wrote (the existing FTP
+        // wording). Judged BEFORE the PartIntegrity gate, like
+        // runSegmented's validator reset precedes its own gate.
+        if (serverChanged) {
+            task.chunkDone = BooleanArray(0)
+            task.chunkSize = 0
+            task.fineChunkSize = 0
+            task.fineChunkCount = 0
+            synchronized(task.sourceBytes) { task.sourceBytes.clear() }
+            task.downloaded = 0
+            downloadedBytes.set(0)
+            onSave()
+        }
+        // v3.2 audit round 18 gate, identical to runSegmented's:
+        // a .part shorter than the total while chunks are marked
+        // done has lost bytes behind our back; trusting the
+        // bitmap would seal zeros as DONE.
+        if (!PartIntegrity.segmentedTrustworthy(
+                hasProgress = task.chunkDone.any { it },
+                partSize = entryPartSize,
+                totalSize = total,
+            )
+        ) {
+            task.chunkDone = BooleanArray(0)
+            task.chunkSize = 0
+            task.fineChunkSize = 0
+            task.fineChunkCount = 0
+            synchronized(task.sourceBytes) { task.sourceBytes.clear() }
+            task.downloaded = 0
+            downloadedBytes.set(0)
+            task.note = "半成品文件对不上（字节丢了），旧进度作废，已重新开始下载。"
+            onSave()
+        }
+        if (task.chunkSize <= 0 || task.chunkDone.isEmpty()) {
+            // The grid is decided HERE, once, and persisted on
+            // the task — a resume reuses it verbatim (the resume
+            // invariant), exactly as in runSegmented.
+            val coarse = ChunkPlanner.chunkSizeFor(total, 16)
+            val grid = ChunkPlanner.gridFor(total, coarse, StartPlan.BURST_START)
+            task.chunkSize = grid.coarseSize
+            task.fineChunkSize = grid.fineSize
+            task.fineChunkCount = grid.fineCount
+            task.chunkDone = BooleanArray(ChunkPlanner.chunkCount(grid))
+        }
+        val grid = ChunkPlanner.gridOf(
+            total, task.chunkSize, task.fineChunkSize, task.fineChunkCount
+        )
+        val count = task.chunkDone.size
+        // Ruling (legacy FTP progress adoption): a task last run
+        // by v4.7 or earlier has NO grid/bitmap — only a .part
+        // whose length L the single stream wrote SEQUENTIALLY, so
+        // [0, L) is continuously trustworthy. Chunks lying wholly
+        // inside L are marked done (a partial tail chunk is not —
+        // its unwritten remainder cannot be told from its written
+        // head without a bitmap); downloadedBytes is then derived
+        // from the bitmap below, like every segmented resume.
+        // L >= total never reaches here as a partial (the grid
+        // decision required L < total to matter); L unmeasurable
+        // (< 0) adopts nothing. serverChanged excludes adoption
+        // too: those bytes belong to the OLD server file, not
+        // this grid's file.
+        if (!serverChanged && !hadGrid && !hadBitmap &&
+            entryPartSize > 0 && entryPartSize < total
+        ) {
+            var adopted = 0
+            synchronized(task.chunkDone) {
+                for (i in 0 until count) {
+                    val r = ChunkPlanner.rangeOf(grid, i)
+                    if (r.last < entryPartSize) {
+                        task.chunkDone[i] = true
+                        adopted++
+                    } else {
+                        break
+                    }
+                }
+            }
+            if (adopted > 0) {
+                appendNote(
+                    "接上了之前单连接下好的进度（约 ${Format.size(entryPartSize)}），" +
+                        "剩下的部分用多连接接着下。"
+                )
+            }
+        }
+        // Resume cursor: first unfinished chunk.
+        var firstOpen = task.chunkDone.indexOfFirst { !it }
+        if (firstOpen < 0) firstOpen = count
+        val cursor = AtomicInteger(firstOpen)
+        downloadedBytes.set(ChunkPlanner.downloadedOf(grid, task.chunkDone))
+        task.downloaded = downloadedBytes.get()
+
+        target.truncate(total)
+
+        val workerCount = FtpSegmented.workerCount(
+            connectionAllowance(), task.threads, count
+        )
+        task.threads = workerCount
+        if (!task.note.contains("FTP 多连接下载")) {
+            appendNote("FTP 多连接下载：$workerCount 条连接一起下。")
+        }
+        onSave()
+
+        val parts = java.util.Collections.synchronizedList(mutableListOf<FtpPart>())
+        val storageStop = AtomicInteger(0)
+        val liveWorkers = AtomicInteger(0)
+        val stopSampler = AtomicInteger(0)
+        val sampler = Thread {
+            var lastBytes = downloadedBytes.get()
+            var lastTime = System.currentTimeMillis()
+            var nextTick = System.currentTimeMillis() + 1000
+            while (stopSampler.get() == 0 && !stopped() && storageStop.get() == 0) {
+                val waitMs = nextTick - System.currentTimeMillis()
+                try {
+                    Thread.sleep(waitMs.coerceIn(50, 1000))
+                } catch (e: InterruptedException) { break }
+                nextTick += 1000
+                if (nextTick < System.currentTimeMillis()) {
+                    nextTick = System.currentTimeMillis() + 1000
+                }
+                if (!networkGuard()) {
+                    netBlocked = true
+                    break
+                }
+                if (!trafficGuard()) {
+                    trafficBlocked = true
+                    break
+                }
+                val now = System.currentTimeMillis()
+                val bytes = downloadedBytes.get()
+                val dt = max(1L, now - lastTime)
+                val speed = (bytes - lastBytes) * 1000 / dt
+                task.speedBps = if (task.speedBps == 0L) speed else (task.speedBps * 3 + speed) / 4
+                recordSpeed(task.speedBps)
+                val aw = liveWorkers.get()
+                if (aw > task.peakConns) task.peakConns = aw
+                task.downloaded = bytes
+                // v3.5 snapshot, per live part (same rule as the
+                // segmented sampler: this tick's position delta).
+                val snapshot = synchronized(parts) { parts.toList() }
+                task.connInfos = snapshot.map { p ->
+                    val sp = (p.pos - p.lastSamplePos) * 1000 / dt
+                    p.lastSamplePos = p.pos
+                    ConnInfo(
+                        chunkIndex = p.index,
+                        downloaded = (p.pos - p.start).coerceAtLeast(0),
+                        total = (p.end - p.start).coerceAtLeast(0),
+                        speedBps = sp.coerceAtLeast(0),
+                    )
+                }.sortedBy { it.chunkIndex }
+                // Stall eviction (StallPolicy, same inputs as the
+                // HTTP path): the FTP action is closing the part's
+                // DATA socket — the worker wakes with an exception
+                // and retries the chunk from its current position.
+                for (p in snapshot) {
+                    if (StallPolicy.shouldEvict(
+                            task.speedBps,
+                            now - p.lastAdvanceMs,
+                            snapshot.size,
+                        )
+                    ) {
+                        p.lastAdvanceMs = now // don't spam
+                        p.client?.abortTransfer()
+                    }
+                }
+                lastBytes = bytes
+                lastTime = now
+                onProgress(task)
+            }
+        }
+        sampler.isDaemon = true
+        sampler.start()
+
+        val threads = ArrayList<Thread>()
+        for (w in 0 until workerCount) {
+            val t = Thread {
+                liveWorkers.incrementAndGet()
+                try {
+                    ftpWorkerLoop(ftp, grid, count, cursor, parts, storageStop)
+                } finally {
+                    liveWorkers.decrementAndGet()
+                }
+            }
+            t.isDaemon = true
+            threads.add(t)
+            t.start()
+        }
+        for (t in threads) {
+            try { t.join() } catch (e: InterruptedException) { break }
+        }
+        stopSampler.set(1)
+        runCatching { sampler.join(1500) }
+
+        task.speedBps = 0
+        task.downloaded = downloadedBytes.get()
+        val doneCount = synchronized(task.chunkDone) { task.chunkDone.count { it } }
+        if (doneCount == count) {
+            // v1.8: one fsync seals the file before DONE.
+            runCatching { target.sync() }
+        }
+        runCatching { target.close() }
+        return when {
+            // Segmented completion is strict: every chunk done
+            // AND the byte count equal to SIZE's total.
+            doneCount == count && task.downloaded == total -> {
+                task.status = TaskStatus.DONE
+                task.status
+            }
+            trafficBlocked -> {
+                task.note = Notes.trafficGuardSwitched(task.totalSize)
+                task.status = TaskStatus.PAUSED
+                task.status
+            }
+            netBlocked -> {
+                task.note = Notes.wifiOnlyPaused()
+                task.status = TaskStatus.PAUSED
+                task.status
+            }
+            paused -> {
+                task.status = TaskStatus.PAUSED
+                task.status
+            }
+            else -> {
+                task.status = TaskStatus.FAILED
+                if (task.error.isBlank()) task.error = "部分分片下载失败"
+                task.status
+            }
+        }
+    }
+
+    /** One worker's fresh FTP session (connect + login + binary). */
+    private fun newFtpSession(ftp: FtpClient.FtpUrl): FtpClient {
+        val c = FtpClient()
+        try {
+            c.connect(ftp.host, ftp.port)
+            c.login(ftp.user, ftp.password)
+            c.binary()
+        } catch (e: Exception) {
+            runCatching { c.close() }
+            throw e
+        }
+        return c
+    }
+
+    /**
+     * One FTP worker: owns ONE [FtpClient] session, reused across
+     * chunks, and claims chunk indexes from the shared cursor.
+     * A worker whose session cannot be established (the server's
+     * per-IP session cap refusing another login is the common
+     * case) retires quietly — the remaining workers carry the
+     * run. A session the client marks controlDead is dropped and
+     * re-established on the next attempt. Storage-full /
+     * storage-gone stop the WHOLE run (the v4.3 discipline, same
+     * as downloadActive): every other error retries the chunk
+     * from its current position, at most 3 attempts.
+     */
+    private fun ftpWorkerLoop(
+        ftp: FtpClient.FtpUrl,
+        grid: ChunkGrid,
+        count: Int,
+        cursor: AtomicInteger,
+        parts: MutableList<FtpPart>,
+        storageStop: AtomicInteger,
+    ) {
+        var client: FtpClient? = null
+        try {
+            while (!stopped() && storageStop.get() == 0) {
+                val index = cursor.getAndIncrement()
+                if (index >= count) break
+                if (synchronized(task.chunkDone) { task.chunkDone[index] }) continue
+                val range = ChunkPlanner.rangeOf(grid, index)
+                val part = FtpPart(index, range.first, range.last + 1)
+                synchronized(parts) { parts.add(part) }
+                var retired = false
+                try {
+                    var attempt = 0
+                    var partDone = false
+                    while (attempt < 3 && !partDone &&
+                        !stopped() && storageStop.get() == 0
+                    ) {
+                        attempt++
+                        if (attempt > 1) task.retryCount++
+                        if (client == null) {
+                            client = try {
+                                newFtpSession(ftp)
+                            } catch (e: Exception) {
+                                // Session refused (server cap) or
+                                // unreachable: retire quietly; the
+                                // verdict is recorded in case EVERY
+                                // worker ends up retiring.
+                                recordFailureVerdict(e)
+                                null
+                            }
+                            if (client == null) {
+                                retired = true
+                                break
+                            }
+                        }
+                        val c = client!!
+                        part.client = c
+                        try {
+                            val from = part.pos
+                            c.retrieveRange(ftp.path, from, part.end - from) { buf, n ->
+                                if (stopped() || storageStop.get() != 0) {
+                                    throw InterruptedException("stopped")
+                                }
+                                target.writeAt(part.pos, buf, 0, n)
+                                part.pos += n
+                                part.lastAdvanceMs = System.currentTimeMillis()
+                                downloadedBytes.addAndGet(n.toLong())
+                                limiter?.throttle(n)
+                            }
+                            partDone = part.pos >= part.end
+                        } catch (e: InterruptedException) {
+                            // Pause / guard / storage stop — the
+                            // loop conditions below exit; the part
+                            // keeps its position for the next run.
+                            break
+                        } catch (e: Exception) {
+                            if (isStorageFull(e)) {
+                                task.error = Notes.storageFull()
+                                task.failureKind = FailureKind.STORAGE_FULL
+                                storageStop.set(1)
+                                break
+                            }
+                            if (isStorageGone(e)) {
+                                task.error = Notes.storageDeviceGone()
+                                task.failureKind = FailureKind.STORAGE_GONE
+                                storageStop.set(1)
+                                break
+                            }
+                            if (c.controlDead) {
+                                // The control channel desynced —
+                                // drop the session; the next
+                                // attempt reconnects.
+                                runCatching { c.close() }
+                                if (client === c) client = null
+                                part.client = null
+                            }
+                            if (attempt >= 3) {
+                                recordFailureVerdict(e)
+                                if (task.error.isBlank()) task.error = Errors.human(e)
+                            }
+                            try {
+                                Thread.sleep(500L * attempt)
+                            } catch (_: InterruptedException) { }
+                        }
+                    }
+                    if (partDone) {
+                        synchronized(task.chunkDone) { task.chunkDone[index] = true }
+                    }
+                } finally {
+                    synchronized(parts) { parts.remove(part) }
+                }
+                // Retired at session setup: leave the loop (the
+                // chunk stays unfinished for another worker or
+                // the next run).
+                if (retired) break
+            }
+        } finally {
+            runCatching { client?.close() }
         }
     }
 
@@ -2717,6 +3208,11 @@ class DownloadEngine(
 
     companion object {
         const val MAX_THREADS = 64
+        /** v4.8: FTP segmented ceiling — the single source is
+         *  [FtpSegmented.MAX_CONNECTIONS] (see its doc for why 8);
+         *  this alias exists so DownloadCenter's desire table
+         *  reads in engine constants like the other branches. */
+        const val FTP_MAX_CONNECTIONS = FtpSegmented.MAX_CONNECTIONS
         const val MIN_SPLIT = 256L * 1024
         const val BUFFER_SIZE = 128 * 1024
         /** v1.7: was 6 — long CDN redirect chains hit it; loops are
