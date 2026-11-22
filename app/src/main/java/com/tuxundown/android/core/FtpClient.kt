@@ -29,6 +29,17 @@ class FtpClient {
     private var writer: OutputStreamWriter? = null
     private var dataSocket: Socket? = null
     private var controlHost: String = ""
+    /** v4.8: a ranged transfer closed its data socket after
+     *  reading exactly the bytes it wanted — the server still owes
+     *  one completion reply (226/250, or 426 when it noticed the
+     *  early close) on the control channel. The next command must
+     *  drain it first or every later reply is off by one. */
+    private var pendingReply = false
+    /** v4.8: set when the pending-reply drain failed — the control
+     *  channel can no longer be trusted to be in sync, so the
+     *  owner must abandon this session and reconnect. */
+    var controlDead = false
+        private set
 
     /** Connect and read the greeting (220). */
     fun connect(host: String, port: Int) {
@@ -118,6 +129,82 @@ class FtpClient {
         }
     }
 
+    /**
+     * v4.8: stream EXACTLY [length] bytes of the file at [path],
+     * starting at [offset] (REST + RETR), into [sink]. Reading
+     * fewer bytes than promised (early EOF) is an error — the
+     * caller accounts progress per byte, so a short read must
+     * never pass as a finished range.
+     *
+     * After the last wanted byte the data socket is closed
+     * WITHOUT reading the rest of the file; the server's
+     * completion reply stays pending on the control channel and
+     * is drained before the next command (see [pendingReply]).
+     * The sink may throw to abort (pause / stall eviction); the
+     * data connection is then closed and the exception
+     * propagates — the pending reply is drained the same way.
+     */
+    fun retrieveRange(
+        path: String,
+        offset: Long,
+        length: Long,
+        sink: (ByteArray, Int) -> Unit,
+    ): Long {
+        require(length > 0) { "FTP 分片长度不对" }
+        val data = openDataConnection()
+        dataSocket = data
+        // Only a STARTED transfer leaves a completion reply
+        // pending — a refused REST/RETR was already answered by
+        // its own error reply, and draining after it would eat
+        // the NEXT command's reply instead.
+        var transferStarted = false
+        try {
+            val restCode = command("REST $offset")
+            if (restCode != 350) {
+                throw IllegalStateException("FTP 服务器拒绝断点续传（$restCode）")
+            }
+            val code = command("RETR $path")
+            if (code != 150 && code != 125) {
+                throw IllegalStateException(
+                    if (code == 550) "FTP 服务器上没有这个文件（550）"
+                    else "FTP 服务器拒绝下载（$code）"
+                )
+            }
+            transferStarted = true
+            var remaining = length
+            data.getInputStream().use { input ->
+                val buf = ByteArray(128 * 1024)
+                while (remaining > 0) {
+                    val n = input.read(buf, 0, minOf(buf.size.toLong(), remaining).toInt())
+                    if (n < 0) {
+                        throw IllegalStateException("FTP 数据提前结束，分片没下完")
+                    }
+                    sink(buf, n)
+                    remaining -= n
+                }
+            }
+            return length
+        } finally {
+            runCatching { data.close() }
+            dataSocket = null
+            // The transfer's completion reply (226/250, or 426 if
+            // the sink aborted us) is still owed on the control
+            // channel; the next command drains it (commandFull).
+            if (transferStarted) pendingReply = true
+        }
+    }
+
+    /**
+     * v4.8: abort the in-flight transfer by closing its data
+     * socket (the engine's stall eviction calls this from the
+     * sampler thread). The worker blocked in read wakes with an
+     * exception and retries the chunk from its current position;
+     * the control connection itself is left alone.
+     */
+    fun abortTransfer() {
+        runCatching { dataSocket?.close() }
+    }
+
     fun close() {
         runCatching { dataSocket?.close() }
         // v1.8 audit: after an aborted transfer the server may owe
@@ -159,6 +246,32 @@ class FtpClient {
         // inject extra commands into the control channel.
         if (cmd.contains('\r') || cmd.contains('\n')) {
             throw IllegalStateException("FTP 地址里有非法字符")
+        }
+        // v4.8: a ranged transfer that closed its data socket
+        // early leaves ONE completion reply pending — drain it
+        // (226/250/426 all fine, swallowed) before sending, or
+        // every later reply is off by one. The drain gets a short
+        // 2 s timeout: a server that never sends it leaves the
+        // channel unusable, so mark the session dead and throw —
+        // the worker reconnects instead of desyncing.
+        if (pendingReply) {
+            pendingReply = false
+            val s = control ?: throw IllegalStateException("FTP 还没连接")
+            val drained = runCatching {
+                val prevTimeout = s.soTimeout
+                s.soTimeout = DRAIN_TIMEOUT_MS
+                try {
+                    readReply()
+                } finally {
+                    // Restore whatever the caller had (close()
+                    // parks its own 2 s goodbye budget here).
+                    runCatching { s.soTimeout = prevTimeout }
+                }
+            }
+            if (drained.isFailure) {
+                controlDead = true
+                throw IllegalStateException("FTP 连接对不上号了，需要重连")
+            }
         }
         val w = writer ?: throw IllegalStateException("FTP 还没连接")
         w.write(cmd)
@@ -204,6 +317,9 @@ class FtpClient {
     companion object {
         const val CONNECT_TIMEOUT_MS = 15_000
         const val READ_TIMEOUT_MS = 30_000
+        /** v4.8: budget for draining a ranged transfer's pending
+         *  completion reply before the next command. */
+        const val DRAIN_TIMEOUT_MS = 2_000
         const val DEFAULT_PORT = 21
 
         /** Parse a 227 PASV reply: "(h1,h2,h3,h4,p1,p2)" → host to port. Pure. */
