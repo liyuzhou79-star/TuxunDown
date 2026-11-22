@@ -736,14 +736,25 @@ class DownloadEngine(
                 // retries the part on a fresh connection, resuming
                 // from the part's current offset.
                 if (speed > 0) {
+                    // v4.0: collect the stalled connections inside
+                    // the lock but disconnect AFTER releasing it —
+                    // disconnect() is a blocking socket operation
+                    // and activeLock is the engine's hottest lock
+                    // (every worker passes it per chunk), so doing
+                    // it in-lock stalled all workers behind one
+                    // slow socket teardown. The lastAdvanceMs
+                    // stamp stays in-lock so a part is never
+                    // evicted twice for the same stall.
+                    val stalled = ArrayList<HttpURLConnection>()
                     synchronized(activeLock) {
                         for (ac in active) {
                             if (now - ac.lastAdvanceMs > STALL_EVICT_MS) {
                                 ac.lastAdvanceMs = now // don't spam
-                                runCatching { ac.connection?.disconnect() }
+                                ac.connection?.let { stalled.add(it) }
                             }
                         }
                     }
+                    for (conn in stalled) runCatching { conn.disconnect() }
                 }
                 // Every 2 s the ThreadScaler re-decides the worker
                 // count (v2.3): opening ladder first, then steady
@@ -1320,6 +1331,17 @@ class DownloadEngine(
         // workload this app exists for. Now the release is in a
         // finally and happens on every path out.
         var input: InputStream? = null
+        // v4.0: keep-alive discipline, same as fetchText (v2.2) —
+        // a response body read to its EXACT end + stream close
+        // returns the socket to the keep-alive pool, so the next
+        // chunk reuses it instead of paying a fresh TCP+TLS
+        // handshake; a body cut short is NOT reusable and must
+        // be disconnected. "Exact end" means the ORIGINAL
+        // requested end (to, captured at entry): ac.end can
+        // shrink mid-run when an endgame split hands the tail to
+        // a new worker, and a stop at that shrunken limit leaves
+        // response bytes unread — not consumed, disconnect.
+        var consumed = false
         try {
             input = c.inputStream
             val buf = ByteArray(bufferSizeFor(task.threads))
@@ -1337,9 +1359,17 @@ class DownloadEngine(
                 downloadedBytes.addAndGet(n.toLong())
                 limiter?.throttle(n)
             }
+            // The loop exited with pos at the original end: the
+            // whole body was read exactly. A stopped() exit, an
+            // exception, an early EOF, or a stop at a split-
+            // shrunken limit all leave pos < to + 1.
+            consumed = pos >= to + 1
         } finally {
+            // The stream close stays unconditional (round-13
+            // leak discipline); only the disconnect is now
+            // conditional on the body not having been consumed.
             runCatching { input?.close() }
-            runCatching { c.disconnect() }
+            if (!consumed) runCatching { c.disconnect() }
             if (ac.connection == c) ac.connection = null
         }
     }
@@ -1990,12 +2020,19 @@ class DownloadEngine(
                     throw IllegalStateException(Notes.fileChangedValidator())
                 }
             }
+            // v4.0: same keep-alive rule as downloadRange — a
+            // body read to EOF can go back to the pool; only a
+            // stopped (cut-short) read disconnects.
+            var eof = false
             c.inputStream.use { input ->
                 target.openStream().use { out ->
                     val buf = ByteArray(bufferSizeFor(1))
                     while (!stopped()) {
                         val n = input.read(buf)
-                        if (n < 0) break
+                        if (n < 0) {
+                            eof = true
+                            break
+                        }
                         out.write(buf, 0, n)
                         downloadedBytes.addAndGet(n.toLong())
                         limiter?.throttle(n)
@@ -2004,7 +2041,7 @@ class DownloadEngine(
             }
             // v1.8: the stream ran to its end unstopped — seal it.
             if (!stopped()) runCatching { target.sync() }
-            c.disconnect()
+            if (!eof) c.disconnect()
         } finally {
             stopSampler.set(1)
             sampler.join(1500)
