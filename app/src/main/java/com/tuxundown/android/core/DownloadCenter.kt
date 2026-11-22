@@ -549,6 +549,55 @@ object DownloadCenter {
         if (o.has("proxyUser")) proxyUser = o.optString("proxyUser", proxyUser)
     }
 
+    // ---- v3.6: migration-pack sections — statistics + host
+    // learning. The plain v1.8 backup does NOT carry these; the
+    // migration pack (Backup.buildMigration) does, so a phone
+    // move keeps the accumulated totals and the per-host thread
+    // knowledge instead of starting both from zero. Neither
+    // section contains credentials: statistics are byte counts
+    // and day keys; host learning is host names + thread numbers.
+
+    /** Snapshot of every statistics counter (raw stored values,
+     *  so the day-rollover logic keeps working after a restore). */
+    fun statsSnapshotJson(): org.json.JSONObject {
+        val o = org.json.JSONObject()
+        o.put("totalBytes", pLong("statsTotalBytes", 0))
+        o.put("doneCount", pInt("statsDoneCount", 0))
+        o.put("todayKey", pString("statsTodayKey", ""))
+        o.put("todayBytes", pLong("statsTodayBytes", 0))
+        o.put("speedSum", pLong("statsSpeedSum", 0))
+        o.put("speedCount", pInt("statsSpeedCount", 0))
+        o.put("hostStats", pString("hostStats", ""))
+        o.put("days", pString("statsDays", ""))
+        return o
+    }
+
+    /** Apply a statistics object from a migration pack; absent
+     *  keys keep their current values (same rule as settings). */
+    fun applyStatsJson(o: org.json.JSONObject) {
+        val e = prefs().edit()
+        if (o.has("totalBytes")) e.putLong("statsTotalBytes", o.optLong("totalBytes"))
+        if (o.has("doneCount")) e.putInt("statsDoneCount", o.optInt("doneCount"))
+        if (o.has("todayKey")) e.putString("statsTodayKey", o.optString("todayKey"))
+        if (o.has("todayBytes")) e.putLong("statsTodayBytes", o.optLong("todayBytes"))
+        if (o.has("speedSum")) e.putLong("statsSpeedSum", o.optLong("speedSum"))
+        if (o.has("speedCount")) e.putInt("statsSpeedCount", o.optInt("speedCount"))
+        if (o.has("hostStats")) e.putString("hostStats", o.optString("hostStats"))
+        if (o.has("days")) e.putString("statsDays", o.optString("days"))
+        e.apply()
+    }
+
+    /** Per-host learning data in HostMemory's serialized form. */
+    fun hostMemorySnapshot(): String = pString("hostThreads", "")
+
+    /** Restore per-host learning data. The text is parsed and
+     *  re-serialized before storing, so malformed lines from a
+     *  hand-edited file drop out instead of being stored
+     *  verbatim (HostMemory.parse is tolerant by design). */
+    fun applyHostMemory(text: String) {
+        saveHostEntries(HostMemory.parse(text))
+    }
+
     /**
      * v2.8: set (or clear) the user's own note on a task. The
      * text is sanitized here (trim + length cap) so every writer

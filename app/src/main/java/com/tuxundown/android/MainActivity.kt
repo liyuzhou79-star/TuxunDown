@@ -648,6 +648,42 @@ fun DownApp() {
             }.start()
         }
     }
+    // ---- v3.6: the FULL migration pack — the v1.8 backup
+    // sections plus statistics and per-host learning data, for
+    // moving to a new phone in one file. It imports through the
+    // same 导入备份 picker below (Backup.parse reads the extra
+    // sections when present and ignores them when absent). ----
+    val migrationExportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            val json = Backup.buildMigration(
+                store.exportJson(),
+                DownloadCenter.settingsSnapshotJson(),
+                DownloadCenter.statsSnapshotJson(),
+                DownloadCenter.hostMemorySnapshot(),
+                System.currentTimeMillis(),
+            )
+            Thread {
+                val ok = runCatching {
+                    context.contentResolver.openOutputStream(uri)?.use {
+                        it.write(json.toByteArray(Charsets.UTF_8))
+                    } ?: error("open failed")
+                }.isSuccess
+                activity.runOnUiThread {
+                    Toast.makeText(
+                        context,
+                        if (ok) {
+                            "迁移包已导出（设置＋任务＋统计＋学习数据）"
+                        } else {
+                            "导出失败"
+                        },
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            }.start()
+        }
+    }
     val importLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -754,6 +790,26 @@ fun DownApp() {
                             // (by design); proxyPassUi keeps whatever
                             // is currently stored on this device.
                             msg += if (msg.isEmpty()) "设置已恢复" else "，设置也已恢复"
+                        }
+                        // v3.6: migration-pack sections. Absent
+                        // in v1.8 backups and v1.4 files — those
+                        // leave the current statistics and host
+                        // learning exactly as they are.
+                        if (parsed.stats != null) {
+                            DownloadCenter.applyStatsJson(parsed.stats)
+                            msg += if (msg.isEmpty()) {
+                                "统计已恢复"
+                            } else {
+                                "，统计也已恢复"
+                            }
+                        }
+                        if (parsed.hostMemory != null) {
+                            DownloadCenter.applyHostMemory(parsed.hostMemory)
+                            msg += if (msg.isEmpty()) {
+                                "按主机学习数据已恢复"
+                            } else {
+                                "，按主机学习数据也已恢复"
+                            }
                         }
                         Toast.makeText(
                             context,
@@ -1533,6 +1589,7 @@ fun DownApp() {
             onShowDiag = { screen = "diag" },
             onExport = { exportLauncher.launch("tuxundown-backup.json") },
             onImport = { importLauncher.launch(arrayOf("application/json", "text/plain")) },
+            onMigrationExport = { migrationExportLauncher.launch("tuxundown-migration.json") },
             onBack = { screen = "home" },
         )
     } else if (screen == "stats") {
@@ -4550,6 +4607,7 @@ fun SettingsScreen(
     onShowDiag: () -> Unit,
     onExport: () -> Unit,
     onImport: () -> Unit,
+    onMigrationExport: () -> Unit,
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -4569,8 +4627,9 @@ fun SettingsScreen(
             "校验 哈希 完整性 sha md5 解压 zip 压缩包 自动解压",
         "s-power" to "后台运行 后台 保活 电池 白名单 省电 冻结",
         "s-data" to "引导与数据 引导 新手引导 帮助 常见问题 备份 导出 导入 " +
-            "恢复 孤儿 清理 part 数据 诊断 自检 体检 归档 旧记录 删除记录",
-        "s-about" to "关于 版本 检查更新 更新 github 开源 gpl 许可",
+            "恢复 孤儿 清理 part 数据 诊断 自检 体检 归档 旧记录 删除记录 " +
+            "迁移 迁移包 换手机 学习数据 统计",
+        "s-about" to "关于 版本 检查更新 更新 github 开源 gpl 许可 更新日志 历史",
     )
     fun groupVisible(key: String): Boolean {
         val q = settingsQuery.trim().lowercase()
@@ -5292,12 +5351,31 @@ fun SettingsScreen(
                     "一个 JSON 文件装下全部设置＋任务记录（不含文件本体），换手机或重装后导入一次全恢复。" +
                         "下载目录不在备份里（文件夹授权没法跨设备，导入后在设置里重选一次）。" +
                         "旧版导出的任务列表文件也能导入，只是没有设置部分。" +
-                        "敏感信息不进备份：每个任务的 Cookie 和代理密码都会被剔除，" +
-                        "导入后需要登录态的任务要重新从内置浏览器抓一次链接。",
+                        "敏感信息不进备份：每个任务的 Cookie、授权头和代理密码都会被剔除，" +
+                        "导入后需要登录态的任务要重新从内置浏览器抓一次链接、代理密码要重填一次。" +
+                        "下面这个完整迁移包也用「导入备份」导入；旧版备份照常能导，只是没有统计和学习数据部分。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 6.dp),
                 )
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("导出完整迁移包")
+                        Text(
+                            "换手机专用：一个 JSON 文件装下设置＋任务＋嗅探历史＋下载统计＋按主机学习数据" +
+                                "（每个站的最佳线程数、限流上限），到新手机用上面的「导入备份」选它，一次全恢复。" +
+                                "敏感信息同样剔除（Cookie、授权头、代理密码不进迁移包）。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    OutlinedButton(onClick = onMigrationExport) { Text("导出") }
+                }
                 HorizontalDivider(Modifier.padding(vertical = 10.dp))
                 Row(
                     Modifier.fillMaxWidth(),
