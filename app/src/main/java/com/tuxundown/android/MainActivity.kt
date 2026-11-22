@@ -95,6 +95,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.tuxundown.android.core.Backup
 import com.tuxundown.android.core.BatchRename
 import com.tuxundown.android.core.BulkControl
@@ -384,10 +386,51 @@ fun DownApp() {
     val activity = context as MainActivity
     val store = DownloadCenter.store
     var tick by remember { mutableStateOf(0) }
+    // v4.9 (audit round 34): the 1 s UI tick is now lifecycle-
+    // gated. Before this the LaunchedEffect below ran for as
+    // long as the composition survived — including while the
+    // activity was stopped and the app invisible — so the UI
+    // woke the main thread every second for recompositions
+    // nobody could see, fighting the very suspend the
+    // screen-off power work tries to respect. The gate is a
+    // plain flag flipped by a LifecycleEventObserver on the
+    // ACTIVITY's lifecycle (androidx.lifecycle only, no new
+    // dependency): ON_STOP closes it and the loop just polls
+    // it on a long delay — no tick, no recomposition;
+    // ON_START reopens it and ticks ONCE IMMEDIATELY, so the
+    // first thing the user sees on return is the current
+    // progress, then the normal 1 s beat resumes. Nothing
+    // else changes: every existing tick consumer (TaskCard /
+    // SummaryCard liveTick, the screens taking tick) reads
+    // the same state as before, and the engine/service
+    // samplers never read this tick — they run on their own
+    // threads in DownloadEngine / DownloadService, so pausing
+    // the UI beat cannot slow a download.
+    val tickGate = remember { java.util.concurrent.atomic.AtomicBoolean(true) }
+    DisposableEffect(activity) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> {
+                    tickGate.set(true)
+                    tick++
+                }
+                Lifecycle.Event.ON_STOP -> tickGate.set(false)
+                else -> {}
+            }
+        }
+        activity.lifecycle.addObserver(observer)
+        onDispose { activity.lifecycle.removeObserver(observer) }
+    }
     LaunchedEffect(Unit) {
         while (true) {
-            delay(1000)
-            tick++
+            if (tickGate.get()) {
+                delay(1000)
+                if (tickGate.get()) tick++
+            } else {
+                // Stopped: poll the gate on a long delay only —
+                // no tick and no recomposition while invisible.
+                delay(5000)
+            }
         }
     }
     // v2.2: the NORMAL UI staying alive for a few seconds ends
