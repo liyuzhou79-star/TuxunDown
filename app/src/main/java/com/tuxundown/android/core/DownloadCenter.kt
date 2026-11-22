@@ -301,12 +301,17 @@ object DownloadCenter {
      *  HLS_MAX_PARALLEL at a time (v4.3: the adaptive width's
      *  ceiling — the desire is what the task COULD use, so the
      *  accounting reserves for the max, not the fixed 4 it
-     *  used before), single-stream and FTP runs hold exactly
-     *  one. */
+     *  used before), single-stream runs hold exactly one, and
+     *  FTP runs segment up to FTP_MAX_CONNECTIONS (v4.8). The
+     *  when order matters: a singleThreadOnly FTP task still
+     *  hits the 1 branch first. An FTP task whose probe has not
+     *  decided yet is briefly reserved at the FTP ceiling; a
+     *  fallback run stamps singleThreadOnly and the desire
+     *  self-corrects to 1 on the next read. */
     private fun connectionDesireOf(t: TaskRecord): Int = when {
         t.isHls -> DownloadEngine.HLS_MAX_PARALLEL
         t.singleThreadOnly -> 1
-        FtpClient.isFtpUrl(t.url) -> 1
+        FtpClient.isFtpUrl(t.url) -> DownloadEngine.FTP_MAX_CONNECTIONS
         else -> DownloadEngine.MAX_THREADS
     }
 
