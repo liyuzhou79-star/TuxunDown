@@ -104,6 +104,23 @@ class DownloadService : Service() {
      *  so a half-extracted tree is never left behind silently. */
     private class FinalizeAborted : RuntimeException()
 
+    /**
+     * v4.5 (queue preheat): transient preheat state (see
+     * QueuePreheat for the pure guard decision). [preheatWarmed]
+     * holds the once-only marks (task id -> host) of waiting
+     * tasks already warmed during this wait — in-memory only,
+     * never serialized: a process restart simply re-judges from
+     * scratch, which is the truth (the DNS cache and keep-alive
+     * pool died with the old process anyway). [preheatInFlight]
+     * is the mark of the one preheat currently running, or
+     * null. Guarded by [preheatLock]; the drain thread is the
+     * only writer of the map besides the preheat thread's
+     * in-flight release.
+     */
+    private val preheatLock = Object()
+    private val preheatWarmed = HashMap<String, String>()
+    @Volatile private var preheatInFlight: String? = null
+
     /** v2.8: queue link pre-check thread (see LinkPrecheck).
      *  Runs only while the service lives; the loop is all
      *  runCatching — a pre-check must never disturb a download. */
@@ -606,6 +623,11 @@ class DownloadService : Service() {
                     task.note = "已接通电源，开始下载。"
                     store.save()
                 }
+                // v4.5 (queue preheat): this task is really
+                // starting — its once-only preheat mark goes
+                // away, so if it ever queues again it may be
+                // warmed again (see QueuePreheat).
+                clearPreheatMark(task.id)
                 val th = Thread {
                     // v4.4 (finalize pipeline): when runOne handed
                     // the task to the finalize lane, the daily
@@ -623,6 +645,17 @@ class DownloadService : Service() {
                 running[task.id] = th
                 th.start()
             }
+            // v4.5 (queue preheat): judged HERE, on the drain's
+            // own beat — once per pass, after this pass's starts
+            // are settled. The drain's passes are already paced
+            // by its waits (the 400 ms reap poll while tasks run,
+            // the longer gate / deferred / scheduled waits when
+            // idle), so the preheat check can never run more
+            // often than the loop the service already lives by,
+            // and no new polling exists anywhere. The decision
+            // itself is QueuePreheat.decide (pure, all guards);
+            // a hit only spawns the background warm thread.
+            maybeQueuePreheat()
             val anyQueued = store.tasks.any { it.status == TaskStatus.QUEUED }
             if (running.isEmpty()) {
                 // v4.4 (finalize pipeline): a task whose transfer
@@ -755,6 +788,170 @@ class DownloadService : Service() {
         com.tuxundown.android.widget.WidgetUpdater.refresh(this)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    /** v4.5 (queue preheat): drop a task's once-only mark. */
+    private fun clearPreheatMark(taskId: String) {
+        synchronized(preheatLock) { preheatWarmed.remove(taskId) }
+    }
+
+    /**
+     * v4.5 (queue preheat): one guard judgement on the drain's
+     * beat (see the call site in drainQueue) and, when
+     * [QueuePreheat.decide] approves a target, its background
+     * warm. Everything here is best-effort optimisation: no
+     * task field is ever written, no slot / limiter / budget is
+     * touched, and every failure is silent — the real start
+     * re-does everything for itself regardless.
+     */
+    private fun maybeQueuePreheat() {
+        val store = DownloadCenter.store
+        // Prune marks whose wait is over (deleted / paused /
+        // finished tasks): a mark only has meaning while its
+        // task sits QUEUED. (A real start clears its own mark
+        // in the drain's start loop; this covers the exits that
+        // never pass through it.)
+        synchronized(preheatLock) {
+            val iter = preheatWarmed.entries.iterator()
+            while (iter.hasNext()) {
+                val e = iter.next()
+                val t = store.byId(e.key)
+                if (t == null || t.status != TaskStatus.QUEUED) iter.remove()
+            }
+        }
+        val warmedKeys = synchronized(preheatLock) {
+            preheatWarmed.map { (id, host) -> QueuePreheat.keyFor(id, host) }.toSet()
+        }
+        val target = QueuePreheat.decide(
+            tasks = store.tasks,
+            now = System.currentTimeMillis(),
+            onWifi = runCatching { DownloadCenter.isOnWifi() }.getOrDefault(false),
+            dualActive = dualActive,
+            // Traffic protection is ON exactly when a threshold
+            // is set (DownloadCenter.trafficThresholdMB: 0 = off).
+            trafficProtectionOn = DownloadCenter.trafficThresholdMB > 0,
+            proxyActive = DownloadCenter.proxySettings().active,
+            alreadyWarmed = warmedKeys,
+            inFlightKey = preheatInFlight,
+        ) ?: return
+        // Claim the one-at-a-time slot and the once-only mark
+        // BEFORE spawning, so the next drain pass (400 ms later)
+        // already sees both and cannot double-fire.
+        synchronized(preheatLock) {
+            if (preheatInFlight != null) return
+            preheatInFlight = target.key
+            preheatWarmed[target.taskId] = target.host
+        }
+        Thread { warmQueuedHost(target) }.apply {
+            isDaemon = true
+            name = "queue-preheat"
+            start()
+        }
+    }
+
+    /**
+     * The queue preheat itself, on its own daemon thread:
+     * DNS pre-resolve + ONE Range bytes=0-0 request for the
+     * target's primary link, reusing the standing primitives —
+     * the host decision is [Warmup.hostToPreResolve]'s (already
+     * applied by the guard), the lookup is the same
+     * getAllByName the enqueue pre-resolve uses, and the 1-byte
+     * body is drained through this service's own
+     * [releaseProbeConnection] discipline, so a 206 socket lands
+     * in the platform keep-alive pool exactly like a probe's.
+     * The task's session headers ride along (same set the
+     * pre-check sends), so the warmed connection is one the
+     * real probe may actually reuse.
+     *
+     * Anti-duplication: the host is claimed in [WarmHosts] for
+     * the whole warm — if the engine's run-start warmup (the
+     * task started meanwhile) or anything else is already
+     * warming this host, this thread does nothing, and vice
+     * versa the engine skips a host this thread holds.
+     *
+     * Stale-target discard: the target is re-judged
+     * ([QueuePreheat.stillTarget]) after the DNS step and again
+     * after the request. A target that was deleted / paused /
+     * started, or lost first place in the queue, gets NO pooled
+     * connection (disconnect instead) and — as everywhere in
+     * preheat — no field writes of any kind. The DNS answer
+     * itself lives in the platform cache and cannot be
+     * un-resolved; that is the same harmless residue the
+     * v4.4 enqueue-time pre-resolve already leaves, and the
+     * real start never trusts it beyond a connection attempt.
+     */
+    private fun warmQueuedHost(target: QueuePreheat.Target) {
+        try {
+            if (!WarmHosts.tryClaim(target.host)) return
+            try {
+                runCatching { java.net.InetAddress.getAllByName(target.host) }
+                val store = DownloadCenter.store
+                if (!QueuePreheat.stillTarget(
+                        store.tasks, System.currentTimeMillis(),
+                        target.taskId, target.host,
+                    )
+                ) return
+                val task = store.byId(target.taskId) ?: return
+                var conn: java.net.HttpURLConnection? = null
+                var poolIt = false
+                try {
+                    // Proxy was a guard veto, so this open is
+                    // direct by construction; ProxyState.open is
+                    // still the standing opener (it would honour
+                    // a proxy configured in the meantime — in
+                    // which case the pooled socket is the
+                    // proxy's, equally harmless).
+                    val c = ProxyState.open(java.net.URL(target.url))
+                    conn = c
+                    c.connectTimeout = 15_000
+                    c.readTimeout = 30_000
+                    c.instanceFollowRedirects = true
+                    c.setRequestProperty(
+                        "User-Agent",
+                        UserAgents.resolve(
+                            task.headers["User-Agent"], DownloadCenter.userAgent
+                        ),
+                    )
+                    c.setRequestProperty("Accept-Encoding", "identity")
+                    task.headers["Cookie"]?.let {
+                        c.setRequestProperty("Cookie", it)
+                    }
+                    task.headers["Referer"]?.let {
+                        c.setRequestProperty("Referer", it)
+                    }
+                    c.setRequestProperty("Range", "bytes=0-0")
+                    val code = c.responseCode
+                    // Only a 206's 1-byte body may be pooled;
+                    // anything else is disconnected by
+                    // releaseProbeConnection's cap discipline
+                    // or directly here. A stale target's socket
+                    // is never pooled (see the doc above).
+                    poolIt = code == 206 && QueuePreheat.stillTarget(
+                        store.tasks, System.currentTimeMillis(),
+                        target.taskId, target.host,
+                    )
+                    if (!poolIt) runCatching { c.disconnect() }
+                } finally {
+                    if (poolIt) {
+                        conn?.let { releaseProbeConnection(it) }
+                    } else {
+                        // Non-206, stale target, or a failed
+                        // request: never pooled (a second
+                        // disconnect after the one above is a
+                        // no-op).
+                        conn?.let { runCatching { it.disconnect() } }
+                    }
+                }
+            } finally {
+                WarmHosts.release(target.host)
+            }
+        } catch (e: Exception) {
+            // Preheat failures are silent by design (see doc).
+        } finally {
+            synchronized(preheatLock) {
+                if (preheatInFlight == target.key) preheatInFlight = null
+            }
+        }
     }
 
     /**

@@ -103,3 +103,36 @@ object Warmup {
         return lower.startsWith("http://") || lower.startsWith("https://")
     }
 }
+
+/**
+ * In-flight warm registry (v4.5): which hosts are being warmed
+ * RIGHT NOW, claimed before the warm request and released when
+ * it finishes. Two warmers exist — the engine's run-start
+ * warmup ([Warmup.sourcesToWarm] callers) and the service's
+ * queue preheat (see QueuePreheat) — and without a shared
+ * registry a queued task that starts while its preheat is
+ * still in flight would get the SAME host warmed twice at the
+ * same moment: two 1-byte requests, two sockets raced into the
+ * pool, pure waste. Whoever claims a host first warms it; the
+ * other skips that host (the pooled connection the winner
+ * lands serves both anyway). Hosts compare case-insensitively.
+ * Process-local and transient by nature — an empty registry
+ * after a restart is simply the truth.
+ */
+object WarmHosts {
+    private val inFlight = HashSet<String>()
+
+    /** Claim [host] for warming; false when another warmer
+     *  already holds it (or the host is blank). */
+    fun tryClaim(host: String): Boolean {
+        val h = host.trim().lowercase()
+        if (h.isEmpty()) return false
+        return synchronized(inFlight) { inFlight.add(h) }
+    }
+
+    fun release(host: String) {
+        val h = host.trim().lowercase()
+        if (h.isEmpty()) return
+        synchronized(inFlight) { inFlight.remove(h) }
+    }
+}

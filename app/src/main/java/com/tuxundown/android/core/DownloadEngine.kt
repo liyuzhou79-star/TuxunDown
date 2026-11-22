@@ -433,22 +433,31 @@ class DownloadEngine(
     private fun warmUp() {
         val targets = Warmup.sourcesToWarm(task.url, task.sources, proxySettings.active)
         for (src in targets) {
-            runCatching {
-                // Warm the DNS cache first (failures ignored):
-                // the pooled connection is worthless if the next
-                // lookup still has to pay the DNS round trip.
-                val host = URL(src).host
-                if (host.isNotBlank()) {
+            // v4.5: claim the host before warming it (see
+            // WarmHosts) — if the queue preheat is warming this
+            // very host right now (the task started while its
+            // preheat was in flight), skip: the connection it
+            // pools serves this run too, and two concurrent
+            // warms of one host are pure waste.
+            val host = runCatching { URL(src).host }.getOrDefault("")
+            if (host.isBlank() || !WarmHosts.tryClaim(host)) continue
+            try {
+                runCatching {
+                    // Warm the DNS cache first (failures ignored):
+                    // the pooled connection is worthless if the next
+                    // lookup still has to pay the DNS round trip.
                     runCatching { InetAddress.getAllByName(host) }
+                    val c = openFollowingRedirects(src) {
+                        it.setRequestProperty("Range", "bytes=0-0")
+                    }
+                    if (c.responseCode == HttpURLConnection.HTTP_PARTIAL) {
+                        releaseConnection(c)
+                    } else {
+                        runCatching { c.disconnect() }
+                    }
                 }
-                val c = openFollowingRedirects(src) {
-                    it.setRequestProperty("Range", "bytes=0-0")
-                }
-                if (c.responseCode == HttpURLConnection.HTTP_PARTIAL) {
-                    releaseConnection(c)
-                } else {
-                    runCatching { c.disconnect() }
-                }
+            } finally {
+                WarmHosts.release(host)
             }
         }
     }

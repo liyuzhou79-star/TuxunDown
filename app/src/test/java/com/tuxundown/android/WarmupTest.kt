@@ -1,8 +1,10 @@
 package com.tuxundown.android
 
 import com.tuxundown.android.core.TaskStore
+import com.tuxundown.android.core.WarmHosts
 import com.tuxundown.android.core.Warmup
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -158,6 +160,36 @@ class WarmupTest {
         assertEquals(null, Warmup.hostToPreResolve("", proxyActive = false))
         assertEquals(null, Warmup.hostToPreResolve("https://", proxyActive = false))
         assertEquals(null, Warmup.hostToPreResolve("not a url", proxyActive = false))
+    }
+
+    // ---- v4.5: in-flight warm registry (WarmHosts) ----
+
+    @Test
+    fun warmHostsClaimBlocksTheSecondWarmerUntilRelease() {
+        val host = "claim-${System.nanoTime()}.example.com"
+        assertTrue(WarmHosts.tryClaim(host))
+        // A second warmer (queue preheat vs engine warmup, in
+        // either order) must not warm the same host at the
+        // same moment.
+        assertFalse(WarmHosts.tryClaim(host))
+        WarmHosts.release(host)
+        assertTrue(WarmHosts.tryClaim(host))
+        WarmHosts.release(host)
+    }
+
+    @Test
+    fun warmHostsAreCaseInsensitiveAndIndependent() {
+        val a = "casea-${System.nanoTime()}.example.com"
+        val b = "caseb-${System.nanoTime()}.example.com"
+        assertTrue(WarmHosts.tryClaim(a.uppercase()))
+        assertFalse(WarmHosts.tryClaim(a))
+        // A different host is a different claim.
+        assertTrue(WarmHosts.tryClaim(b))
+        WarmHosts.release(a)
+        WarmHosts.release(b)
+        // Blank hosts can never be claimed.
+        assertFalse(WarmHosts.tryClaim(""))
+        assertFalse(WarmHosts.tryClaim("  "))
     }
 
     @Test
