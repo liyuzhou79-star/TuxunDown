@@ -65,6 +65,33 @@ class DownloadService : Service() {
      *  failure with the portal wording on the card. */
     private val portalAttempts = java.util.concurrent.ConcurrentHashMap<String, Int>()
 
+    /**
+     * v4.4 (finalize pipeline): the serial finalize lane. When a
+     * transfer finishes, the download thread hands the task to
+     * this ONE lane thread — rename + whole-file hash verify +
+     * zip extract are disk work, done one at a time — and frees
+     * its maxConcurrent slot at once, so the next queued task
+     * starts immediately instead of waiting out a multi-GB hash.
+     * The lane's accounting lives in [finalizeGate] (see
+     * FinalizeGate for the invariants); the task's EngineClaims
+     * claim travels WITH the hand-off and is released only when
+     * the lane is done, exactly as the claim's contract states.
+     * Never shut down: the lane is daemon-threaded and scoped to
+     * the process, like TaskStore's save executor — stopping it
+     * with the service could interrupt an extract mid-file.
+     */
+    private val finalizeGate = FinalizeGate()
+    private val finalizeExecutor =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "finalize-lane").apply { isDaemon = true }
+        }
+
+    /** Thrown inside the extract progress callback when the
+     *  task's record was deleted mid-extract: ZipExtractor's own
+     *  failure handling rolls back the files it already wrote,
+     *  so a half-extracted tree is never left behind silently. */
+    private class FinalizeAborted : RuntimeException()
+
     /** v2.8: queue link pre-check thread (see LinkPrecheck).
      *  Runs only while the service lives; the loop is all
      *  runCatching — a pre-check must never disturb a download. */
@@ -523,8 +550,17 @@ class DownloadService : Service() {
                     store.save()
                 }
                 val th = Thread {
-                    runOne(task)
-                    rescheduleDailyIfNeeded(task)
+                    // v4.4 (finalize pipeline): when runOne handed
+                    // the task to the finalize lane, the daily
+                    // re-schedule decision travels with it — the
+                    // lane makes it AFTER finalize completes,
+                    // because finalize can still flip DONE to
+                    // FAILED (target gone) and a decision made
+                    // here would read a status that is not final
+                    // yet (and could reset a task whose extract
+                    // is still writing through its Uri).
+                    val handedOff = runOne(task)
+                    if (!handedOff) rescheduleDailyIfNeeded(task)
                 }
                 th.isDaemon = true
                 running[task.id] = th
@@ -532,6 +568,17 @@ class DownloadService : Service() {
             }
             val anyQueued = store.tasks.any { it.status == TaskStatus.QUEUED }
             if (running.isEmpty()) {
+                // v4.4 (finalize pipeline): a task whose transfer
+                // is done but whose finalize is still on the lane
+                // keeps the service alive, exactly like a deferred
+                // task does — falling through to stopSelf here
+                // would kill a hash verify / an extract mid-file.
+                // Poll briefly; the lane's completion path owns
+                // everything that happens next for that task.
+                if (finalizeGate.pendingCount() > 0) {
+                    try { Thread.sleep(500) } catch (e: InterruptedException) { break }
+                    continue
+                }
                 // v1.7 audit (B2): tasks that are eligible but blocked
                 // ONLY by the 仅 WiFi switch keep the service alive on
                 // a 5 s poll — when WiFi returns they start on their
@@ -577,7 +624,14 @@ class DownloadService : Service() {
                 val anyDeferred = store.tasks.any {
                     (it.netDeferred || it.portalDeferred) && it.status == TaskStatus.QUEUED
                 }
-                if (!anyQueued && !anyDeferred) break
+                // v4.4 (finalize pipeline): the exit verdict goes
+                // through FinalizeGate — pending finalize work
+                // vetoes the exit even if this pass somehow
+                // reached here without the wait above.
+                if (FinalizeGate.drainMayExit(
+                        anyQueued, anyDeferred, finalizeGate.pendingCount()
+                    )
+                ) break
                 if (anyDeferred &&
                     QueueOrder.nextEligible(store.tasks, System.currentTimeMillis()) == null
                 ) {
@@ -610,7 +664,10 @@ class DownloadService : Service() {
                 if (nextAt <= 0) {
                     // Nothing scheduled — but outage-parked tasks still
                     // need the callback alive, so wait instead of dying.
-                    if (anyDeferred) {
+                    // v4.4: pending finalize work is the same kind of
+                    // reason (defensive — the wait at the top of this
+                    // branch normally catches it first).
+                    if (anyDeferred || finalizeGate.pendingCount() > 0) {
                         try { Thread.sleep(5000) } catch (e: InterruptedException) { break }
                         continue
                     }
@@ -635,27 +692,38 @@ class DownloadService : Service() {
         stopSelf()
     }
 
-    /** Run one task to a terminal state, with automatic retries. */
-    private fun runOne(task: TaskRecord) {
+    /**
+     * Run one task to a terminal state, with automatic retries.
+     *
+     * Returns true when the task was handed to the finalize lane:
+     * the EngineClaims claim then travels with the hand-off (the
+     * lane releases it when finalize completes) and the caller
+     * must NOT make the daily re-schedule decision — the lane
+     * makes it after finalize, on the final status.
+     */
+    private fun runOne(task: TaskRecord): Boolean {
         // v2.1 audit (round 7, C1): claim the task for the WHOLE
         // invocation — transfer, retry backoff and finalize — so no
         // second runOne for this task can ever overlap it, whatever
         // thread or drain loop asks. A refused claim means another
         // run already owns the task; step aside silently.
-        if (!DownloadCenter.claimEngine(task.id)) return
+        if (!DownloadCenter.claimEngine(task.id)) return false
+        var handedOff = false
         try {
-            runOneClaimed(task)
+            handedOff = runOneClaimed(task)
         } finally {
-            DownloadCenter.releaseEngine(task.id)
+            if (!handedOff) DownloadCenter.releaseEngine(task.id)
         }
+        return handedOff
     }
 
-    private fun runOneClaimed(task: TaskRecord) {
+    /** True only on the DONE hand-off to the finalize lane. */
+    private fun runOneClaimed(task: TaskRecord): Boolean {
         val store = DownloadCenter.store
         while (true) {
             // The record may have been deleted from the UI in the
             // same instant we picked it up; never download a ghost.
-            if (store.byId(task.id) == null) return
+            if (store.byId(task.id) == null) return false
             // v2.1 audit (C4): the user can tap pause in the instant
             // between the drain loop picking this task and this
             // thread starting — the engine is not registered yet, so
@@ -664,7 +732,7 @@ class DownloadService : Service() {
             // anyway. A first entry must still find the task QUEUED
             // (the retry loop re-enters through its own QUEUED set
             // below); PAUSED here is the user's intent — honour it.
-            if (task.status == TaskStatus.PAUSED) return
+            if (task.status == TaskStatus.PAUSED) return false
             task.status = TaskStatus.RUNNING
             // v2.8: the real run supersedes any pre-check warning —
             // the engine's own probe is about to give the true
@@ -801,7 +869,7 @@ class DownloadService : Service() {
                 // whose record (and target) are already gone. Any
                 // delete arriving after this point sees the task
                 // RUNNING and routes through cancelTask instead.
-                if (store.byId(task.id) == null) return
+                if (store.byId(task.id) == null) return false
                 val runResult = engine.run()
                 if (DownloadCenter.consumeCancelled(task)) {
                     // Audit A7: the user deleted this task while it
@@ -810,7 +878,7 @@ class DownloadService : Service() {
                     // the record.
                     PublicStorage.deleteTarget(this, task)
                     store.remove(task)
-                    return
+                    return false
                 }
                 // v2.1 audit (C9): decide completion from the
                 // engine's RETURNED status, not the shared field —
@@ -824,6 +892,21 @@ class DownloadService : Service() {
                     task.status = TaskStatus.DONE
                     netAttempts.remove(task.id)
                     portalAttempts.remove(task.id)
+                    // v4.4 (finalize pipeline): the transfer is
+                    // done — hand finalize (rename + verify +
+                    // extract + completion side effects, the
+                    // WHOLE finalizeFinished body) to the serial
+                    // lane and free this download slot NOW, so the
+                    // next queued task starts without waiting out
+                    // a whole-file hash or a big unzip. The claim
+                    // travels with the hand-off (runOne sees the
+                    // true return and does not release it; the
+                    // lane releases it at the end).
+                    if (submitFinalize(task)) return true
+                    // The lane refused the hand-off (a duplicate
+                    // submit — impossible while the claim is held,
+                    // kept as a defensive fallback): finalize
+                    // inline, exactly as before v4.4.
                     finalizeFinished(task)
                     // v2.1 audit (C3): a delete tap that landed
                     // DURING finalize (after the check above) used
@@ -835,7 +918,7 @@ class DownloadService : Service() {
                     if (DownloadCenter.consumeCancelled(task)) {
                         store.remove(task)
                     }
-                    return
+                    return false
                 }
             } finally {
                 DownloadCenter.unregisterEngine(task)
@@ -871,7 +954,7 @@ class DownloadService : Service() {
                         task.fileName,
                         Format.percent(task.progress),
                     )
-                    return
+                    return false
                 }
                 portalAttempts.remove(task.id)
             }
@@ -901,7 +984,7 @@ class DownloadService : Service() {
                         task.fileName,
                         Format.percent(task.progress),
                     )
-                    return
+                    return false
                 }
                 netAttempts.remove(task.id)
             }
@@ -916,7 +999,7 @@ class DownloadService : Service() {
                 RetryPolicy.needsUserAction(task.error) ||
                 !RetryPolicy.shouldRetry(task.autoRetriesUsed, limit)
             ) {
-                return
+                return false
             }
             val waitMs = RetryPolicy.backoffMs(task.autoRetriesUsed)
             task.autoRetriesUsed++
@@ -928,7 +1011,7 @@ class DownloadService : Service() {
                 "${task.fileName} · 第 ${task.autoRetriesUsed}/$limit 次",
                 Format.percent(task.progress),
             )
-            if (!sleepBackoff(waitMs, task)) return
+            if (!sleepBackoff(waitMs, task)) return false
             // v2.1 audit (round 7, C2): a delete that landed DURING
             // the backoff went unnoticed here — the record is still
             // present (the service owns its deletion) and the status
@@ -940,11 +1023,11 @@ class DownloadService : Service() {
             if (DownloadCenter.consumeCancelled(task)) {
                 PublicStorage.deleteTarget(this, task)
                 store.remove(task)
-                return
+                return false
             }
             // If the user took over meanwhile (paused / re-queued /
             // deleted), step aside and let the normal flow own it.
-            if (store.byId(task.id) == null || task.status != TaskStatus.FAILED) return
+            if (store.byId(task.id) == null || task.status != TaskStatus.FAILED) return false
             task.status = TaskStatus.QUEUED
             task.error = ""
         }
@@ -1017,13 +1100,92 @@ class DownloadService : Service() {
     }
 
     /**
+     * v4.4 (finalize pipeline): hand a DONE task to the serial
+     * finalize lane. True when the lane took it — the caller then
+     * returns at once (its download slot is free) and the lane
+     * owns the rest of this task's lifecycle: finalize, the
+     * delete-during-finalize honouring, the daily re-schedule
+     * decision, the gate accounting and the claim release.
+     * False when the lane refused (duplicate submit, or the
+     * executor rejected the job) — the caller finalizes inline
+     * instead, so a DONE task is never stranded.
+     */
+    private fun submitFinalize(task: TaskRecord): Boolean {
+        if (!finalizeGate.submit(task.id)) return false
+        val accepted = runCatching {
+            finalizeExecutor.execute { finalizeLane(task) }
+        }.isSuccess
+        if (!accepted) {
+            finalizeGate.complete(task.id)
+            return false
+        }
+        return true
+    }
+
+    /**
+     * The lane's per-task job, in the same order the inline path
+     * used: finalize first, then honour a delete that landed
+     * during finalize, then — and only then — the daily
+     * re-schedule decision, which now reads the FINAL status
+     * (finalize can flip DONE to FAILED when the target is gone).
+     * The gate mark and the engine claim are released last, in
+     * that order reversed: the drain may only observe "no
+     * pending finalize" after every decision above is visible.
+     */
+    private fun finalizeLane(task: TaskRecord) {
+        val store = DownloadCenter.store
+        try {
+            // Milestone 0: a delete that landed before the lane
+            // even started removed the record (DONE-card
+            // semantics: the record goes, the file stays). There
+            // is nothing to finalize FOR — skip the whole body;
+            // the checks below still drain a stale cancel flag
+            // and the daily decision self-guards on byId.
+            if (store.byId(task.id) != null) {
+                finalizeFinished(task)
+            }
+            // v2.1 audit (C3), moved with the pipeline: a delete
+            // tap that landed DURING finalize is honoured now —
+            // the record goes away, the finished file stays,
+            // exactly the semantics of deleting a DONE card.
+            if (DownloadCenter.consumeCancelled(task)) {
+                store.remove(task)
+            }
+            rescheduleDailyIfNeeded(task)
+        } finally {
+            finalizeGate.complete(task.id)
+            DownloadCenter.releaseEngine(task.id)
+        }
+    }
+
+    /**
      * The bytes are already in the public folder as "<name>.part";
      * finishing is just an in-place rename to the real name.
+     *
+     * v4.4: this whole body runs on the finalize lane (see
+     * [submitFinalize]), never on a download thread — including
+     * the completion side effects at its end, so they still fire
+     * only after rename + verify + extract are all done. The
+     * lane checks the record still exists at its milestones: a
+     * delete landing mid-finalize removes the record directly
+     * (DONE-card semantics), and a vanished record stops the
+     * remaining work — most importantly the completion side
+     * effects — instead of celebrating a card the user removed.
      */
     private fun finalizeFinished(task: TaskRecord) {
         val store = DownloadCenter.store
         try {
             val displayName = PublicStorage.finalizeTarget(this, task)
+            // v4.4 milestone: the record was deleted while the
+            // rename ran (DONE-card semantics — the renamed file
+            // stays, as it should). Nothing remains to verify,
+            // extract or celebrate for a card that is gone; the
+            // flush below keeps the store at least as current
+            // as the inline path ever did.
+            if (store.byId(task.id) == null) {
+                store.saveNow()
+                return
+            }
             // v2.6: with 按类型分文件夹 on, the note names the
             // category subfolder the file actually landed in.
             val subFolder = PublicStorage.categoryFolderOf(this, task)
@@ -1074,11 +1236,33 @@ class DownloadService : Service() {
                         " 校验没对上，没有自动解压；确认文件没问题后可手动解压。"
                 } else {
                     val res = ZipExtractor.extract(this, task) { count ->
+                        // v4.4 milestone: the record was deleted
+                        // mid-extract. Abort by throwing — the
+                        // extractor's own failure path rolls back
+                        // the files it already wrote through the
+                        // task's Uri, so the half-extracted tree
+                        // is cleaned up instead of being orphaned
+                        // silently. (The progress callback fires
+                        // every 25 files; a single huge entry
+                        // still finishes its own stream first —
+                        // the milestone after extract catches the
+                        // delete before any side effect fires.)
+                        if (store.byId(task.id) == null) throw FinalizeAborted()
                         task.note = "$note 正在自动解压：已解出 $count 个文件…"
                         store.save()
                     }
                     task.note = "$note ${res.text}"
                 }
+            }
+            // v4.4 milestone (the side-effect gate): a delete
+            // that landed during verify / extract removed the
+            // record — the completion notification, the stats,
+            // the feedback and the auto-action below must NOT
+            // fire for it (see FinalizeGate). The finished file
+            // stays, per DONE-card delete semantics.
+            if (!FinalizeGate.mayFireCompletionSideEffects(store.byId(task.id) != null)) {
+                store.saveNow()
+                return
             }
             notifyCompletion(task, displayName)
             // v1.6: feed the statistics screen (local counters).
