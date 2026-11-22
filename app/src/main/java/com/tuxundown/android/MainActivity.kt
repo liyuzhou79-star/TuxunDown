@@ -313,7 +313,23 @@ object WinPalette {
     val TrackLight = Color(0xFFE1E1E1)
     val TrackDark = Color(0xFF3F3F3F)
     val GrayText = Color(0xFF767676)
+    // v2.9 (audit round 15): ChartGreen (#1F9D2C) on a light
+    // background is ~3.5:1 — fine for charts, bars and the big
+    // bold speed readouts (large text / graphics), NOT for
+    // normal-size status TEXT. TextGreen is ~6.6:1 on white.
+    val TextGreen = Color(0xFF146C1E)
 }
+
+/**
+ * v2.9 (audit round 15): the green for normal-size status
+ * text — ChartGreen in dark theme (~5.9:1 on black), the
+ * darker TextGreen in light theme (~6.6:1 on white). Both
+ * clear WCAG AA's 4.5:1 for body text; the bright greens
+ * stay on graphics, where 3:1 is the bar.
+ */
+@androidx.compose.runtime.Composable
+fun statusTextGreen(): Color =
+    if (isSystemInDarkTheme()) WinPalette.ChartGreen else WinPalette.TextGreen
 
 /** File-type badge colors (v1.4 item 8), readable in both themes. */
 fun kindColor(kind: String): Color = when (kind) {
@@ -1835,8 +1851,13 @@ fun DownApp() {
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    // v2.9 (audit 15): a bare text
+                                    // link was a ~24 dp touch
+                                    // target; give it the 48 dp
+                                    // minimum like every button.
+                                    .heightIn(min = 48.dp)
                                     .clickable { urlText = h }
-                                    .padding(vertical = 4.dp),
+                                    .padding(vertical = 16.dp),
                             )
                         }
                     }
@@ -2155,7 +2176,11 @@ fun DownApp() {
             onDismissRequest = { sourcesTask = null },
             title = { Text("镜像源（多源并下）") },
             text = {
-                Column {
+                // v2.9 (audit 15): editor dialogs scroll their
+                // content — at 1.3x font scale on a small phone
+                // the un-scrolled column could push the buttons
+                // off the bottom of the dialog.
+                Column(Modifier.verticalScroll(rememberScrollState())) {
                     Text(
                         "主地址：${st.url}",
                         style = MaterialTheme.typography.bodySmall,
@@ -2236,7 +2261,7 @@ fun DownApp() {
                             else -> "没认出来：长度不对或含有非十六进制字符"
                         },
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (detected != null) WinPalette.ChartGreen
+                        color = if (detected != null) statusTextGreen()
                         else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -2311,7 +2336,7 @@ fun DownApp() {
             onDismissRequest = { headersTask = null },
             title = { Text("请求头") },
             text = {
-                Column {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
                     Text(
                         "这个任务每次连接服务器时带上的请求头，一行一个，格式是「名字: 值」。" +
                             "改完保存后，之后新建的连接就会用新的（暂停再继续最稳妥）。" +
@@ -2378,7 +2403,7 @@ fun DownApp() {
             onDismissRequest = { noteTask = null },
             title = { Text("备注") },
             text = {
-                Column {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
                     Text(
                         "给这个任务写一句你自己的备注，方便以后找——比如「给娃下的课件」。" +
                             "备注只存在这台手机里，跟着任务一起进备份；主页搜索框里搜备注内容也能找到它。",
@@ -4703,7 +4728,11 @@ fun TaskCard(
             } else if (swipeOffset.value < -8f && swipeLabel.isNotBlank()) {
                 Text(
                     "松开$swipeLabel",
-                    color = if (swipeLabel == "暂停") Color.Black else Color.White,
+                    // v2.9 (audit 15): both backgrounds here are
+                    // light (Yellow / Green #06B025 ≈ 2.9:1 with
+                    // white text) — black text clears 4.5:1 on
+                    // both. White stays only on the Red side.
+                    color = Color.Black,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.align(Alignment.CenterEnd).padding(end = 18.dp),
                 )
@@ -4796,7 +4825,7 @@ fun TaskCard(
                         style = MaterialTheme.typography.bodyMedium,
                         color = when (task.status) {
                             TaskStatus.FAILED -> WinPalette.Red
-                            TaskStatus.DONE -> WinPalette.ChartGreen
+                            TaskStatus.DONE -> statusTextGreen()
                             else -> MaterialTheme.colorScheme.onSurfaceVariant
                         },
                     )
