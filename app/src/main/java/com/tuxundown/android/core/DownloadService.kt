@@ -1065,11 +1065,18 @@ class DownloadService : Service() {
     private fun notifyCompletion(task: TaskRecord, displayName: String) {
         runCatching {
             val now = System.currentTimeMillis()
+            // v4.1: finished size for the notification detail.
+            // Same yardstick as the statistics counter
+            // (DownloadCenter.recordCompletion): the declared
+            // total when known, else the bytes actually written
+            // — for HLS the total is never declared, and
+            // downloaded IS the merged file's size.
+            val sizeBytes = if (task.totalSize > 0) task.totalSize else task.downloaded
             val merged: List<CompletionMerge.Done>
             synchronized(completionLock) {
                 recentCompletions = CompletionMerge.add(
                     recentCompletions,
-                    CompletionMerge.Done(displayName, task.savedUri, now),
+                    CompletionMerge.Done(displayName, task.savedUri, now, sizeBytes),
                     now,
                 )
                 merged = recentCompletions
@@ -1082,7 +1089,7 @@ class DownloadService : Service() {
                     .setContentText("都已保存到下载目录，点开查看")
                     .setStyle(
                         NotificationCompat.BigTextStyle()
-                            .bigText(CompletionMerge.lines(merged))
+                            .bigText(CompletionMerge.summaryText(merged))
                     )
                     .setContentIntent(appPendingIntent())
                     .setAutoCancel(true)
@@ -1094,6 +1101,24 @@ class DownloadService : Service() {
                     .setContentText(displayName)
                     .setContentIntent(appPendingIntent())
                     .setAutoCancel(true)
+                // v4.1: expanded view gains the size + whole-run
+                // average speed line under the file name. The
+                // average is task.avgBps — the same number the
+                // task card's 平均速度 row and the statistics
+                // screen use (bytes over the engine's accumulated
+                // RUN time; the gaps between runs, e.g. while
+                // paused, are never counted — see DownloadEngine's
+                // elapsedMs accumulation). It is final here: the
+                // engine run has returned before finalizeFinished
+                // runs. No detail (size and speed both unknown)
+                // = no style, the notification stays as it was.
+                val detail = CompletionMerge.detailLine(sizeBytes, task.avgBps)
+                if (detail.isNotEmpty()) {
+                    b.setStyle(
+                        NotificationCompat.BigTextStyle()
+                            .bigText("$displayName\n$detail")
+                    )
+                }
                 completionOpenIntent(task, displayName)?.let { open ->
                     val label =
                         if (displayName.endsWith(".apk", ignoreCase = true)) {

@@ -65,6 +65,52 @@ class CompletionMergeTest {
         assertEquals("a.zip\nb.zip\nc.zip", CompletionMerge.lines(list))
     }
 
+    private fun doneSized(name: String, at: Long, sizeBytes: Long) =
+        CompletionMerge.Done(name, "content://x/$name", at, sizeBytes)
+
+    @Test
+    fun detailLineShowsSizeAndAverageSpeed() {
+        // 12.0 MB at exactly 4.0 MB/s average.
+        assertEquals(
+            "12.0 MB · 平均 4.0 MB/秒",
+            CompletionMerge.detailLine(12L * 1024 * 1024, 4L * 1024 * 1024),
+        )
+    }
+
+    @Test
+    fun detailLineOmitsUnknownParts() {
+        assertEquals(
+            "12.0 MB",
+            CompletionMerge.detailLine(12L * 1024 * 1024, 0),
+        )
+        assertEquals(
+            "平均 4.0 MB/秒",
+            CompletionMerge.detailLine(-1, 4L * 1024 * 1024),
+        )
+        // Both unknown: no line at all (the caller then posts
+        // the plain notification, never a misleading number).
+        assertEquals("", CompletionMerge.detailLine(-1, 0))
+        assertEquals("", CompletionMerge.detailLine(0, 0))
+    }
+
+    @Test
+    fun totalSizeNeedsEverySizeKnown() {
+        var list = emptyList<CompletionMerge.Done>()
+        list = CompletionMerge.add(list, doneSized("a.zip", 0, 1024), 0)
+        list = CompletionMerge.add(list, doneSized("b.zip", 5_000, 2048), 5_000)
+        assertEquals(3072L, CompletionMerge.totalSizeBytes(list))
+        assertEquals(
+            "a.zip\nb.zip\n共 3.0 KB",
+            CompletionMerge.summaryText(list),
+        )
+        // One unknown size suppresses the total entirely —
+        // a partial sum would read as the real total.
+        list = CompletionMerge.add(list, done("c.zip", 10_000), 10_000)
+        assertEquals(-1L, CompletionMerge.totalSizeBytes(list))
+        assertEquals("a.zip\nb.zip\nc.zip", CompletionMerge.summaryText(list))
+        assertEquals(-1L, CompletionMerge.totalSizeBytes(emptyList()))
+    }
+
     @Test
     fun staleEntriesFallOutOfTheWindow() {
         var list = emptyList<CompletionMerge.Done>()
