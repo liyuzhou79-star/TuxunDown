@@ -124,6 +124,7 @@ import com.tuxundown.android.core.PublicStorage
 import com.tuxundown.android.core.ScheduleTime
 import com.tuxundown.android.core.SpeedSchedule
 import com.tuxundown.android.core.SpeedCompare
+import com.tuxundown.android.core.SpeedHistory
 import com.tuxundown.android.core.SpeedTest
 import com.tuxundown.android.core.SpeedVerdict
 import com.tuxundown.android.core.TaskHeaders
@@ -4130,6 +4131,13 @@ fun SpeedTestScreen(onBack: () -> Unit) {
         mutableStateOf<List<SpeedCompare.PointResult>>(emptyList())
     }
     var showCompareConfirm by remember { mutableStateOf(false) }
+    // ---- v4.1: quick-test history (last 10, local only) ----
+    // Held as Compose state and RE-READ from the store when a
+    // test finishes (see startTest's final post): the fresh list
+    // instance makes the history item recompose immediately —
+    // the v4.0 liveTick lesson (in-place mutation of an equal
+    // list would be skipped as "unchanged").
+    var history by remember { mutableStateOf(DownloadCenter.speedHistory()) }
     // Leaving the screen stops the test (it would keep burning
     // data in the background otherwise).
     DisposableEffect(Unit) {
@@ -4174,6 +4182,23 @@ fun SpeedTestScreen(onBack: () -> Unit) {
                     post { liveBps = b }
                 }
                 if (!test.cancelled) {
+                    // v4.1: a completed quick test (both phases
+                    // moved bytes AND a verdict was reached —
+                    // verdict() is null otherwise) joins the
+                    // local history. The multi-point comparison
+                    // below deliberately does NOT record: its
+                    // phases run shorter and cover dead points
+                    // too, a different口径 whose numbers are not
+                    // comparable with a quick test's.
+                    val v = SpeedVerdict.verdict(s.bps, m.bps)
+                    if (v != null) {
+                        DownloadCenter.recordSpeedTest(
+                            SpeedHistory.Entry(
+                                System.currentTimeMillis(),
+                                ep.label, s.bps, m.bps, v,
+                            ),
+                        )
+                    }
                     post {
                         multiBps = m.bps
                         multiWindowMs = m.windowMs
@@ -4184,6 +4209,9 @@ fun SpeedTestScreen(onBack: () -> Unit) {
             }
             post {
                 running = false
+                // v4.1: re-read the history so a just-recorded
+                // entry shows up the moment the test completes.
+                history = DownloadCenter.speedHistory()
                 phase = when {
                     test.cancelled -> "已停止"
                     finished -> "测速完成"
@@ -4424,6 +4452,44 @@ fun SpeedTestScreen(onBack: () -> Unit) {
                         ) {
                             Text(if (compareResults.isEmpty()) "多点对比测速" else "再对比一次")
                         }
+                    }
+                }
+            }
+        }
+        // ---- v4.1: quick-test history (last 10, this device
+        // only — never part of a backup; the multi-point
+        // comparison above does not record here, different口径).
+        // The whole section hides itself while there is nothing
+        // to show.
+        if (history.isNotEmpty()) {
+            item(key = "sp-history") {
+                SettingsGroup("测速历史（最近 ${history.size} 次）") {
+                    Text(
+                        "只记上面的快速测速，多点对比不记（口径不同，混在一起会误导）。" +
+                            "记录只存这台手机，不进备份。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    history.forEach { e ->
+                        Text(
+                            "${Format.dateTime(e.atMs)} · ${e.pointLabel}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            "单线程 ${Format.speed(e.singleBps)} · " +
+                                "多线程 ${Format.speed(e.multiBps)} · " +
+                                SpeedHistory.verdictShort(e.verdict),
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(bottom = 8.dp),
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = {
+                            DownloadCenter.clearSpeedHistory()
+                            history = DownloadCenter.speedHistory()
+                        }) { Text("清空历史") }
                     }
                 }
             }

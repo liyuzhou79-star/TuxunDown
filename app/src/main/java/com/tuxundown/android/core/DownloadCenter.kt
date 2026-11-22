@@ -750,6 +750,29 @@ object DownloadCenter {
         saveHostEntries(HostMemory.parse(text))
     }
 
+    // ---- v4.1: speed-test history — LOCAL ONLY. The key below
+    // is deliberately absent from settingsSnapshotJson AND
+    // statsSnapshotJson, so neither backup shape (v1.8 backup /
+    // v3.6 migration pack) ever carries it: Backup only wraps
+    // the snapshots it is handed. A speed measurement describes
+    // this device on this network; it does not migrate.
+
+    /** The stored quick-test history, newest first (max 10). */
+    fun speedHistory(): List<SpeedHistory.Entry> =
+        SpeedHistory.parse(pString("speedHistory", ""))
+
+    /** Record one completed quick test (see SpeedHistory for
+     *  what counts as completed; the caller checks the verdict). */
+    fun recordSpeedTest(entry: SpeedHistory.Entry) {
+        val next = SpeedHistory.add(speedHistory(), entry)
+        prefs().edit().putString("speedHistory", SpeedHistory.serialize(next)).apply()
+    }
+
+    /** One-tap clear from the speed-test screen. */
+    fun clearSpeedHistory() {
+        prefs().edit().remove("speedHistory").apply()
+    }
+
     /**
      * v2.8: set (or clear) the user's own note on a task. The
      * text is sanitized here (trim + length cap) so every writer
