@@ -591,7 +591,7 @@ fun DownApp() {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "4.7.0"
+        }.getOrNull() ?: "4.8.0"
     }
     var showGuide by remember {
         // v2.2 safe mode: after 2+ consecutive crashes, first-
@@ -6619,9 +6619,9 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 登录状态只发给原站，更安全：有些下载要带上你在网站上的登录状态（Cookie）才能下。以前用镜像加速、或服务器把下载跳转到别的站点时，这份登录状态也会被一起带过去。现在改成只发给链接本身的那个站点：镜像和跳转不会再带上你在原站的登录状态；该带的地方照常带，下载不受影响\n" +
-            "· 相邻的小分片合并下，更利落：文件切出的小块，以前每一小块都要单独发一次请求。现在相邻的几小块会合并成一次请求一起下完，请求次数少了，来回等待也少了；万一中途断了，最多重下这一小段，不影响已经下好的部分\n" +
-            "· 扫码入口和其它入口走同一道检查：扫二维码加链接时，现在会和粘贴链接一样，先检查这个链接是不是支持的类型，不支持的当场说明，不会建出一个下不了的任务",
+            "· FTP 也能多连接分片下了：以前 FTP 链接只有一条连接慢慢下。现在服务器支持断点续传时，最多 8 条连接同时下，卡片上会写明；不支持的服务器照旧单连接，卡片也会写清原因。以前用 FTP 下到一半的任务，升级后能接着下，不用重来\n" +
+            "· 排队按站点轮转，不再被同站长队饿着：同时下载个数有限时，以前排在前面的任务先下完才轮到后面的，一长串同一个网站的任务会把其它网站的任务一直往后挤。现在同优先级里不同网站轮流开始，一个网站下完一个，就先让另一个网站的任务上；你手动插队的任务仍然最优先\n" +
+            "· 任务记录和备份的一致性核对了一遍：最近几版陆续加的新字段（失败类型、峰值连接数、各下载源下了多少、速度记录等）逐项核对了存取和备份导入，老任务、老备份导进来都完整；顺带修了几个坏数据的小毛病，比如某个请求头写坏会连累整条任务记录丢失、重试计数被写成负数会多重试，现在都只跳过或修正坏的那一项",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
             "· 文件直链 → 直接开始多线程下载，还能预先改好保存文件名\n" +
@@ -7680,7 +7680,7 @@ fun TaskCard(
                     val version = runCatching {
                         ctx.packageManager.getPackageInfo(ctx.packageName, 0)
                             .versionName
-                    }.getOrNull() ?: "4.7.0"
+                    }.getOrNull() ?: "4.8.0"
                     val cm = ctx.getSystemService(
                         android.content.Context.CLIPBOARD_SERVICE,
                     ) as android.content.ClipboardManager
