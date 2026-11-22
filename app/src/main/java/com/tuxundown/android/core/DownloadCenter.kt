@@ -292,10 +292,14 @@ object DownloadCenter {
 
     /** How many connections a task could use with no global
      *  cap in the way: segmented tasks scale up to
-     *  MAX_THREADS, HLS pulls segments HLS_PARALLEL at a time,
-     *  single-stream and FTP runs hold exactly one. */
+     *  MAX_THREADS, HLS fetches segments up to
+     *  HLS_MAX_PARALLEL at a time (v4.3: the adaptive width's
+     *  ceiling — the desire is what the task COULD use, so the
+     *  accounting reserves for the max, not the fixed 4 it
+     *  used before), single-stream and FTP runs hold exactly
+     *  one. */
     private fun connectionDesireOf(t: TaskRecord): Int = when {
-        t.isHls -> DownloadEngine.HLS_PARALLEL
+        t.isHls -> DownloadEngine.HLS_MAX_PARALLEL
         t.singleThreadOnly -> 1
         FtpClient.isFtpUrl(t.url) -> 1
         else -> DownloadEngine.MAX_THREADS

@@ -1770,6 +1770,35 @@ class DownloadEngine(
         }
         if (offset == 0L) target.truncate(0)
 
+        // v4.3: adaptive HLS fetch width (see HlsPlan for the
+        // full rule table). The plan is fixed for the run from
+        // the host's remembered optimum / rate-limit cap; the
+        // scaler re-judges the live width on the sampler tick
+        // below; the global connection allowance is re-read on
+        // the same tick and applied as a gate — never baked into
+        // the plan, because it changes as other tasks come and
+        // go. Before v4.3 this path used a fixed pool of 4 and
+        // never read the allowance at all.
+        val hlsPlan = HlsPlan.plan(
+            hint = initialThreadsHint,
+            cap = initialThreadsCap,
+            totalSegments = segments.size,
+        )
+        val hlsScaler = HlsScaler(hlsPlan.startWidth, hlsPlan.maxWidth)
+        /** The gated live width the writer loop's submit window
+         *  reads; rewritten by the sampler tick every second. */
+        val hlsLiveWidth = AtomicInteger(hlsPlan.startWidth)
+        /** Set by the writer loop whenever it reaches a segment
+         *  whose fetch has not finished yet — the scaler's
+         *  fetch-bound evidence; the sampler tick consumes and
+         *  clears it. */
+        val hlsStarved = AtomicInteger(0)
+        var hlsLastRetryCount = task.retryCount
+        // task.threads is the card's live connection display
+        // (the same field the segmented path keeps equal to its
+        // scaler target); for HLS it carries the live width.
+        task.threads = hlsPlan.startWidth
+
         // Speed sampler on the same fixed 1 s grid as the other
         // paths (guards included; the traffic guard cannot block
         // here — an HLS total is unknowable before the last segment,
@@ -1803,6 +1832,30 @@ class DownloadEngine(
                 task.speedBps = if (task.speedBps == 0L) speed else (task.speedBps * 3 + speed) / 4
                 recordSpeed(task.speedBps)
                 task.downloaded = bytes
+                // v4.3: re-read the global allowance and re-judge
+                // the HLS width on this same tick (no new thread —
+                // the segmented path drives its scaler from its
+                // sampler in exactly the same way). While the CAP
+                // is what binds (allowance below the scaler's
+                // width), the scaler is NOT evaluated: its
+                // verdicts judge starvation/speed deltas, and a
+                // delta the cap caused — another task starting or
+                // finishing — would be misread as this host
+                // speeding up or slowing down. The evidence is
+                // still consumed so a stale starved/retry signal
+                // cannot fire the moment the cap lifts; the gated
+                // width simply holds until then.
+                connAllowance = connectionAllowance()
+                val retryDelta = task.retryCount - hlsLastRetryCount
+                hlsLastRetryCount = task.retryCount
+                val starved = hlsStarved.getAndSet(0) == 1
+                if (connAllowance >= hlsScaler.width) {
+                    hlsScaler.onTick(task.speedBps, starved, retryDelta)
+                }
+                val gatedWidth = HlsPlan.gate(hlsScaler.width, connAllowance)
+                hlsLiveWidth.set(gatedWidth)
+                task.threads = gatedWidth
+                task.connCapHeld = connAllowance < hlsScaler.width
                 lastBytes = bytes
                 lastTime = now
                 onProgress(task)
@@ -1860,17 +1913,27 @@ class DownloadEngine(
             throw lastError ?: IllegalStateException("分片下载失败")
         }
 
-        val pool = java.util.concurrent.Executors.newFixedThreadPool(HLS_PARALLEL) { r ->
+        // v4.3: the pool is sized ONCE to the plan's MAX width;
+        // scaling never rebuilds it — the submit window below
+        // (writeIndex + live width) is what actually gates how
+        // many fetches run at once, so a narrower live width
+        // simply leaves pool threads idle.
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(hlsPlan.maxWidth) { r ->
             Thread(r).apply { isDaemon = true }
         }
-        // v1.7 perf: in-flight BYTE budget. The window alone (6
-        // segments) does not bound memory: each segment may be up to
-        // MAX_SEGMENT_BYTES (64 MB), so six finished-but-unwritten
-        // segments could theoretically pin ~384 MB. Fetched bytes now
-        // count against a ~48 MB budget; prefetch pauses while the
-        // buffer is over budget and resumes as the writer drains it.
-        // The segment AT the write cursor is always submittable, so
-        // the writer can never starve waiting for a fetch the budget
+        // v1.7 perf: in-flight BYTE budget. The window alone does
+        // not bound memory: each segment may be up to
+        // MAX_SEGMENT_BYTES (64 MB), so a window of finished-but-
+        // unwritten segments could theoretically pin hundreds of
+        // MB. Fetched bytes now count against a ~48 MB budget;
+        // prefetch pauses while the buffer is over budget and
+        // resumes as the writer drains it. The segment AT the
+        // write cursor is always submittable — the byte budget
+        // exempts it (submitIndex == writeIndex below) and the
+        // width gate can never close on it either, because the
+        // gated live width has a floor of 1 (HlsPlan.gate), so
+        // writeIndex itself is always inside the window. The
+        // writer can never starve waiting for a fetch the gates
         // refused to start.
         val bufferedBytes = AtomicLong(0)
         var failure: Exception? = null
@@ -1879,7 +1942,7 @@ class DownloadEngine(
             var submitIndex = writeIndex
             while (writeIndex < segments.size && !stopped()) {
                 while (submitIndex < segments.size &&
-                    submitIndex < writeIndex + HLS_WINDOW && !stopped() &&
+                    submitIndex < writeIndex + hlsLiveWidth.get() && !stopped() &&
                     (submitIndex == writeIndex ||
                         bufferedBytes.get() < HLS_BUFFER_BUDGET_BYTES)
                 ) {
@@ -1894,6 +1957,10 @@ class DownloadEngine(
                     submitIndex++
                 }
                 val f = futures.remove(writeIndex) ?: break
+                // v4.3: the writer reached a segment whose fetch
+                // has not landed — fetch-bound evidence for the
+                // scaler, consumed by the next sampler tick.
+                if (!f.isDone) hlsStarved.set(1)
                 val data = try {
                     f.get()
                 } catch (e: java.util.concurrent.ExecutionException) {
@@ -2315,10 +2382,17 @@ class DownloadEngine(
          *  detected separately, so a higher budget is safe. */
         const val MAX_REDIRECTS = 10
         const val STALL_EVICT_MS = 12_000L
-        /** v1.6 HLS: segments in flight / prefetch window / size cap. */
-        const val HLS_PARALLEL = 4
-        const val HLS_WINDOW = 6
+        /** v1.6 HLS segment size cap. */
         const val MAX_SEGMENT_BYTES = 64 * 1024 * 1024
+        /** v4.3: the widest an HLS fetch pool may ever get (see
+         *  HlsPlan for why 16: segments are small and short, the
+         *  sequential writer and the ~48 MB in-flight budget bind
+         *  long before width past this pays, and more mostly
+         *  invites per-IP rate limiting). Replaces the pre-v4.3
+         *  fixed HLS_PARALLEL = 4 / HLS_WINDOW = 6 pair — the
+         *  pool is now sized to this max and the live width
+         *  (plan + scaler + allowance gate) is the window. */
+        const val HLS_MAX_PARALLEL = 16
         /** v1.7: cap on fetched-but-unwritten HLS segment bytes. */
         const val HLS_BUFFER_BUDGET_BYTES = 48L * 1024 * 1024
 
