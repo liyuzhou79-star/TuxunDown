@@ -1,5 +1,6 @@
 package com.tuxundown.android
 
+import com.tuxundown.android.core.Checksum
 import com.tuxundown.android.core.TaskRecord
 import com.tuxundown.android.core.TaskStatus
 import com.tuxundown.android.core.TaskStore
@@ -79,6 +80,22 @@ class TaskStoreJsonTest {
         assertEquals(3000L, r.downloaded)
         // Progress is the merged-segment fraction for HLS tasks.
         assertEquals(0.5f, r.progress, 0.001f)
+    }
+
+    @Test
+    fun interruptedVerifyResetsToUncheckedNeverToAVerdict() {
+        // v3.2 audit round 18 (VERIFYING x process-kill cell): a
+        // task saved mid-verification was interrupted, not judged.
+        // The load must reset the state to "not checked" — never
+        // leave it at VERIFYING (a spinner forever) and never let
+        // it become a verdict the bytes never earned. The DONE
+        // itself is honest: verification only starts after the
+        // last byte landed and the file was renamed.
+        val t = TaskRecord(url = "https://a.b/c.bin", status = TaskStatus.DONE)
+        t.checksumState = Checksum.STATE_VERIFYING
+        val back = TaskStore.deserialize(TaskStore.serialize(listOf(t)))
+        assertEquals(Checksum.STATE_NONE, back[0].checksumState)
+        assertEquals(TaskStatus.DONE, back[0].status)
     }
 
     @Test

@@ -296,7 +296,19 @@ class DownloadEngine(
             // v2.2 audit round 8: never show a raw class name or an
             // English library message on the card — Errors.human
             // keeps our own plain sentences and maps the rest.
-            task.error = Errors.human(e)
+            // v3.2 audit round 18: a full disk reaches this catch
+            // from the HLS / single-stream / FTP paths as a bare
+            // IOException, which Errors.human would call a network
+            // problem ("换个网络") — wrong advice that sends the
+            // user debugging their router while the disk is full.
+            // The segmented path already special-cases it per
+            // chunk (downloadActive); give the other paths the
+            // same sentence here.
+            task.error = if (isStorageFull(e)) {
+                "手机存储空间不足，下载已停下。清出空间后点继续即可续传。"
+            } else {
+                Errors.human(e)
+            }
             task.status = if (paused) TaskStatus.PAUSED else TaskStatus.FAILED
             return task.status
         } finally {
@@ -581,6 +593,30 @@ class DownloadEngine(
 
     private fun runSegmented(): TaskStatus {
         val total = task.totalSize
+        // v3.2 audit round 18: the bitmap is only half the resume
+        // state — the other half is the .part file itself. This
+        // path pre-sizes the part to the full length (see the
+        // truncate below), so a part that measures SHORTER than
+        // the total while chunks are marked done has lost bytes
+        // behind our back (content deleted / truncated in place
+        // under the same Uri — the vanished-Uri case is already
+        // reset inside obtainTarget). Trusting the bitmap would
+        // seal a file whose "done" regions are zeros. Reset and
+        // start the byte ranges over; an unmeasurable part never
+        // condemns (see PartIntegrity).
+        if (!PartIntegrity.segmentedTrustworthy(
+                hasProgress = task.chunkDone.any { it },
+                partSize = runCatching { target.size() }.getOrDefault(-1),
+                totalSize = total,
+            )
+        ) {
+            task.chunkDone = BooleanArray(0)
+            task.chunkSize = 0
+            task.downloaded = 0
+            downloadedBytes.set(0)
+            task.note = "半成品文件对不上（字节丢了），旧进度作废，已重新开始下载。"
+            onSave()
+        }
         if (task.chunkSize <= 0) {
             task.chunkSize = ChunkPlanner.chunkSizeFor(total, 16)
             task.chunkDone = BooleanArray(ChunkPlanner.chunkCount(total, task.chunkSize))
@@ -1356,6 +1392,35 @@ class DownloadEngine(
             task.fileName = hlsFileName(task.url)
         }
         target = targetProvider()
+        // v3.2 audit round 18: the same part-integrity question
+        // as the segmented path, in HLS geometry. The written
+        // prefix is sequential, so a genuine part measures at
+        // least the prefix length; a SHORTER part has lost bytes
+        // (deleted content, in-place truncation, a recreated
+        // empty file under a surviving Uri — obtainTarget resets
+        // the segmented state for a vanished Uri, but the HLS
+        // prefix lives in different fields and is judged here,
+        // where the cursor is rebuilt). Writing the next segment
+        // at the stale cursor into a short file would pad the gap
+        // with zeros and merge a corrupt file that reports DONE.
+        // An unmeasurable part never condemns (see PartIntegrity).
+        if (!PartIntegrity.hlsTrustworthy(
+                prefixBytes = offset,
+                partSize = runCatching { target.size() }.getOrDefault(-1),
+            )
+        ) {
+            task.hlsDone = BooleanArray(segments.size)
+            synchronized(task.hlsSizes) {
+                task.hlsSizes.clear()
+                while (task.hlsSizes.size < segments.size) task.hlsSizes.add(-1)
+            }
+            writeIndex = 0
+            offset = 0
+            downloadedBytes.set(0)
+            task.downloaded = 0
+            task.note = "半成品文件对不上（字节丢了），已重新开始合并。"
+            onSave()
+        }
         if (offset == 0L) target.truncate(0)
 
         // Speed sampler on the same fixed 1 s grid as the other
