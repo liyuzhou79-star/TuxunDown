@@ -87,4 +87,23 @@ object Endgame {
         ) return null
         return Split(target.index, cuts)
     }
+
+    /**
+     * Worker-exit rule where the ThreadScaler's target meets
+     * the endgame (v3.3, audit round 19 — combination pass):
+     * a worker counts as surplus ONLY when it outnumbers the
+     * scaler's target AND no already-cut tail piece is waiting
+     * for a worker. A tail piece is finished work-planning —
+     * its bytes are owed by exactly one worker — so a worker
+     * that leaves "because the scaler shrank" while tails are
+     * queued can strand them: the sampler's deficit top-up
+     * respawns workers only while FRESH chunks remain, so in
+     * the endgame nobody would ever come back for the tails
+     * and a nearly-done task would fail with bytes missing
+     * that were perfectly fetchable. Surplus workers therefore
+     * drain the tail queue first; they exit only when it is
+     * empty.
+     */
+    fun shouldExitSurplus(activeWorkers: Int, target: Int, tailsPending: Int): Boolean =
+        activeWorkers > target && tailsPending <= 0
 }

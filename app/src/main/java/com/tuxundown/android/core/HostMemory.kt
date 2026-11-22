@@ -14,8 +14,10 @@ import java.net.URL
  * Safety valves, so a stale memory can never make things worse for
  * long:
  * - entries expire after [TTL_MS] (30 days);
- * - a host whose downloads FAIL twice in a row is forgotten and the
- *   next download probes from scratch;
+ * - a host whose downloads FAIL twice in a row has its thread
+ *   optimum forgotten and the next download probes from scratch
+ *   (v3.3: a rate-limit ceiling on the same entry survives that
+ *   forget — see recordFailure);
  * - only settled counts from COMPLETED segmented downloads are ever
  *   recorded, clamped to the engine's legal range.
  *
@@ -134,15 +136,39 @@ object HostMemory {
 
     /**
      * A download from [host] failed. One failure proves nothing (the
-     * network may just have hiccuped); two in a row forget the host
-     * so the next attempt re-probes from 4 like a first visit.
+     * network may just have hiccuped); two in a row forget the host's
+     * THREAD OPTIMUM so the next attempt re-probes from 4 like a
+     * first visit.
+     *
+     * v3.3 audit round 19 (combination): the forget used to delete
+     * the whole entry — including a rate-limit CEILING learned from
+     * a completely different failure mode (the host refusing
+     * parallel load, see [recordRateLimit]). Two ordinary failures
+     * (a dead network, a vanished file) therefore silently erased
+     * the ceiling, and the next run probed straight back up to the
+     * full thread count and could earn the same 429 storm once
+     * more before re-learning it. The two memories answer
+     * different questions, so the forget now keeps a cap-only
+     * entry: the optimum is gone (lookup reports 0, re-probe
+     * happens) but the ceiling still bounds that re-probe, and it
+     * still expires on the usual TTL.
      */
     fun recordFailure(entries: List<Entry>, host: String, nowMs: Long): List<Entry> {
         if (host.isBlank()) return entries
         val e = entries.firstOrNull { it.host == host } ?: return entries
         val fails = e.fails + 1
         return if (fails >= FAILS_TO_FORGET) {
-            entries.filter { it.host != host }
+            if (e.cap > 0) {
+                entries.map {
+                    if (it.host == host) {
+                        Entry(host, threads = 0, fails = 0, updatedMs = nowMs, cap = e.cap)
+                    } else {
+                        it
+                    }
+                }
+            } else {
+                entries.filter { it.host != host }
+            }
         } else {
             entries.map { if (it.host == host) it.copy(fails = fails, updatedMs = nowMs) else it }
         }

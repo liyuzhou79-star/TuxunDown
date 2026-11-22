@@ -1010,6 +1010,12 @@ class DownloadEngine(
      *  they are cut, so later plans can see (and re-split) them. */
     private val pendingTails = ArrayDeque<ActiveChunk>()
 
+    /** Take one already-cut endgame tail piece, if any wait. */
+    private fun pollPendingTail(): ActiveChunk? =
+        synchronized(activeLock) {
+            if (pendingTails.isEmpty()) null else pendingTails.removeFirst()
+        }
+
     private fun workerLoop(chunkCount: Int) {
         while (!stopped()) {
             // v2.3 dynamic scaling: when the scaler has lowered the
@@ -1019,8 +1025,26 @@ class DownloadEngine(
             // bytes. Two workers racing the check can dip the count
             // one below target; the sampler's top-up corrects that
             // within one evaluation (2 s).
+            // v3.3 audit round 19 (combination): the top-up only
+            // respawns while FRESH chunks remain, so in the
+            // endgame a surplus exit taken while cut tail pieces
+            // were still queued could strand them for good — the
+            // run would end FAILED with pieces nobody ever came
+            // back for. A worker is surplus only when the tail
+            // queue is empty (see Endgame.shouldExitSurplus);
+            // otherwise it drains a tail first.
             val sc = scaler
-            if (sc != null && activeWorkers.get() > sc.target) return
+            if (sc != null && activeWorkers.get() > sc.target) {
+                val tails = synchronized(activeLock) { pendingTails.size }
+                if (Endgame.shouldExitSurplus(activeWorkers.get(), sc.target, tails)) {
+                    return
+                }
+                val tail = pollPendingTail()
+                if (tail != null) {
+                    downloadActive(tail)
+                    continue
+                }
+            }
             var index = nextChunk.getAndIncrement()
             if (index >= chunkCount) {
                 // No fresh chunks: endgame. Take a pre-cut tail if
@@ -1055,8 +1079,8 @@ class DownloadEngine(
      * (and double-count) the same bytes.
      */
     private fun stealTail(): ActiveChunk? {
+        pollPendingTail()?.let { return it }
         synchronized(activeLock) {
-            if (pendingTails.isNotEmpty()) return pendingTails.removeFirst()
             val idle = (activeWorkers.get() - active.size).coerceAtLeast(1)
             val snapshot = active.map { Endgame.Range(it.index, it.pos, it.end) }
             val plan = Endgame.planSplit(snapshot, idle, MIN_SPLIT) ?: return null
