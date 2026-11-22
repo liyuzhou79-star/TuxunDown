@@ -7522,6 +7522,30 @@ fun TaskCard(
                 if (task.sources.isNotEmpty()) {
                     InfoRow("下载源：", "${1 + task.sources.size} 个地址（含镜像）")
                 }
+                // v4.6: server profile (see ServerProfile) — a
+                // pure aggregation over records the app already
+                // keeps; rows with no data are absent by
+                // construction, and the whole section is one
+                // CardFields switch. The cap is looked up for
+                // the host of task.url only, and contribution
+                // rows name hosts, never full mirror URLs (the
+                // TaskDiagnostics redaction discipline).
+                if (DownloadCenter.cardFieldShown(CardFields.SERVER_PROFILE)) {
+                    val profileRows = com.tuxundown.android.core.ServerProfile.rows(
+                        task, DownloadCenter.hostThreadsCap(task.url),
+                    )
+                    if (profileRows.isNotEmpty()) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "服务器画像（都是实际下载里记下来的，没数据的就不显示）：",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        for (row in profileRows) {
+                            InfoRow(row.label, row.value)
+                        }
+                    }
+                }
                 // v1.9: proxy marker — while a proxy is active,
                 // this task's connections ride it (FTP excepted:
                 // the hand-written client cannot use one, and the

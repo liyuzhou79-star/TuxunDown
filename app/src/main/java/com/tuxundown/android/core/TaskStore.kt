@@ -246,6 +246,33 @@ class TaskRecord(
      */
     @Transient val hlsSizes: MutableList<Long> = mutableListOf(),
 ) {
+    // ---- v4.6 additions (server profile, audit round 31 C) ----
+    /** Peak number of segmented workers the sampler actually
+     *  saw running at once, across all runs of this task (see
+     *  DownloadEngine's sampler). Persisted additively like
+     *  [peakBps] (manually serialized below): the profile's
+     *  peak rows must survive a restart for DONE tasks, which
+     *  is exactly when the user reads them. Records written
+     *  before v4.6 parse as 0 = "no data" and the rows stay
+     *  absent. Follows peakBps in the daily-reschedule reset:
+     *  the existing reset deliberately keeps both peak stats
+     *  (and the speed history), so this one is kept too. */
+    var peakConns: Int = 0
+    /** Bytes ACTUALLY WRITTEN to the file per source URL (the
+     *  primary is a key like any mirror), counted by the
+     *  segmented engine from each attempt's ActiveChunk.pos
+     *  advance — reads an attempt discarded never move pos, so
+     *  they never count. Persisted additively (a JSON object,
+     *  so URLs with special characters are safe); records
+     *  written before v4.6 parse as empty = no contribution
+     *  rows. Guarded by synchronized(this map) like hlsSizes:
+     *  worker threads add to it concurrently. Unlike the peak
+     *  stats this map describes THE CURRENT FILE's bytes, so
+     *  it IS cleared wherever those bytes are discarded: the
+     *  daily reschedule, a validator-change reset and a
+     *  part-integrity reset. */
+    val sourceBytes: MutableMap<String, Long> = mutableMapOf()
+
     val progress: Float
         get() = if (isHls && hlsTotalSegments > 0) {
             // HLS totals are unknown until the last segment lands;
@@ -559,6 +586,12 @@ class TaskStore(context: Context) {
                     o.put("hlsSizesCsv", t.hlsSizes.joinToString(","))
                 }
                 o.put("peakBps", t.peakBps)
+                o.put("peakConns", t.peakConns)
+                val sb = JSONObject()
+                synchronized(t.sourceBytes) {
+                    for ((k, v) in t.sourceBytes) sb.put(k, v)
+                }
+                o.put("sourceBytes", sb)
                 val hist = JSONArray()
                 synchronized(t.speedHistory) { for (v in t.speedHistory) hist.put(v) }
                 o.put("speedHistory", hist)
@@ -675,6 +708,24 @@ class TaskStore(context: Context) {
                         t.downloaded = sum
                     }
                     t.peakBps = o.optLong("peakBps", 0)
+                    t.peakConns = o.optInt("peakConns", 0).coerceAtLeast(0)
+                    val sbObj = o.optJSONObject("sourceBytes")
+                    if (sbObj != null) {
+                        val skeys = sbObj.keys()
+                        var sn = 0
+                        synchronized(t.sourceBytes) {
+                            while (skeys.hasNext()) {
+                                // Same hostile-input discipline
+                                // as headers: the primary plus at
+                                // most MAX_SOURCES mirrors can ever
+                                // be real keys.
+                                if (sn++ > MAX_SOURCES) break
+                                val k = skeys.next()
+                                val v = sbObj.optLong(k, 0)
+                                if (k.isNotBlank() && v > 0) t.sourceBytes[k] = v
+                            }
+                        }
+                    }
                     val h = o.optJSONObject("headers")
                     if (h != null) {
                         val keys = h.keys()

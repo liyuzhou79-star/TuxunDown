@@ -25,6 +25,13 @@ object CardFields {
     const val CREATED_AT = "createdAt"
     const val HOST = "host"
     const val CHUNKS = "chunks"
+    /** v4.6: the whole 「服务器画像」 section is ONE switch —
+     *  its rows are already data-gated individually (a row with
+     *  no recorded data is absent, see ServerProfile), so the
+     *  section defaults ON: a task with no profile data shows
+     *  nothing new, and the switch exists for users who find
+     *  the section noise. */
+    const val SERVER_PROFILE = "serverProfile"
 
     data class Field(val key: String, val label: String, val hint: String, val default: Boolean)
 
@@ -34,6 +41,7 @@ object CardFields {
         Field(CREATED_AT, "创建时间", "显示这个任务是什么时候建的", false),
         Field(HOST, "来源站点", "显示链接所在的站点（域名）", false),
         Field(CHUNKS, "分片进度", "显示「分片」行和分片图（流媒体任务是分段行和合并图）", true),
+        Field(SERVER_PROFILE, "服务器画像", "展开详情时显示服务器画像一段（断点续传、声明大小、峰值连接、各源贡献等；没数据的行不显示）", true),
     )
 
     fun field(key: String): Field? = FIELDS.firstOrNull { it.key == key }

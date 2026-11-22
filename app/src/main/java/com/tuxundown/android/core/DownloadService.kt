@@ -1344,6 +1344,11 @@ class DownloadService : Service() {
         task.hlsTotalSegments = 0
         task.hlsFingerprint = ""
         synchronized(task.hlsSizes) { task.hlsSizes.clear() }
+        // v4.6: the per-source byte accounting describes the
+        // file that just finished — tomorrow's fresh download
+        // starts its own ledger (the peak stats, like peakBps,
+        // deliberately survive this reset; see TaskRecord).
+        synchronized(task.sourceBytes) { task.sourceBytes.clear() }
         task.scheduledAt = next
         task.status = TaskStatus.QUEUED
         task.note = "每天定时：已排到下一次 ${Format.clockTime(next)} 开始。" +

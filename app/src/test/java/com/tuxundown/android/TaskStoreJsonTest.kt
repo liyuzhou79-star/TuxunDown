@@ -49,6 +49,41 @@ class TaskStoreJsonTest {
     }
 
     @Test
+    fun roundTripKeepsV46ProfileFields() {
+        val t = TaskRecord(
+            url = "https://example.com/file.zip",
+            fileName = "file.zip",
+            totalSize = 10_000,
+            status = TaskStatus.DONE,
+        )
+        t.peakConns = 24
+        // Mirror keys are full URLs — query strings with '&',
+        // '=' and non-ASCII must survive the JSON object intact.
+        val mirror = "https://cdn.example.com/f.zip?token=a&b=c&name=文件"
+        t.sources.add(mirror)
+        synchronized(t.sourceBytes) {
+            t.sourceBytes[t.url] = 7000
+            t.sourceBytes[mirror] = 3000
+        }
+        val back = TaskStore.deserialize(TaskStore.serialize(listOf(t)))
+        assertEquals(1, back.size)
+        val r = back[0]
+        assertEquals(24, r.peakConns)
+        synchronized(r.sourceBytes) {
+            assertEquals(7000L, r.sourceBytes[t.url])
+            assertEquals(3000L, r.sourceBytes[mirror])
+        }
+        // A pre-v4.6 record (no such keys) parses with the
+        // "no data" defaults — the profile rows stay absent.
+        val legacy = TaskStore.deserialize(
+            """[{"id":"x","url":"https://e.com/f","status":"DONE"}]"""
+        )
+        assertEquals(1, legacy.size)
+        assertEquals(0, legacy[0].peakConns)
+        assertTrue(legacy[0].sourceBytes.isEmpty())
+    }
+
+    @Test
     fun roundTripKeepsV16Fields() {
         val t = TaskRecord(
             url = "https://example.com/live/index.m3u8",

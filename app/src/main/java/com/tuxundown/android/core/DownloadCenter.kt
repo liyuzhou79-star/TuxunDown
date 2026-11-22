@@ -89,6 +89,9 @@ object DownloadCenter {
     var cardShowChunks: Boolean
         get() = pBool("cardShowChunks", CardFields.defaultOf(CardFields.CHUNKS))
         set(v) { prefs().edit().putBoolean("cardShowChunks", v).apply() }
+    var cardShowServerProfile: Boolean
+        get() = pBool("cardShowServerProfile", CardFields.defaultOf(CardFields.SERVER_PROFILE))
+        set(v) { prefs().edit().putBoolean("cardShowServerProfile", v).apply() }
 
     /** v3.7: key-based access to the card-field switches — the
      *  settings screen iterates CardFields.FIELDS and the task
@@ -100,6 +103,7 @@ object DownloadCenter {
         CardFields.CREATED_AT -> cardShowCreatedAt
         CardFields.HOST -> cardShowHost
         CardFields.CHUNKS -> cardShowChunks
+        CardFields.SERVER_PROFILE -> cardShowServerProfile
         else -> CardFields.defaultOf(key)
     }
 
@@ -110,6 +114,7 @@ object DownloadCenter {
             CardFields.CREATED_AT -> cardShowCreatedAt = v
             CardFields.HOST -> cardShowHost = v
             CardFields.CHUNKS -> cardShowChunks = v
+            CardFields.SERVER_PROFILE -> cardShowServerProfile = v
         }
     }
 
@@ -582,6 +587,7 @@ object DownloadCenter {
         o.put("cardShowCreatedAt", cardShowCreatedAt)
         o.put("cardShowHost", cardShowHost)
         o.put("cardShowChunks", cardShowChunks)
+        o.put("cardShowServerProfile", cardShowServerProfile)
         o.put("sniffHistory", org.json.JSONArray(sniffHistory))
         o.put("sniffFilterKind", sniffFilterKind)
         o.put("sniffFilterMinMB", sniffFilterMinMB)
@@ -674,6 +680,9 @@ object DownloadCenter {
         }
         if (o.has("cardShowChunks")) {
             cardShowChunks = o.optBoolean("cardShowChunks", cardShowChunks)
+        }
+        if (o.has("cardShowServerProfile")) {
+            cardShowServerProfile = o.optBoolean("cardShowServerProfile", cardShowServerProfile)
         }
         val hist = o.optJSONArray("sniffHistory")
         if (hist != null) {

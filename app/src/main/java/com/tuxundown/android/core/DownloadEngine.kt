@@ -734,6 +734,10 @@ class DownloadEngine(
                 // it must never be applied to the next one.
                 task.fineChunkSize = 0
                 task.fineChunkCount = 0
+                // v4.6: the discarded bytes take their per-source
+                // accounting with them — the map describes the
+                // current file's bytes only (see TaskRecord).
+                synchronized(task.sourceBytes) { task.sourceBytes.clear() }
                 task.downloaded = 0
                 downloadedBytes.set(0)
                 if (newTotal > 0) task.totalSize = newTotal
@@ -781,6 +785,9 @@ class DownloadEngine(
             // discarded grid takes its fine zone with it.
             task.fineChunkSize = 0
             task.fineChunkCount = 0
+            // v4.6: same rule for the per-source accounting —
+            // the lost bytes are no longer the file's bytes.
+            synchronized(task.sourceBytes) { task.sourceBytes.clear() }
             task.downloaded = 0
             downloadedBytes.set(0)
             task.note = "半成品文件对不上（字节丢了），旧进度作废，已重新开始下载。"
@@ -859,6 +866,14 @@ class DownloadEngine(
                 val speed = (bytes - lastBytes) * 1000 / dt
                 task.speedBps = if (task.speedBps == 0L) speed else (task.speedBps * 3 + speed) / 4
                 recordSpeed(task.speedBps)
+                // v4.6 (server profile): the peak worker count
+                // this task ever ran at once. The sampler is the
+                // one thread that already looks at the pool every
+                // tick — reading the atomic here costs no lock and
+                // no extra polling, and the write is a plain max
+                // on a sampler-owned field.
+                val aw = activeWorkers.get()
+                if (aw > task.peakConns) task.peakConns = aw
                 task.downloaded = bytes
                 ticks++
                 // v3.5: publish the per-connection snapshot
@@ -1407,7 +1422,36 @@ class DownloadEngine(
             attempt++
             if (attempt > 1) task.retryCount++ // v1.4 stats: chunk-level retries
             try {
-                downloadRange(ac, sourceFor(ac, attempt))
+                // v4.6 (server profile): per-source byte
+                // accounting. The ledger is the part's pos
+                // advance over THIS attempt: pos moves only
+                // after target.writeAt has taken the bytes
+                // (downloadRange's read loop), so the delta is
+                // exactly the bytes that landed in the file —
+                // bytes an attempt read but discarded (a failed
+                // handshake, a rejected range, a stall eviction
+                // before any write) never move pos and never
+                // count, while bytes written before a failure
+                // DO count because the retry resumes at pos and
+                // keeps them. No double count and no leak across
+                // the endgame split: a split only shrinks the
+                // owner's end (its pos — and this attempt's
+                // delta — are untouched), and each cut tail is
+                // its own ActiveChunk whose attempts account
+                // their own disjoint [pos, end) range.
+                val src = sourceFor(ac, attempt)
+                val startPos = ac.pos
+                try {
+                    downloadRange(ac, src)
+                } finally {
+                    val delta = ac.pos - startPos
+                    if (delta > 0) {
+                        synchronized(task.sourceBytes) {
+                            task.sourceBytes[src] =
+                                (task.sourceBytes[src] ?: 0) + delta
+                        }
+                    }
+                }
                 ok = ac.pos >= ac.end
             } catch (e: Exception) {
                 if (isStorageFull(e)) {
