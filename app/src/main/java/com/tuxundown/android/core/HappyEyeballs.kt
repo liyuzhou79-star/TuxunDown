@@ -206,6 +206,23 @@ class RacingSocketFactory(
      *  failure, race failure, TLS layering failure — every
      *  fallback lands on exactly today's behaviour). */
     private fun raceConnect(host: String, port: Int): Socket? {
+        // v2.9 (audit round 15, DNS): resolution happens HERE,
+        // fresh, on every new connection — and the same is true
+        // of every other connect path in the app (the engine
+        // and ProxyState open HttpURLConnection per connection;
+        // the proxy address itself is created UNRESOLVED). The
+        // app deliberately keeps NO DNS cache of its own, so
+        // there is no app-level stale answer to flush after a
+        // network switch. The desktop-JVM knob
+        // (networkaddress.cache.ttl) is NOT set on purpose:
+        // Android's runtime resolves through the system
+        // resolver, which applies the records' own TTLs and
+        // does not honour that property — setting it would be
+        // a placebo. What can outlive a network switch is a
+        // pooled keep-alive SOCKET (a live connection, not a
+        // DNS answer); the platform discards a dead pooled
+        // socket on first failed use and the service's network
+        // callback un-parks deferred tasks on reconnect.
         val addresses = runCatching {
             InetAddress.getAllByName(host).toList()
         }.getOrNull() ?: return null
