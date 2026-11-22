@@ -680,6 +680,10 @@ object DownloadCenter {
     fun cancelTask(task: TaskRecord) {
         cancelled.add(task.id)
         engines[task.id]?.pause()
+        // v3.5: the record goes away in the service; re-point
+        // the backup alarm now — and if the slot still shows
+        // up, the receiver's fire-time re-check self-heals.
+        refreshScheduleAlarm()
     }
 
     @Synchronized
@@ -755,6 +759,20 @@ object DownloadCenter {
         store = TaskStore(context.applicationContext)
         store.load()
         syncProxyState()
+        refreshScheduleAlarm()
+    }
+
+    /**
+     * v3.5: keep the scheduled-start backup alarm pointed at
+     * the earliest future slot (see ScheduleWake). Cheap and
+     * idempotent; called wherever the queue's schedule shape
+     * changes (init, enqueue, pause, cancel). Never fails
+     * the caller — ScheduleWake.arm swallows everything.
+     */
+    fun refreshScheduleAlarm() {
+        val ctx = appContext ?: return
+        if (!::store.isInitialized) return
+        ScheduleWake.arm(ctx, store.tasks)
     }
 
     private val deferredStartupRan =
@@ -836,6 +854,7 @@ object DownloadCenter {
             val ctx = appContext!!
             ContextCompat.startForegroundService(ctx, Intent(ctx, DownloadService::class.java))
             refreshWidget()
+            refreshScheduleAlarm()
             return false
         }
         task.status = TaskStatus.QUEUED
@@ -844,6 +863,7 @@ object DownloadCenter {
         val ctx = appContext!!
         ContextCompat.startForegroundService(ctx, Intent(ctx, DownloadService::class.java))
         refreshWidget()
+        refreshScheduleAlarm()
         return true
     }
 
@@ -896,6 +916,9 @@ object DownloadCenter {
         }
         store.save()
         refreshWidget()
+        // v3.5: a paused scheduled task must not keep the
+        // backup alarm pointed at its (now moot) slot.
+        refreshScheduleAlarm()
     }
 
     /**

@@ -291,6 +291,12 @@ class DownloadService : Service() {
         ) {
             DownloadCenter.recoverInterrupted()
         }
+        // v3.5: every service start re-points the scheduled-
+        // start backup alarm at the earliest future slot (see
+        // ScheduleWake) — the catch-all arm point, since every
+        // queue change either starts this service or happens
+        // while it runs.
+        ScheduleWake.arm(this, DownloadCenter.store.tasks)
         // v1.8: notification action buttons land here. Pause goes
         // through DownloadCenter like a card tap; cancel mirrors
         // the card's delete (a RUNNING task is cancelled through
@@ -739,6 +745,9 @@ class DownloadService : Service() {
         task.note = "每天定时：已排到下一次 ${Format.clockTime(next)} 开始。" +
             "上一次的文件已保存在下载目录里（重名时会自动改成带 (1) 的名字）。"
         store.saveNow()
+        // v3.5: the slot just moved a day out — re-point the
+        // backup alarm at it (see ScheduleWake).
+        ScheduleWake.arm(this, store.tasks)
     }
 
     /** Sleep in small slices; false if the task vanished meanwhile. */
@@ -1182,6 +1191,12 @@ class DownloadService : Service() {
         // v2.6: explicit start from BootReceiver (setting-gated there
         // and re-checked in onStartCommand).
         const val ACTION_BOOT_RESUME = "com.tuxundown.android.action.BOOT_RESUME"
+        // v3.5: explicit start from ScheduleReceiver — the
+        // backup alarm found a scheduled task due (see
+        // ScheduleWake). No special handling: the drain loop
+        // picks due tasks up by itself; the action exists so
+        // the entry point is auditable.
+        const val ACTION_SCHEDULE_WAKE = "com.tuxundown.android.action.SCHEDULE_WAKE"
         const val EXTRA_TASK_ID = "taskId"
         /** v2.8: pre-check pass interval (see LinkPrecheck). */
         private const val PRECHECK_INTERVAL_MS = 30_000L

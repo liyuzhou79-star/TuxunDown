@@ -87,6 +87,18 @@
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
             </intent-filter>
         </receiver>
+        <!-- v3.5: landing spot for the scheduled-start backup
+             alarm (see ScheduleWake). exported=false: only this
+             app's own AlarmManager PendingIntent can deliver
+             to it. No new permission — the alarm is inexact
+             (setAndAllowWhileIdle). -->
+        <receiver
+            android:name=".core.ScheduleReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.tuxundown.android.action.SCHEDULE_WAKE" />
+            </intent-filter>
+        </receiver>
         <!-- v2.1: home-screen widget (in-flight task count + total
              progress). Updates are pushed by the download service;
              the provider only answers the launcher's broadcasts,

@@ -32,6 +32,12 @@ class BootReceiver : BroadcastReceiver() {
                 return
             }
             DownloadCenter.init(context)
+            // v3.5: alarms do not survive a reboot — re-arm
+            // the scheduled-start backup (see ScheduleWake)
+            // whatever the boot-resume switch below says.
+            // Arming starts nothing by itself; the service
+            // kick stays behind the switch, as before.
+            ScheduleWake.arm(context, DownloadCenter.store.tasks)
             if (!DownloadCenter.bootResume) return
             if (!Recovery.anyQueued(DownloadCenter.store.tasks) &&
                 Recovery.interrupted(DownloadCenter.store.tasks).isEmpty()
