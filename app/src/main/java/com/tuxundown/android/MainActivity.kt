@@ -449,6 +449,8 @@ fun DownApp() {
     var wifiOnly by remember { mutableStateOf(DownloadCenter.wifiOnly) }
     // v3.9: charge-only downloads switch mirror.
     var chargeOnlyUi by remember { mutableStateOf(DownloadCenter.chargeOnlyDownload) }
+    // v4.9: screen-off speed keeping (wake lock) switch mirror.
+    var keepCpuAwakeUi by remember { mutableStateOf(DownloadCenter.keepCpuAwake) }
     var dirName by remember { mutableStateOf(DownloadCenter.downloadDirName) }
     var limitKBps by remember { mutableStateOf(DownloadCenter.speedLimitKBps) }
     // v3.0: speed-limit schedule (switch + HH:MM window + window limit).
@@ -827,6 +829,7 @@ fun DownApp() {
                             // settings page shows the restored values.
                             wifiOnly = DownloadCenter.wifiOnly
                             chargeOnlyUi = DownloadCenter.chargeOnlyDownload
+                            keepCpuAwakeUi = DownloadCenter.keepCpuAwake
                             limitKBps = DownloadCenter.speedLimitKBps
                             schedOn = DownloadCenter.speedSchedEnabled
                             schedStartUi =
@@ -1603,6 +1606,8 @@ fun DownApp() {
             onWifiOnly = { wifiOnly = it; DownloadCenter.wifiOnly = it },
             chargeOnly = chargeOnlyUi,
             onChargeOnly = { chargeOnlyUi = it; DownloadCenter.chargeOnlyDownload = it },
+            keepCpuAwake = keepCpuAwakeUi,
+            onKeepCpuAwake = { keepCpuAwakeUi = it; DownloadCenter.keepCpuAwake = it },
             dirName = dirName,
             onPickDir = { dirPicker.launch(null) },
             onResetDir = {
@@ -5297,6 +5302,8 @@ fun SettingsScreen(
     onWifiOnly: (Boolean) -> Unit,
     chargeOnly: Boolean,
     onChargeOnly: (Boolean) -> Unit,
+    keepCpuAwake: Boolean,
+    onKeepCpuAwake: (Boolean) -> Unit,
     dirName: String,
     onPickDir: () -> Unit,
     onResetDir: () -> Unit,
@@ -6144,6 +6151,23 @@ fun SettingsScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 8.dp),
                 )
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("下载中保持运行（息屏不降速）")
+                        Text(
+                            "开着时只有真正在下载的那段时间 CPU 不睡，息屏下大文件速度更稳；" +
+                                "代价是更费电。排队、等 WiFi、等充电、定时等待时都不耗这个电。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = keepCpuAwake, onCheckedChange = onKeepCpuAwake)
+                }
             }
         }
         if (groupVisible("s-data")) item(key = "s-data") {
