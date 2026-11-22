@@ -2,6 +2,7 @@ package com.tuxundown.android.core
 
 import java.io.InputStream
 import java.net.HttpURLConnection
+import java.net.InetAddress
 import java.net.URL
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -201,6 +202,22 @@ class DownloadEngine(
             if (FtpClient.isFtpUrl(task.url)) {
                 return runFtp()
             }
+            // v4.2 connection warmup (knife 4, see Warmup +
+            // warmUp below): fire a daemon side thread NOW —
+            // after the FTP early return (FTP has no
+            // HttpURLConnection path to warm) and before the
+            // HLS branch, the probe / resume revalidation and
+            // every later branch, so the HLS, single-stream and
+            // segmented paths are all covered. The main thread
+            // never waits for it: warmup runs in parallel with
+            // the target open, the guard checks and the probe,
+            // and the probe / first chunk requests reuse the
+            // connections it pooled. When a proxy is active
+            // Warmup.sourcesToWarm returns an empty list and no
+            // warmup happens at all (see Warmup's doc for the
+            // v1.9 never-go-direct rule behind that).
+            Thread { runCatching { warmUp() } }
+                .apply { isDaemon = true; name = "tuxundown-warmup"; start() }
             // v1.6: HLS (m3u8) tasks take their own path — playlist,
             // parallel segment downloads, in-order merge into one .ts.
             if (task.isHls || isHlsUrl(task.url)) {
@@ -358,6 +375,63 @@ class DownloadEngine(
             running = false
             onSave()
             onProgress(task)
+        }
+    }
+
+    /**
+     * v4.2 connection warmup (knife 4): for each source [Warmup]
+     * selects, resolve the host (warming the DNS cache) and issue
+     * ONE Range bytes=0-0 request through the normal open path,
+     * so the socket lands in the platform keep-alive pool before
+     * the probe / first chunks need it. Runs on a daemon side
+     * thread fired at run() start; every failure is silent —
+     * warmup is pure optimisation and must never affect the run.
+     *
+     * Discipline:
+     * - A 206 answer has a 1-byte body: [releaseConnection]
+     *   drains it and the connection returns to the pool (the
+     *   same handling probe() uses). ANY other answer is
+     *   disconnect()ed — a 200's body is the whole file and must
+     *   never be drained.
+     * - NO task fields are written here: the task's state belongs
+     *   to probe() / revalidateResume(). (openFollowingRedirects
+     *   only READS task.headers — verified: it never writes the
+     *   task — so sharing it from this thread is safe.)
+     * - Proxy: when a proxy is active, [Warmup.sourcesToWarm]
+     *   returns an empty list, so this loop never runs at all —
+     *   warmup never opens a direct connection behind the
+     *   proxy's back (v1.9: a configured proxy is used or the
+     *   run fails honestly, never a silent direct fall-back).
+     * - Dual channel: openFollowingRedirects alternates via
+     *   openerFlip when an extraOpener exists, so warmup calls
+     *   advance that counter — harmless. But it means warmup
+     *   only guarantees the DEFAULT network's path is warm; the
+     *   alternate (extraOpener) network's connections warm
+     *   themselves on their first real use.
+     * - Happy Eyeballs: it only affects openDefault's HTTPS
+     *   path; warmup goes through that same open path and
+     *   benefits automatically — nothing extra to do here.
+     */
+    private fun warmUp() {
+        val targets = Warmup.sourcesToWarm(task.url, task.sources, proxySettings.active)
+        for (src in targets) {
+            runCatching {
+                // Warm the DNS cache first (failures ignored):
+                // the pooled connection is worthless if the next
+                // lookup still has to pay the DNS round trip.
+                val host = URL(src).host
+                if (host.isNotBlank()) {
+                    runCatching { InetAddress.getAllByName(host) }
+                }
+                val c = openFollowingRedirects(src) {
+                    it.setRequestProperty("Range", "bytes=0-0")
+                }
+                if (c.responseCode == HttpURLConnection.HTTP_PARTIAL) {
+                    releaseConnection(c)
+                } else {
+                    runCatching { c.disconnect() }
+                }
+            }
         }
     }
 
