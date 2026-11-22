@@ -386,6 +386,7 @@ fun DownApp() {
     // v2.1: completion auto actions (both default off).
     var autoInstallUi by remember { mutableStateOf(DownloadCenter.autoInstallApk) }
     var autoOpenUi by remember { mutableStateOf(DownloadCenter.autoOpenFile) }
+    var autoVerifyUi by remember { mutableStateOf(DownloadCenter.autoVerifyHash) }
     var maxConc by remember { mutableStateOf(DownloadCenter.maxConcurrent) }
     var autoRetry by remember { mutableStateOf(DownloadCenter.autoRetryCount) }
     var trafficMB by remember { mutableStateOf(DownloadCenter.trafficThresholdMB) }
@@ -685,6 +686,7 @@ fun DownApp() {
                                 QuietHours.formatMin(DownloadCenter.notifyQuietEndMin)
                             autoInstallUi = DownloadCenter.autoInstallApk
                             autoOpenUi = DownloadCenter.autoOpenFile
+                            autoVerifyUi = DownloadCenter.autoVerifyHash
                             maxConc = DownloadCenter.maxConcurrent
                             autoRetry = DownloadCenter.autoRetryCount
                             trafficMB = DownloadCenter.trafficThresholdMB
@@ -1194,6 +1196,25 @@ fun DownApp() {
                 hashTask = task
                 hashText = task.expectedSha256.ifBlank { task.expectedMd5 }
             },
+            onVerifyHash = {
+                // v2.9: manual verify — same engine as the
+                // dialog's save-and-verify and the service's
+                // auto-verify; runs off the UI thread, verdict
+                // lands as a toast + on the card.
+                Toast.makeText(context, "开始校验…", Toast.LENGTH_SHORT).show()
+                Thread {
+                    val verdict = runCatching {
+                        ChecksumVerifier.verify(context, task)
+                    }.getOrDefault("")
+                    activity.runOnUiThread {
+                        store.saveNow()
+                        if (verdict.isNotBlank()) {
+                            Toast.makeText(context, verdict, Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }.start()
+            },
+            onCancelVerify = { ChecksumVerifier.requestCancel(task.id) },
             onHeaders = {
                 headersTask = task
                 headersText = TaskHeaders.toText(task.headers)
@@ -1362,6 +1383,8 @@ fun DownApp() {
             onAutoInstall = { autoInstallUi = it; DownloadCenter.autoInstallApk = it },
             autoOpen = autoOpenUi,
             onAutoOpen = { autoOpenUi = it; DownloadCenter.autoOpenFile = it },
+            autoVerify = autoVerifyUi,
+            onAutoVerify = { autoVerifyUi = it; DownloadCenter.autoVerifyHash = it },
             batteryOk = batteryOk,
             onOpenBattery = {
                 // v1.5: ONLY guide the user to the system switch —
@@ -2359,7 +2382,11 @@ fun DownApp() {
                     } else {
                         Toast.makeText(
                             context,
-                            "已保存，下完会自动校验",
+                            if (DownloadCenter.autoVerifyHash) {
+                                "已保存，下完会自动校验"
+                            } else {
+                                "已保存；自动校验是关的，下完后在详情里点「立即校验」"
+                            },
                             Toast.LENGTH_SHORT,
                         ).show()
                     }
@@ -3453,6 +3480,8 @@ fun SettingsScreen(
     onAutoInstall: (Boolean) -> Unit,
     autoOpen: Boolean,
     onAutoOpen: (Boolean) -> Unit,
+    autoVerify: Boolean,
+    onAutoVerify: (Boolean) -> Unit,
     batteryOk: Boolean,
     onOpenBattery: () -> Unit,
     onShowGuide: () -> Unit,
@@ -3474,7 +3503,8 @@ fun SettingsScreen(
             "下载目录 文件夹 保存位置 开机 自启 恢复 重启 续传 分类 分文件夹 类型",
         "s-proxy" to "代理 proxy http socks 端口 地址 服务器 用户名 密码 认证",
         "s-look" to "外观 amoled 纯黑 深色 暗色 主题 黑色",
-        "s-notify" to "提示 震动 声音 响铃 完成 自动安装 安装 自动打开 打开 静默 夜间 时段 勿扰",
+        "s-notify" to "提示 震动 声音 响铃 完成 自动安装 安装 自动打开 打开 静默 夜间 时段 勿扰 " +
+            "校验 哈希 完整性 sha md5",
         "s-power" to "后台运行 后台 保活 电池 白名单 省电 冻结",
         "s-data" to "引导与数据 引导 新手引导 帮助 常见问题 备份 导出 导入 " +
             "恢复 孤儿 清理 part 数据 诊断 自检 体检 归档",
@@ -3954,6 +3984,23 @@ fun SettingsScreen(
                         )
                     }
                     Switch(checked = autoOpen, onCheckedChange = onAutoOpen)
+                }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("下完自动校验文件完整性")
+                        Text(
+                            "任务里填了校验值（SHA-256 / MD5）时，下完立刻把整个文件读一遍比对，" +
+                                "结果写在卡片和完成说明里。关掉后不自动读，需要时在任务详情里点「立即校验」。" +
+                                "大文件校验要花一点时间，校验中可以取消。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = autoVerify, onCheckedChange = onAutoVerify)
                 }
             }
         }
@@ -4719,6 +4766,8 @@ fun TaskCard(
     onRename: () -> Unit,
     onSources: () -> Unit,
     onChecksum: () -> Unit,
+    onVerifyHash: () -> Unit,
+    onCancelVerify: () -> Unit,
     onHeaders: () -> Unit,
     onUserNote: () -> Unit,
     onTaskLimit: (Int) -> Unit,
@@ -5151,6 +5200,23 @@ fun TaskCard(
                     Spacer(Modifier.height(6.dp))
                     OutlinedButton(onClick = onChecksum) {
                         Text(if (expectedHash == null) "设置校验哈希" else "改校验哈希")
+                    }
+                }
+                // v2.9: manual verify + cancel. VERIFYING can be
+                // entered by the service (auto-verify at finalize)
+                // or by this button (hash set late, or the auto
+                // switch off) — the cancel flag is process-wide,
+                // so 取消校验 stops either one.
+                if (task.status == TaskStatus.DONE && expectedHash != null) {
+                    Spacer(Modifier.height(6.dp))
+                    if (task.checksumState == Checksum.STATE_VERIFYING) {
+                        OutlinedButton(onClick = onCancelVerify) {
+                            Text("取消校验")
+                        }
+                    } else {
+                        OutlinedButton(onClick = onVerifyHash) {
+                            Text("立即校验")
+                        }
                     }
                 }
                 // v1.9: per-task request headers — view/edit the

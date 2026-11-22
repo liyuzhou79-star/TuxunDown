@@ -75,6 +75,43 @@ class ChecksumTest {
     }
 
     @Test
+    fun digestCancellableMatchesDigest() {
+        val data = "hello tuxundown".toByteArray(Charsets.UTF_8)
+        assertEquals(
+            Checksum.digest(ByteArrayInputStream(data), Checksum.SHA256),
+            Checksum.digestCancellable(
+                ByteArrayInputStream(data), Checksum.SHA256
+            ) { true },
+        )
+    }
+
+    @Test
+    fun digestCancellableStopsBeforeReadingEverything() {
+        // Three buffers' worth of data; the gate closes at the
+        // second check, so the digest must give up (null)
+        // instead of finishing.
+        val data = ByteArray(3 * 256 * 1024) { 7 }
+        var checks = 0
+        val out = Checksum.digestCancellable(
+            ByteArrayInputStream(data), Checksum.SHA256
+        ) {
+            checks++
+            checks < 2
+        }
+        assertNull(out)
+        assertEquals(2, checks)
+    }
+
+    @Test
+    fun digestCancellableCancelledImmediately() {
+        val out = Checksum.digestCancellable(
+            ByteArrayInputStream("abc".toByteArray(Charsets.UTF_8)),
+            Checksum.SHA256,
+        ) { false }
+        assertNull(out)
+    }
+
+    @Test
     fun expectedPrefersSha256() {
         val t = TaskRecord(url = "https://x/f")
         assertNull(Checksum.expectedOf(t))

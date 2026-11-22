@@ -776,9 +776,23 @@ class DownloadService : Service() {
             // v1.7: if the user attached an expected hash, stream
             // the finished file through it NOW and put the verdict
             // in the note + on the card （对上 / 对不上）.
-            val verdict = runCatching { ChecksumVerifier.verify(this, task) }
-                .getOrDefault("")
-            if (verdict.isNotBlank()) note += " $verdict"
+            // v2.9: that automatic pass is a setting (default on).
+            // Off = the file is not read back at all; when a hash
+            // was attached the note points at the card's manual
+            // 立即校验 button instead of staying silent.
+            val verdict = if (DownloadCenter.autoVerifyHash) {
+                runCatching { ChecksumVerifier.verify(this, task) }
+                    .getOrDefault("")
+            } else {
+                ""
+            }
+            if (verdict.isNotBlank()) {
+                note += " $verdict"
+            } else if (!DownloadCenter.autoVerifyHash &&
+                Checksum.expectedOf(task) != null
+            ) {
+                note += " 完整性校验：自动校验已关，可在任务详情里点「立即校验」。"
+            }
             task.note = note
             notifyCompletion(task, displayName)
             // v1.6: feed the statistics screen (local counters).

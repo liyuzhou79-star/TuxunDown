@@ -59,10 +59,24 @@ object Checksum {
     }
 
     /** Stream [input] through the digest; returns lowercase hex. */
-    fun digest(input: InputStream, kind: String): String {
+    fun digest(input: InputStream, kind: String): String =
+        digestCancellable(input, kind) { true }!!
+
+    /**
+     * v2.9: cancellable variant — returns null as soon as
+     * [shouldContinue] turns false, so verifying a multi-GB
+     * file can be abandoned without reading the rest of it.
+     * The check runs once per 256 KB buffer.
+     */
+    fun digestCancellable(
+        input: InputStream,
+        kind: String,
+        shouldContinue: () -> Boolean,
+    ): String? {
         val md = MessageDigest.getInstance(kind)
         val buf = ByteArray(256 * 1024)
         while (true) {
+            if (!shouldContinue()) return null
             val n = input.read(buf)
             if (n < 0) break
             if (n > 0) md.update(buf, 0, n)
@@ -75,7 +89,10 @@ object Checksum {
         STATE_MATCHED -> "✓ 对上（文件完整）"
         STATE_MISMATCHED -> "✗ 对不上（文件可能损坏或不对）"
         STATE_VERIFYING -> "校验中…"
-        else -> "还没校验（下载完成时自动校验）"
+        // v2.9: auto-verify is a setting now — the label no
+        // longer promises it; the card's 立即校验 button and
+        // the completion note carry the explanation.
+        else -> "还没校验"
     }
 }
 
@@ -87,17 +104,44 @@ object Checksum {
  */
 object ChecksumVerifier {
 
+    /**
+     * v2.9: ids of tasks whose running verification should
+     * stop at the next buffer boundary. Process-wide on
+     * purpose: a verification can be started by the service
+     * (auto-verify at finalize) or by the card （立即校验）,
+     * and the card's 取消校验 button must stop either one.
+     */
+    private val cancelRequests =
+        java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** Ask a running verification of this task to stop. */
+    fun requestCancel(taskId: String) {
+        cancelRequests.add(taskId)
+    }
+
     fun verify(context: Context, task: TaskRecord): String {
         val (kind, expected) = Checksum.expectedOf(task) ?: return ""
         val uriStr = task.savedUri.ifBlank { task.targetUri }
         if (uriStr.isBlank()) return ""
         task.checksumState = Checksum.STATE_VERIFYING
+        var cancelled = false
         val actual = runCatching {
             context.contentResolver.openInputStream(Uri.parse(uriStr))?.use {
-                Checksum.digest(it, kind)
+                Checksum.digestCancellable(it, kind) {
+                    val stop = task.id in cancelRequests
+                    if (stop) cancelled = true
+                    !stop
+                }
             }
         }.getOrNull()
+        cancelRequests.remove(task.id)
         return when {
+            cancelled -> {
+                // Stopped on purpose: no verdict either way,
+                // back to "not checked"; the file is untouched.
+                task.checksumState = Checksum.STATE_NONE
+                "完整性校验已取消，文件本身没动；需要时可在任务详情里重新校验。"
+            }
             actual == null -> {
                 // Could not even read the file: do not claim either
                 // verdict — reset to "not checked" and say so.

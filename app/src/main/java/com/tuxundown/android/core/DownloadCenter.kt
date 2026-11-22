@@ -66,6 +66,19 @@ object DownloadCenter {
         get() = pBool("autoOpenFile", false)
         set(v) { prefs().edit().putBoolean("autoOpenFile", v).apply() }
 
+    /**
+     * v2.9: when a task carries an expected hash, verify the
+     * finished file against it automatically at completion
+     * (the standing v1.7 behaviour, now switchable). Default
+     * ON. OFF = manual only, via the card's 立即校验 button;
+     * verification re-reads the whole file once, which on a
+     * multi-GB file is real work the user may not want at
+     * completion time.
+     */
+    var autoVerifyHash: Boolean
+        get() = pBool("autoVerifyHash", true)
+        set(v) { prefs().edit().putBoolean("autoVerifyHash", v).apply() }
+
     /** Completion feedback switches (v1.3). */
     var completeVibrate: Boolean
         get() = pBool("completeVibrate", true)
@@ -294,6 +307,7 @@ object DownloadCenter {
         o.put("notifyQuietEndMin", notifyQuietEndMin)
         o.put("autoInstallApk", autoInstallApk)
         o.put("autoOpenFile", autoOpenFile)
+        o.put("autoVerifyHash", autoVerifyHash)
         o.put("bootResume", bootResume)
         o.put("sortSubfolders", sortSubfolders)
         o.put("archiveAfterDays", archiveAfterDays)
@@ -338,6 +352,9 @@ object DownloadCenter {
         }
         if (o.has("autoInstallApk")) autoInstallApk = o.optBoolean("autoInstallApk", autoInstallApk)
         if (o.has("autoOpenFile")) autoOpenFile = o.optBoolean("autoOpenFile", autoOpenFile)
+        if (o.has("autoVerifyHash")) {
+            autoVerifyHash = o.optBoolean("autoVerifyHash", autoVerifyHash)
+        }
         if (o.has("bootResume")) bootResume = o.optBoolean("bootResume", bootResume)
         if (o.has("sortSubfolders")) {
             sortSubfolders = o.optBoolean("sortSubfolders", sortSubfolders)
