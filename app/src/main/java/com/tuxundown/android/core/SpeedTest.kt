@@ -14,6 +14,72 @@ object SpeedTestMath {
     /** Exponential moving average for the live readout (same 3:1 blend as the engine's sampler). */
     fun ema(prev: Long, sample: Long): Long =
         if (prev <= 0) sample else (prev * 3 + sample) / 4
+
+    /**
+     * The one window-selection rule shared by [steadyBps] and
+     * [steadyWindowMs] (they must never disagree about which
+     * window a result was computed over): drop samples with
+     * t < [warmupMs]; if the kept samples number >= 2 and span
+     * >= 1000 ms, that kept window is used; otherwise fall back
+     * to the whole sample range. Returns (first, last) of the
+     * chosen window, or null when there are fewer than 2 samples.
+     */
+    private fun chosenWindow(
+        samples: List<Pair<Long, Long>>,
+        warmupMs: Long,
+    ): Pair<Pair<Long, Long>, Pair<Long, Long>>? {
+        if (samples.size < 2) return null
+        val kept = samples.filter { it.first >= warmupMs }
+        if (kept.size >= 2 && kept.last().first - kept.first().first >= 1000) {
+            return kept.first() to kept.last()
+        }
+        return samples.first() to samples.last()
+    }
+
+    /**
+     * Steady-state throughput in bytes/s from (elapsedMs,
+     * cumulativeBytes) samples in ascending time order: the
+     * first [warmupMs] (connection setup + TCP slow-start ramp)
+     * is discarded and speed is Δbytes/Δt across the kept
+     * window. When the kept window is too short, falls back to
+     * the whole-range average. 0 when there are < 2 samples,
+     * the chosen span is <= 0, or bytes did not grow.
+     */
+    fun steadyBps(samples: List<Pair<Long, Long>>, warmupMs: Long): Long {
+        val window = chosenWindow(samples, warmupMs) ?: return 0
+        val (first, last) = window
+        val dt = last.first - first.first
+        val db = last.second - first.second
+        if (dt <= 0 || db <= 0) return 0
+        return db * 1000 / dt
+    }
+
+    /** Milliseconds spanned by the window [steadyBps] computes over. */
+    fun steadyWindowMs(samples: List<Pair<Long, Long>>, warmupMs: Long): Long {
+        val window = chosenWindow(samples, warmupMs) ?: return 0
+        val span = window.second.first - window.first.first
+        return if (span > 0) span else 0
+    }
+}
+
+/** Three-way verdict for the single-vs-multi comparison (pure, unit-tested). */
+object SpeedVerdict {
+
+    enum class Verdict { FASTER, SIMILAR, SLOWER }
+
+    /**
+     * Compare with integer cross-multiplication (no floats):
+     * multi >= single * 1.15 -> FASTER; multi < single * 0.85
+     * -> SLOWER; otherwise SIMILAR. Null when either is <= 0.
+     */
+    fun verdict(singleBps: Long, multiBps: Long): Verdict? {
+        if (singleBps <= 0 || multiBps <= 0) return null
+        return when {
+            multiBps * 100 >= singleBps * 115 -> Verdict.FASTER
+            multiBps * 100 < singleBps * 85 -> Verdict.SLOWER
+            else -> Verdict.SIMILAR
+        }
+    }
 }
 
 /**
@@ -31,6 +97,16 @@ object SpeedTestMath {
  *
  * Data use is bounded: each phase runs at most [PHASE_MS] and each
  * connection stops after [PER_CONNECTION_CAP] bytes.
+ *
+ * Measurement口径 (v4.0): a phase's reported speed is a STEADY-STATE
+ * rate, not a whole-phase average. The monitor loop records
+ * (elapsedMs, cumulativeBytes) samples; the first [WARMUP_MS]
+ * (connection setup — DNS/TCP/TLS — plus the TCP slow-start ramp,
+ * during which few bytes flow) is discarded and the speed is
+ * Δbytes/Δt across the remaining window (falling back to the
+ * whole-phase average when that window is too short). Both the
+ * single and the multi phase use this same口径, and the thread
+ * joins after the phase no longer pollute the measurement.
  */
 class SpeedTest {
 
@@ -42,19 +118,24 @@ class SpeedTest {
         cancelled = true
     }
 
+    /** Result of one phase: steady-state [bps], the window it was
+     *  actually computed over ([windowMs]), and total [bytes]. */
+    data class PhaseResult(val bps: Long, val windowMs: Long, val bytes: Long)
+
     /**
      * Download [url] with [connections] parallel connections for up
      * to [durationMs], sampling the live aggregate speed (EMA) into
-     * [onSample] about twice a second. Returns the average bytes/s
-     * over the phase (0 when nothing moved). Blocking — call from a
-     * background thread.
+     * [onSample] about twice a second. Returns a [PhaseResult]
+     * whose bps is the steady-state rate (see the class comment;
+     * 0 when nothing moved). Blocking — call from a background
+     * thread.
      */
     fun runPhase(
         url: String,
         connections: Int,
         durationMs: Long,
         onSample: (Long) -> Unit,
-    ): Long {
+    ): PhaseResult {
         val total = AtomicLong(0)
         val start = System.currentTimeMillis()
         val deadline = start + durationMs
@@ -90,6 +171,8 @@ class SpeedTest {
         var lastBytes = 0L
         var lastMs = start
         var live = 0L
+        val samples = mutableListOf<Pair<Long, Long>>()
+        samples.add(0L to 0L)
         while (!cancelled && System.currentTimeMillis() < deadline &&
             threads.any { it.isAlive }
         ) {
@@ -100,6 +183,7 @@ class SpeedTest {
             }
             val now = System.currentTimeMillis()
             val bytes = total.get()
+            samples.add((now - start) to bytes)
             val dt = now - lastMs
             if (dt > 0) {
                 live = SpeedTestMath.ema(live, (bytes - lastBytes) * 1000 / dt)
@@ -108,9 +192,15 @@ class SpeedTest {
             lastBytes = bytes
             lastMs = now
         }
+        // Final sample BEFORE the joins, so join tail time never
+        // enters the measurement.
+        val finalNow = System.currentTimeMillis()
+        samples.add((finalNow - start) to total.get())
+        val bps = SpeedTestMath.steadyBps(samples, WARMUP_MS)
+        val windowMs = SpeedTestMath.steadyWindowMs(samples, WARMUP_MS)
+        val bytesTotal = total.get()
         threads.forEach { runCatching { it.join(1_500) } }
-        val elapsed = System.currentTimeMillis() - start
-        return SpeedTestMath.avgBps(total.get(), elapsed)
+        return PhaseResult(bps, windowMs, bytesTotal)
     }
 
     data class Endpoint(val label: String, val url: String)
@@ -144,6 +234,9 @@ class SpeedTest {
 
         /** Each phase (single, then multi) runs at most this long. */
         const val PHASE_MS = 6_000L
+
+        /** Leading ramp (setup + slow-start) discarded from the steady-state window. */
+        const val WARMUP_MS = 1500L
 
         /** Per-connection byte ceiling, so a fast network cannot burn unbounded data. */
         const val PER_CONNECTION_CAP = 25L * 1024 * 1024

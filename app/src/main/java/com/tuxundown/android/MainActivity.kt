@@ -125,6 +125,7 @@ import com.tuxundown.android.core.ScheduleTime
 import com.tuxundown.android.core.SpeedSchedule
 import com.tuxundown.android.core.SpeedCompare
 import com.tuxundown.android.core.SpeedTest
+import com.tuxundown.android.core.SpeedVerdict
 import com.tuxundown.android.core.TaskHeaders
 import com.tuxundown.android.core.TaskRecord
 import com.tuxundown.android.core.TaskStatus
@@ -4119,6 +4120,8 @@ fun SpeedTestScreen(onBack: () -> Unit) {
     var liveBps by remember { mutableStateOf(0L) }
     var singleBps by remember { mutableStateOf(-1L) }
     var multiBps by remember { mutableStateOf(-1L) }
+    var singleWindowMs by remember { mutableStateOf(0L) }
+    var multiWindowMs by remember { mutableStateOf(0L) }
     var testRef by remember { mutableStateOf<SpeedTest?>(null) }
     // ---- v3.2: multi-point comparison state ----
     var compareRunning by remember { mutableStateOf(false) }
@@ -4143,6 +4146,8 @@ fun SpeedTestScreen(onBack: () -> Unit) {
         liveBps = 0
         singleBps = -1
         multiBps = -1
+        singleWindowMs = 0
+        multiWindowMs = 0
         val test = SpeedTest()
         testRef = test
         Thread {
@@ -4158,9 +4163,10 @@ fun SpeedTestScreen(onBack: () -> Unit) {
                     post { liveBps = b }
                 }
                 if (test.cancelled) break
-                if (s <= 0) continue // this endpoint moved nothing: try the next
+                if (s.bps <= 0) continue // this endpoint moved nothing: try the next
                 post {
-                    singleBps = s
+                    singleBps = s.bps
+                    singleWindowMs = s.windowMs
                     phase = "多线程测速中（4 条连接）…"
                     liveBps = 0
                 }
@@ -4168,7 +4174,10 @@ fun SpeedTestScreen(onBack: () -> Unit) {
                     post { liveBps = b }
                 }
                 if (!test.cancelled) {
-                    post { multiBps = m }
+                    post {
+                        multiBps = m.bps
+                        multiWindowMs = m.windowMs
+                    }
                     finished = true
                 }
                 break
@@ -4217,7 +4226,7 @@ fun SpeedTestScreen(onBack: () -> Unit) {
                     ep.url, SpeedCompare.MULTI_CONNECTIONS, SpeedCompare.PHASE_MS,
                 ) { b -> post { liveBps = b } }
                 if (test.cancelled) break
-                out.add(SpeedCompare.PointResult(ep.label, s, m))
+                out.add(SpeedCompare.PointResult(ep.label, s.bps, m.bps))
                 val snapshot = out.toList()
                 post { compareResults = snapshot }
             }
@@ -4305,23 +4314,38 @@ fun SpeedTestScreen(onBack: () -> Unit) {
                 }
                 Spacer(Modifier.height(10.dp))
                 if (singleBps >= 0) {
-                    InfoRow("单线程：", Format.speed(singleBps))
+                    InfoRow(
+                        "单线程：",
+                        "${Format.speed(singleBps)}（稳态实测约 " +
+                            "${"%.1f".format(singleWindowMs / 1000.0)} 秒）",
+                    )
                 }
                 if (multiBps >= 0) {
-                    InfoRow("多线程（4 条）：", Format.speed(multiBps))
+                    InfoRow(
+                        "多线程（4 条）：",
+                        "${Format.speed(multiBps)}（稳态实测约 " +
+                            "${"%.1f".format(multiWindowMs / 1000.0)} 秒）",
+                    )
                 }
                 if (singleBps > 0 && multiBps > 0) {
                     val ratio = multiBps.toDouble() / singleBps.toDouble()
-                    InfoRow(
-                        "对比：",
-                        if (ratio >= 1.05) {
+                    val verdictText = when (SpeedVerdict.verdict(singleBps, multiBps)) {
+                        SpeedVerdict.Verdict.FASTER ->
                             "多线程约为单线程的 ${Format.ratio(ratio)} 倍——" +
                                 "连接数加上去确实能提速，这正是本 App 多线程下载的原理"
-                        } else {
-                            "多线程没比单线程快多少——当前网络或测速服务器是按总量给速度的，" +
-                                "这种情况下加连接帮不上忙（下载真实文件时同理）"
-                        },
-                    )
+                        SpeedVerdict.Verdict.SIMILAR ->
+                            "这个测速点单条连接就把速度给够了，多开连接占不到便宜。" +
+                                "这不代表多线程下载没用——有些站是按单条连接限速的，" +
+                                "每条连接只给一点速度，在那种站上多线程能成倍提速。"
+                        SpeedVerdict.Verdict.SLOWER ->
+                            "多线程反而比单线程慢——这个测速点可能是按连接分速度的，" +
+                                "或者连接建立的开销占了大头。实际下载遇到这类站时，" +
+                                "把连接数调低反而更快。"
+                        null -> ""
+                    }
+                    if (verdictText.isNotEmpty()) {
+                        InfoRow("对比：", verdictText)
+                    }
                 }
                 Spacer(Modifier.height(12.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
