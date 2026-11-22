@@ -616,6 +616,10 @@ class DownloadEngine(
             if (validatorChanged || sizeChanged) {
                 task.chunkDone = BooleanArray(0)
                 task.chunkSize = 0
+                // v4.2: the fine zone belongs to the old grid —
+                // it must never be applied to the next one.
+                task.fineChunkSize = 0
+                task.fineChunkCount = 0
                 task.downloaded = 0
                 downloadedBytes.set(0)
                 if (newTotal > 0) task.totalSize = newTotal
@@ -659,14 +663,32 @@ class DownloadEngine(
         ) {
             task.chunkDone = BooleanArray(0)
             task.chunkSize = 0
+            // v4.2: same rule as the validator reset above — a
+            // discarded grid takes its fine zone with it.
+            task.fineChunkSize = 0
+            task.fineChunkCount = 0
             task.downloaded = 0
             downloadedBytes.set(0)
             task.note = "半成品文件对不上（字节丢了），旧进度作废，已重新开始下载。"
             onSave()
         }
         if (task.chunkSize <= 0) {
-            task.chunkSize = ChunkPlanner.chunkSizeFor(total, 16)
-            task.chunkDone = BooleanArray(ChunkPlanner.chunkCount(total, task.chunkSize))
+            // The grid is decided HERE, once, and persisted on
+            // the task — a resume reuses it verbatim (the resume
+            // invariant). v4.2: the coarse size still comes from
+            // chunkSizeFor; gridFor may carve a fine zone out of
+            // the head. The fine zone is sized for the burst
+            // opening (StartPlan.BURST_START connections): this
+            // branch runs BEFORE the scaler exists, so the real
+            // start count is unknowable here — a slightly small
+            // fine zone is harmless (it only shifts where the
+            // granularity changes, never correctness).
+            val coarse = ChunkPlanner.chunkSizeFor(total, 16)
+            val grid = ChunkPlanner.gridFor(total, coarse, StartPlan.BURST_START)
+            task.chunkSize = grid.coarseSize
+            task.fineChunkSize = grid.fineSize
+            task.fineChunkCount = grid.fineCount
+            task.chunkDone = BooleanArray(ChunkPlanner.chunkCount(grid))
         }
         val count = task.chunkDone.size
         // v1.6 multi-source: validate the mirrors ONCE per run
@@ -677,7 +699,12 @@ class DownloadEngine(
         var firstOpen = task.chunkDone.indexOfFirst { !it }
         if (firstOpen < 0) firstOpen = count
         nextChunk.set(firstOpen)
-        downloadedBytes.set(ChunkPlanner.downloadedOf(task.chunkDone, total, task.chunkSize))
+        downloadedBytes.set(
+            ChunkPlanner.downloadedOf(
+                ChunkPlanner.gridOf(total, task.chunkSize, task.fineChunkSize, task.fineChunkCount),
+                task.chunkDone,
+            )
+        )
         task.downloaded = downloadedBytes.get()
 
         target.truncate(total)
@@ -1144,6 +1171,11 @@ class DownloadEngine(
         }
 
     private fun workerLoop(chunkCount: Int) {
+        // v4.2: this run's grid, rebuilt from the task's persisted
+        // fields (fixed at creation; never re-decided mid-run).
+        val grid = ChunkPlanner.gridOf(
+            task.totalSize, task.chunkSize, task.fineChunkSize, task.fineChunkCount
+        )
         while (!stopped()) {
             // v2.3 dynamic scaling: when the scaler has lowered the
             // target below the live worker count, surplus workers
@@ -1189,7 +1221,7 @@ class DownloadEngine(
             }
             if (index < 0 || index >= chunkCount) return
             if (task.chunkDone[index]) continue
-            val r = ChunkPlanner.rangeOf(task.totalSize, task.chunkSize, index)
+            val r = ChunkPlanner.rangeOf(grid, index)
             val ac = ActiveChunk(index, r.first, r.last + 1)
             synchronized(activeLock) { active.add(ac) }
             downloadActive(ac)

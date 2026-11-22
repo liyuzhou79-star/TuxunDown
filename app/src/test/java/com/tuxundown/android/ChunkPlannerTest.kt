@@ -1,5 +1,6 @@
 package com.tuxundown.android
 
+import com.tuxundown.android.core.ChunkGrid
 import com.tuxundown.android.core.ChunkPlanner
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -110,6 +111,123 @@ class ChunkPlannerTest {
         // bytes the clamped count needs.
         val bits = ChunkPlanner.decodeBitset("ff".repeat(100_000), Int.MAX_VALUE)
         assertEquals(ChunkPlanner.MAX_CHUNKS, bits.size)
+    }
+
+    // ---------- v4.2: two-zone ChunkGrid ----------
+
+    /** The tiling contract every grid must satisfy: ranges are
+     *  contiguous, non-overlapping, non-empty, their union is
+     *  exactly [0, total), and chunkCount agrees with enumerating
+     *  rangeOf until the file is covered. */
+    private fun assertGridTiles(grid: ChunkGrid) {
+        val total = grid.totalSize
+        val count = ChunkPlanner.chunkCount(grid)
+        var covered = 0L
+        var enumerated = 0
+        while (covered < total) {
+            val r = ChunkPlanner.rangeOf(grid, enumerated)
+            assertEquals("grid=$grid index=$enumerated", covered, r.first)
+            assertTrue("empty range at $enumerated in $grid", r.last >= r.first)
+            covered = r.last + 1
+            enumerated++
+        }
+        assertEquals("grid=$grid", total, covered)
+        assertEquals("grid=$grid", count, enumerated)
+    }
+
+    @Test
+    fun twoZoneGridsTileExactly() {
+        val mb = 1024L * 1024
+        // A gridFor product: 1 GB, 1 MB coarse, burst opening.
+        assertGridTiles(ChunkPlanner.gridFor(1024 * mb, mb, 16))
+        // Fine-zone boundary lands EXACTLY on total/8: 256 MB at
+        // 2 MB coarse -> fine 512 KB, zone = min(32 MB, 512 KB x
+        // 16 x 4 = 32 MB) = 32 MB = total/8, fineCount = 64.
+        val exact = ChunkPlanner.gridFor(256 * mb, 2 * mb, 16)
+        assertEquals(256 * mb / 8, exact.fineZoneBytes)
+        assertGridTiles(exact)
+        // Fine zone's last piece truncated by total (the fine
+        // piece itself is bigger than the whole file).
+        assertGridTiles(ChunkGrid(250_000, 300_000, 1, 500_000))
+        // Coarse tail's last piece truncated by total.
+        assertGridTiles(ChunkGrid(1_000_003, 300_000, 2, 500_000))
+        // Boundary between zones mid-file, odd sizes everywhere.
+        assertGridTiles(ChunkGrid(10_000, 1_000, 3, 2_000))
+        assertGridTiles(ChunkGrid(999_983, 128 * 1024, 5, 1024 * 1024))
+    }
+
+    @Test
+    fun uniformGridMatchesLegacyFunctionsValueForValue() {
+        val cases = listOf(
+            1L to 1L,
+            3_000L to 1_000L,
+            10_000_001L to 1_000_000L,
+            271_440_852L to 1024L * 1024,
+            5L * 1024 * 1024 * 1024 to 2L * 1024 * 1024,
+        )
+        for ((total, chunk) in cases) {
+            val grid = ChunkPlanner.uniform(total, chunk)
+            assertEquals(0, grid.fineCount)
+            assertEquals(0L, grid.fineZoneBytes)
+            assertEquals(
+                ChunkPlanner.chunkCount(total, chunk),
+                ChunkPlanner.chunkCount(grid),
+            )
+            val count = ChunkPlanner.chunkCount(grid)
+            for (i in 0 until count) {
+                assertEquals(
+                    "total=$total chunk=$chunk i=$i",
+                    ChunkPlanner.rangeOf(total, chunk, i),
+                    ChunkPlanner.rangeOf(grid, i),
+                )
+            }
+            val done = BooleanArray(count) { it % 3 == 0 }
+            assertEquals(
+                ChunkPlanner.downloadedOf(done, total, chunk),
+                ChunkPlanner.downloadedOf(grid, done),
+            )
+        }
+    }
+
+    @Test
+    fun gridDownloadedOfSumsAcrossTheZoneBoundary() {
+        // Fine: [0,1k) [1k,2k) [2k,3k); coarse: [3k,5k) [5k,7k)
+        // [7k,9k) [9k,10k).
+        val grid = ChunkGrid(10_000, 1_000, 3, 2_000)
+        assertEquals(7, ChunkPlanner.chunkCount(grid))
+        // Last fine piece + first coarse piece.
+        val done = booleanArrayOf(false, false, true, true, false, false, false)
+        assertEquals(1_000L + 2_000L, ChunkPlanner.downloadedOf(grid, done))
+        // Everything: exactly the file size, truncated tail included.
+        val all = BooleanArray(7) { true }
+        assertEquals(10_000L, ChunkPlanner.downloadedOf(grid, all))
+    }
+
+    @Test
+    fun gridForRules() {
+        val kb = 1024L
+        val mb = 1024L * kb
+        // Small file: no fine zone however coarse the chunks.
+        assertEquals(0, ChunkPlanner.gridFor(100 * mb, mb, 16).fineCount)
+        // Coarse below 512 KB: no fine zone however big the file.
+        assertEquals(0, ChunkPlanner.gridFor(1024 * mb, 256 * kb, 16).fineCount)
+        // The pinned example: 1 GB at 1 MB coarse, burst 16 ->
+        // fine 256 KB, zone = min(128 MB, 256 KB x 16 x 4) =
+        // 16 MB, fineCount = 64.
+        val g = ChunkPlanner.gridFor(1024 * mb, mb, 16)
+        assertEquals(256 * kb, g.fineSize)
+        assertEquals(64, g.fineCount)
+        assertEquals(16 * mb, g.fineZoneBytes)
+        assertEquals(mb, g.coarseSize)
+        // The 256 MB threshold is inclusive.
+        assertTrue(ChunkPlanner.gridFor(256 * mb, mb, 16).fineCount > 0)
+        assertEquals(0, ChunkPlanner.gridFor(256 * mb - 1, mb, 16).fineCount)
+        // Coarse exactly 512 KB -> fine exactly MIN_CHUNK, allowed.
+        val edge = ChunkPlanner.gridFor(256 * mb, 512 * kb, 16)
+        assertEquals(ChunkPlanner.MIN_CHUNK, edge.fineSize)
+        assertTrue(edge.fineCount > 0)
+        // A fine zone never swallows the whole file.
+        assertTrue(g.fineZoneBytes < g.totalSize)
     }
 
     @Test

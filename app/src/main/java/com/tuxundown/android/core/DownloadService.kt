@@ -843,6 +843,10 @@ class DownloadService : Service() {
         )
         task.chunkDone = BooleanArray(0)
         task.chunkSize = 0
+        // v4.2: a fresh download gets a fresh grid — the old
+        // grid's fine zone must not leak into it.
+        task.fineChunkSize = 0
+        task.fineChunkCount = 0
         task.downloaded = 0
         task.totalSize = -1
         task.etag = ""

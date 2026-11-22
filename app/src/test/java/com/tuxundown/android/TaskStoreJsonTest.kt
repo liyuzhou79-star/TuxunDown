@@ -234,6 +234,50 @@ class TaskStoreJsonTest {
     }
 
     @Test
+    fun roundTripKeepsV42FineGridFields() {
+        // Two-zone grid: fine [0,1k) [1k,2k) [2k,3k), then coarse
+        // 2k pieces up to 10k — 7 chunks in all.
+        val t = TaskRecord(
+            url = "https://example.com/big.iso",
+            fileName = "big.iso",
+            totalSize = 10_000,
+            chunkSize = 2_000,
+            fineChunkSize = 1_000,
+            fineChunkCount = 3,
+            status = TaskStatus.PAUSED,
+        )
+        t.chunkDone = BooleanArray(7)
+        t.chunkDone[2] = true // last fine piece: 1_000 bytes
+        t.chunkDone[3] = true // first coarse piece: 2_000 bytes
+        val back = TaskStore.deserialize(TaskStore.serialize(listOf(t)))
+        assertEquals(1, back.size)
+        val r = back[0]
+        assertEquals(2_000L, r.chunkSize)
+        assertEquals(1_000L, r.fineChunkSize)
+        assertEquals(3, r.fineChunkCount)
+        assertEquals(7, r.chunkDone.size)
+        // Downloaded recomputed against the two-zone grid, not
+        // uniform math (uniform would say 2 x 2_000).
+        assertEquals(3_000L, r.downloaded)
+    }
+
+    @Test
+    fun recordWithoutFineFieldsParsesAsUniformGrid() {
+        // A pre-v4.2 record: chunkSize/totalSize/chunkDone only.
+        // Bitset "05" = chunks 0 and 2 done, 1_000 bytes each
+        // under the uniform grid it was written with.
+        val old = """[{"id":"x42","url":"https://a.b/c.bin","fileName":"c.bin",""" +
+            """"totalSize":3000,"chunkSize":1000,"chunkDone":"05","status":"PAUSED"}]"""
+        val back = TaskStore.deserialize(old)
+        assertEquals(1, back.size)
+        val r = back[0]
+        assertEquals(0L, r.fineChunkSize)
+        assertEquals(0, r.fineChunkCount)
+        assertEquals(3, r.chunkDone.size)
+        assertEquals(2_000L, r.downloaded)
+    }
+
+    @Test
     fun oldFormatWithoutV14FieldsStillLoads() {
         // A v1.3-era record: none of the v1.4 keys exist.
         val old = """[{"id":"x1","url":"https://a.b/c.bin","fileName":"c.bin","status":"DONE"}]"""

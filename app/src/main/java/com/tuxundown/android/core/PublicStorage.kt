@@ -165,6 +165,9 @@ object PublicStorage {
             task.targetUri = ""
             task.chunkDone = BooleanArray(0)
             task.chunkSize = 0
+            // v4.2: the fine zone belongs to the discarded grid.
+            task.fineChunkSize = 0
+            task.fineChunkCount = 0
             task.downloaded = 0
         }
         val name = task.fileName.ifBlank {

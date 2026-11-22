@@ -63,17 +63,120 @@ object ChunkPlanner {
      */
     const val MAX_CHUNKS = 4_000_000
 
-    fun chunkCount(totalSize: Long, chunkSize: Long): Int {
-        if (totalSize <= 0 || chunkSize <= 0) return 0
-        val n = (totalSize + chunkSize - 1) / chunkSize
+    fun chunkCount(totalSize: Long, chunkSize: Long): Int =
+        chunkCount(uniform(totalSize, chunkSize))
+
+    /** Inclusive-exclusive byte range [start, end) of chunk [index]. */
+    fun rangeOf(totalSize: Long, chunkSize: Long, index: Int): LongRange =
+        rangeOf(uniform(totalSize, chunkSize), index)
+
+    // ---------- v4.2: two-zone chunk grid (fine head, coarse tail) ----------
+
+    /**
+     * Rebuild the grid a task was created with from its persisted
+     * fields. fineCount = 0 (every record written before v4.2, and
+     * every task whose grid never qualified for a fine zone) is a
+     * uniform grid — byte-identical to the pre-v4.2 layout, which
+     * is what keeps old resumes exact. A fine zone that would
+     * cover the whole file is not a grid [gridFor] could have
+     * produced, so a corrupt/imported record claiming one falls
+     * back to uniform instead of inventing ranges.
+     */
+    fun gridOf(
+        totalSize: Long,
+        chunkSize: Long,
+        fineChunkSize: Long,
+        fineChunkCount: Int,
+    ): ChunkGrid {
+        val g = ChunkGrid(totalSize, fineChunkSize, fineChunkCount, chunkSize)
+        return if (fineChunkCount <= 0 || fineChunkSize <= 0 ||
+            g.fineZoneBytes >= totalSize
+        ) {
+            uniform(totalSize, chunkSize)
+        } else {
+            g
+        }
+    }
+
+    /** A single-granularity grid: no fine zone, [chunkSize] throughout. */
+    fun uniform(totalSize: Long, chunkSize: Long): ChunkGrid =
+        ChunkGrid(totalSize, fineSize = 0, fineCount = 0, coarseSize = chunkSize)
+
+    /**
+     * Decide a NEW task's grid (existing tasks keep the grid they
+     * were created with — see the resume invariant on [ChunkGrid]).
+     *
+     * The fine zone exists so the opening burst of connections
+     * finishes its first pieces quickly and the work-stealing
+     * queue gets fine-grained early; the coarse tail keeps the
+     * request count low for the bulk of the file. It only pays
+     * off on big files with a chunky coarse size, so:
+     * - total < 256 MB, or coarse < 512 KB -> uniform;
+     * - fineSize = coarse / 4, and if that drops below MIN_CHUNK
+     *   the granularity contrast is gone -> uniform;
+     * - the fine zone spans min(total / 8, fineSize x
+     *   startThreads x 4) bytes — an eighth of the file at most,
+     *   and at least four fine pieces per opening connection;
+     * - the fine zone must leave at least one coarse chunk
+     *   behind it, else uniform.
+     */
+    fun gridFor(totalSize: Long, coarseSize: Long, startThreads: Int): ChunkGrid {
+        val fallback = uniform(totalSize, coarseSize)
+        if (totalSize < 256L * 1024 * 1024) return fallback
+        if (coarseSize < 512L * 1024) return fallback
+        val fineSize = coarseSize / 4
+        if (fineSize < MIN_CHUNK) return fallback
+        val zoneBytes = minOf(
+            totalSize / 8,
+            fineSize * startThreads.coerceAtLeast(1).toLong() * 4,
+        )
+        if (zoneBytes <= 0) return fallback
+        val fineCount = ((zoneBytes + fineSize - 1) / fineSize)
+            .coerceAtLeast(1)
+        // fineCount * fineSize can exceed zoneBytes by < 1 piece
+        // (the ceil); it must still leave a coarse tail.
+        if (fineCount > Int.MAX_VALUE) return fallback
+        val grid = ChunkGrid(totalSize, fineSize, fineCount.toInt(), coarseSize)
+        if (grid.fineZoneBytes >= totalSize) return fallback
+        return grid
+    }
+
+    fun chunkCount(grid: ChunkGrid): Int {
+        if (grid.totalSize <= 0 || grid.coarseSize <= 0) return 0
+        val rest = grid.totalSize - grid.fineZoneBytes
+        val coarseCount = if (rest > 0) {
+            (rest + grid.coarseSize - 1) / grid.coarseSize
+        } else {
+            0L
+        }
+        val n = grid.fineCount.toLong() + coarseCount
         return n.coerceIn(0, MAX_CHUNKS.toLong()).toInt()
     }
 
     /** Inclusive-exclusive byte range [start, end) of chunk [index]. */
-    fun rangeOf(totalSize: Long, chunkSize: Long, index: Int): LongRange {
-        val start = index * chunkSize
-        val end = minOf(start + chunkSize, totalSize)
+    fun rangeOf(grid: ChunkGrid, index: Int): LongRange {
+        val start: Long
+        val size: Long
+        if (index < grid.fineCount) {
+            start = index * grid.fineSize
+            size = grid.fineSize
+        } else {
+            start = grid.fineZoneBytes + (index - grid.fineCount) * grid.coarseSize
+            size = grid.coarseSize
+        }
+        val end = minOf(start + size, grid.totalSize)
         return start until end
+    }
+
+    fun downloadedOf(grid: ChunkGrid, done: BooleanArray): Long {
+        var sum = 0L
+        for (i in done.indices) {
+            if (done[i]) {
+                val r = rangeOf(grid, i)
+                sum += (r.last - r.first + 1)
+            }
+        }
+        return sum
     }
 
     fun encodeBitset(done: BooleanArray): String {
@@ -105,14 +208,38 @@ object ChunkPlanner {
         return out
     }
 
-    fun downloadedOf(done: BooleanArray, totalSize: Long, chunkSize: Long): Long {
-        var sum = 0L
-        for (i in done.indices) {
-            if (done[i]) {
-                val r = rangeOf(totalSize, chunkSize, i)
-                sum += (r.last - r.first + 1)
-            }
+    fun downloadedOf(done: BooleanArray, totalSize: Long, chunkSize: Long): Long =
+        downloadedOf(uniform(totalSize, chunkSize), done)
+}
+
+/**
+ * v4.2: a task's byte grid — the layout its chunk bitmap indexes.
+ *
+ * Chunks [0, fineCount) are [fineSize] each (the fine zone at the
+ * head of the file); every chunk after that is [coarseSize].
+ * fineCount = 0 is the pre-v4.2 single-granularity grid.
+ *
+ * RESUME INVARIANT (unchanged from the uniform era): the grid is
+ * decided ONCE, when the task's chunk state is first created,
+ * and every parameter is persisted on the task record
+ * (chunkSize = [coarseSize], fineChunkSize = [fineSize],
+ * fineChunkCount = [fineCount]). A resume rebuilds the identical
+ * grid from those fields and never re-decides it, so a persisted
+ * bitmap always means the same byte ranges it meant when written.
+ */
+data class ChunkGrid(
+    val totalSize: Long,
+    val fineSize: Long,
+    val fineCount: Int,
+    val coarseSize: Long,
+) {
+    /** Bytes covered by the fine zone (0 when there is none). */
+    val fineZoneBytes: Long
+        get() = if (fineCount <= 0 || fineSize <= 0) {
+            0L
+        } else if (fineSize > Long.MAX_VALUE / fineCount) {
+            Long.MAX_VALUE // saturate: hostile persisted fields
+        } else {
+            fineCount.toLong() * fineSize
         }
-        return sum
-    }
 }

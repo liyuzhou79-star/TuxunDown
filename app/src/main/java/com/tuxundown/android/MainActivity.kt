@@ -102,6 +102,7 @@ import com.tuxundown.android.core.CardFields
 import com.tuxundown.android.core.Changelog
 import com.tuxundown.android.core.Checksum
 import com.tuxundown.android.core.ChunkMap
+import com.tuxundown.android.core.ChunkPlanner
 import com.tuxundown.android.core.CrashGuard
 import com.tuxundown.android.core.Errors
 import com.tuxundown.android.core.FailureAdvice
@@ -7054,7 +7055,15 @@ fun TaskCard(
                 if (DownloadCenter.cardFieldShown(CardFields.CHUNKS) &&
                     task.chunkSize > 0 && task.totalSize > 0 && task.status != TaskStatus.DONE
                 ) {
-                    val total = (task.totalSize + task.chunkSize - 1) / task.chunkSize
+                    // v4.2: the count comes from the task's own
+                    // grid — uniform math undercounts a two-zone
+                    // grid's fine head.
+                    val total = ChunkPlanner.chunkCount(
+                        ChunkPlanner.gridOf(
+                            task.totalSize, task.chunkSize,
+                            task.fineChunkSize, task.fineChunkCount,
+                        )
+                    )
                     InfoRow(
                         "分片：",
                         "已完成 ${task.chunkDone.count { it }}/$total 块 · ${task.threads} 条连接",

@@ -32,6 +32,13 @@ class TaskRecord(
     var headers: MutableMap<String, String> = mutableMapOf(),
     var totalSize: Long = -1,
     var chunkSize: Long = 0,
+    /** v4.2 two-zone chunk grid (see ChunkPlanner.ChunkGrid):
+     *  the first [fineChunkCount] chunks are [fineChunkSize] each,
+     *  the rest are [chunkSize] each. 0 / 0 = the pre-v4.2
+     *  single-granularity grid; records and backups written before
+     *  v4.2 parse as 0 and resume on their original uniform grid. */
+    var fineChunkSize: Long = 0,
+    var fineChunkCount: Int = 0,
     var chunkDone: BooleanArray = BooleanArray(0),
     var singleThreadOnly: Boolean = false,
     var threads: Int = 4,
@@ -459,6 +466,8 @@ class TaskStore(context: Context) {
                 o.put("fileName", t.fileName)
                 o.put("totalSize", t.totalSize)
                 o.put("chunkSize", t.chunkSize)
+                o.put("fineChunkSize", t.fineChunkSize)
+                o.put("fineChunkCount", t.fineChunkCount)
                 o.put("chunkDone", ChunkPlanner.encodeBitset(t.chunkDone))
                 o.put("singleThreadOnly", t.singleThreadOnly)
                 o.put("threads", t.threads)
@@ -531,6 +540,8 @@ class TaskStore(context: Context) {
                         fileName = o.optString("fileName"),
                         totalSize = o.optLong("totalSize", -1),
                         chunkSize = o.optLong("chunkSize", 0),
+                        fineChunkSize = o.optLong("fineChunkSize", 0),
+                        fineChunkCount = o.optInt("fineChunkCount", 0),
                         singleThreadOnly = o.optBoolean("singleThreadOnly"),
                         threads = o.optInt("threads", 4),
                         status = runCatching { TaskStatus.valueOf(o.optString("status")) }
@@ -625,9 +636,14 @@ class TaskStore(context: Context) {
                         }
                     }
                     if (t.chunkSize > 0 && t.totalSize > 0) {
-                        val count = ChunkPlanner.chunkCount(t.totalSize, t.chunkSize)
+                        // v4.2: recompute against the task's own
+                        // grid (uniform for every pre-v4.2 record).
+                        val grid = ChunkPlanner.gridOf(
+                            t.totalSize, t.chunkSize, t.fineChunkSize, t.fineChunkCount
+                        )
+                        val count = ChunkPlanner.chunkCount(grid)
                         t.chunkDone = ChunkPlanner.decodeBitset(o.optString("chunkDone"), count)
-                        t.downloaded = ChunkPlanner.downloadedOf(t.chunkDone, t.totalSize, t.chunkSize)
+                        t.downloaded = ChunkPlanner.downloadedOf(grid, t.chunkDone)
                     }
                     if (t.status == TaskStatus.RUNNING) {
                         // v2.6: park it (the standing rule), but
