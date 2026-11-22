@@ -85,6 +85,15 @@ class DownloadEngine(
      *  count the host was rejecting load at, so the caller can
      *  remember a ceiling for next time. */
     private val onRateLimited: (Int) -> Unit = {},
+    /** v3.9: this task's live allowance under the user's global
+     *  connection cap (see ConnectionBudget), re-read on every
+     *  scaler tick; Int.MAX_VALUE (the default) = no global cap.
+     *  The scaler's target stays the task's unconstrained
+     *  appetite — the allowance only gates how many workers may
+     *  actually run at once, so when the cap lifts (another
+     *  task finished) the run grows back with no re-probe, and
+     *  the count HostMemory remembers is never the cap's. */
+    private val connectionAllowance: () -> Int = { Int.MAX_VALUE },
     /** v1.6 dual channel: an alternate connection opener (e.g.
      *  bound to the cellular network). When present, new
      *  connections alternate between the default network and this
@@ -105,6 +114,10 @@ class DownloadEngine(
      *  [ThreadScaler]). Created in runSegmented, read by the
      *  sampler (drives it) and by workers (surplus exit). */
     @Volatile private var scaler: ThreadScaler? = null
+    /** v3.9: the allowance most recently read from
+     *  [connectionAllowance]; workers consult it alongside the
+     *  scaler target when deciding whether they are surplus. */
+    @Volatile private var connAllowance: Int = Int.MAX_VALUE
     /** Seekable destination in the public download folder, opened after probing. */
     private lateinit var target: DownloadTarget
     @Volatile var paused = false
@@ -325,6 +338,8 @@ class DownloadEngine(
             // the run — a stale one would show connections
             // that no longer exist.
             task.connInfos = emptyList()
+            // v3.9: same for the global-cap contention flag.
+            task.connCapHeld = false
             task.elapsedMs += System.currentTimeMillis() - runStartMs
             if (task.status == TaskStatus.DONE && task.finishedAt == 0L) {
                 task.finishedAt = System.currentTimeMillis()
@@ -736,29 +751,59 @@ class DownloadEngine(
                 if (ticks % 2 == 0) {
                     val sc = scaler
                     if (sc != null) {
-                        val wasProbing = sc.probing
-                        val chunksLeft = nextChunk.get() < count
-                        val anyWork = chunksLeft ||
-                            synchronized(activeLock) { active.isNotEmpty() }
-                        val newTarget = sc.onEval(task.speedBps, chunksLeft, anyWork)
-                        // The ladder just settled at a low count:
-                        // more threads stopped helping (the honest
-                        // per-IP-throttling note, as before v2.3).
-                        if (wasProbing && !sc.probing && chunksLeft &&
-                            newTarget <= 8 && task.note.isBlank()
-                        ) {
-                            task.note = "加连接后速度不再提升，服务器可能按 IP 总限速，已用最优连接数。"
-                        }
-                        // task.threads IS the card's live thread
-                        // display and, at DONE, the value HostMemory
-                        // remembers — keep it equal to the target.
-                        task.threads = newTarget
-                        // A higher target spawns at once; a lower
-                        // one is honoured by surplus workers exiting
-                        // at their next chunk boundary (workerLoop).
-                        val deficit = newTarget - activeWorkers.get()
-                        if (deficit > 0 && chunksLeft) {
-                            repeat(deficit) { spawnWorker(count) }
+                        // v3.9: re-read the global-cap allowance
+                        // on the same tick. While the CAP is what
+                        // binds (allowance below the scaler's
+                        // target), the scaler is NOT evaluated:
+                        // its verdicts judge speed deltas, and a
+                        // delta the cap caused — another task
+                        // starting or finishing — would be misread
+                        // as this host speeding up or slowing
+                        // down. The target simply holds until the
+                        // cap lifts, then normal scaling resumes
+                        // from it; surplus workers shed through
+                        // the workerLoop check, which reads the
+                        // same allowance.
+                        connAllowance = connectionAllowance()
+                        val capped = connAllowance < sc.target
+                        task.connCapHeld = capped
+                        if (capped) {
+                            task.threads = sc.target
+                            // Still top the pool up TO the
+                            // allowance — being capped is a
+                            // ceiling, not a freeze at whatever
+                            // count the run happened to start
+                            // with.
+                            val chunksLeft = nextChunk.get() < count
+                            val deficit = connAllowance - activeWorkers.get()
+                            if (deficit > 0 && chunksLeft) {
+                                repeat(deficit) { spawnWorker(count) }
+                            }
+                        } else {
+                            val wasProbing = sc.probing
+                            val chunksLeft = nextChunk.get() < count
+                            val anyWork = chunksLeft ||
+                                synchronized(activeLock) { active.isNotEmpty() }
+                            val newTarget = sc.onEval(task.speedBps, chunksLeft, anyWork)
+                            // The ladder just settled at a low count:
+                            // more threads stopped helping (the honest
+                            // per-IP-throttling note, as before v2.3).
+                            if (wasProbing && !sc.probing && chunksLeft &&
+                                newTarget <= 8 && task.note.isBlank()
+                            ) {
+                                task.note = "加连接后速度不再提升，服务器可能按 IP 总限速，已用最优连接数。"
+                            }
+                            // task.threads IS the card's live thread
+                            // display and, at DONE, the value HostMemory
+                            // remembers — keep it equal to the target.
+                            task.threads = newTarget
+                            // A higher target spawns at once; a lower
+                            // one is honoured by surplus workers exiting
+                            // at their next chunk boundary (workerLoop).
+                            val deficit = newTarget - activeWorkers.get()
+                            if (deficit > 0 && chunksLeft) {
+                                repeat(deficit) { spawnWorker(count) }
+                            }
                         }
                     }
                     onSave()
@@ -824,7 +869,12 @@ class DownloadEngine(
             appendNote("这个服务器之前在多线程下载时限流过，这次最多用 $cap 条连接，免得又被拒绝。")
         }
         task.threads = sc.target
-        repeat(sc.target) { spawnWorker(count) }
+        // v3.9: the global connection cap gates the INITIAL
+        // spawn too — read the allowance before the first
+        // worker exists (the sampler re-reads it every scaler
+        // tick from here on).
+        connAllowance = connectionAllowance()
+        repeat(minOf(sc.target, connAllowance)) { spawnWorker(count) }
 
         // Wait until all workers exit (done or paused). v2.2
         // power pass: JOIN the worker threads instead of polling
@@ -1075,9 +1125,15 @@ class DownloadEngine(
             // queue is empty (see Endgame.shouldExitSurplus);
             // otherwise it drains a tail first.
             val sc = scaler
-            if (sc != null && activeWorkers.get() > sc.target) {
+            // v3.9: the surplus bar is the LOWER of the scaler's
+            // target and the live global-cap allowance — a cap
+            // that dropped mid-run (another task started) sheds
+            // workers at chunk boundaries exactly like a scaler
+            // shrink does, never mid-chunk.
+            val effTarget = if (sc != null) minOf(sc.target, connAllowance) else 0
+            if (sc != null && activeWorkers.get() > effTarget) {
                 val tails = synchronized(activeLock) { pendingTails.size }
-                if (Endgame.shouldExitSurplus(activeWorkers.get(), sc.target, tails)) {
+                if (Endgame.shouldExitSurplus(activeWorkers.get(), effTarget, tails)) {
                     return
                 }
                 val tail = pollPendingTail()

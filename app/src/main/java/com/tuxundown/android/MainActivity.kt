@@ -426,6 +426,8 @@ fun DownApp() {
     // v3.0: auto-extract finished .zip tasks (default off).
     var autoExtractUi by remember { mutableStateOf(DownloadCenter.autoExtractZip) }
     var maxConc by remember { mutableStateOf(DownloadCenter.maxConcurrent) }
+    // v3.9: global connection cap (all running tasks combined).
+    var connCap by remember { mutableStateOf(DownloadCenter.globalConnectionCap) }
     var autoRetry by remember { mutableStateOf(DownloadCenter.autoRetryCount) }
     var trafficMB by remember { mutableStateOf(DownloadCenter.trafficThresholdMB) }
     var dualChan by remember { mutableStateOf(DownloadCenter.dualChannel) }
@@ -791,6 +793,7 @@ fun DownApp() {
                             autoVerifyUi = DownloadCenter.autoVerifyHash
                             autoExtractUi = DownloadCenter.autoExtractZip
                             maxConc = DownloadCenter.maxConcurrent
+                            connCap = DownloadCenter.globalConnectionCap
                             autoRetry = DownloadCenter.autoRetryCount
                             trafficMB = DownloadCenter.trafficThresholdMB
                             dualChan = DownloadCenter.dualChannel
@@ -1572,6 +1575,8 @@ fun DownApp() {
             onSchedLimit = { schedLimitKBps = it; DownloadCenter.speedSchedLimitKBps = it },
             maxConc = maxConc,
             onMaxConc = { maxConc = it; DownloadCenter.maxConcurrent = it },
+            connCap = connCap,
+            onConnCap = { connCap = it; DownloadCenter.globalConnectionCap = it },
             autoRetry = autoRetry,
             onAutoRetry = { autoRetry = it; DownloadCenter.autoRetryCount = it },
             trafficMB = trafficMB,
@@ -4836,6 +4841,8 @@ fun SettingsScreen(
     onSchedLimit: (Int) -> Unit,
     maxConc: Int,
     onMaxConc: (Int) -> Unit,
+    connCap: Int,
+    onConnCap: (Int) -> Unit,
     autoRetry: Int,
     onAutoRetry: (Int) -> Unit,
     trafficMB: Int,
@@ -4901,7 +4908,7 @@ fun SettingsScreen(
     // string, so searching 限速/代理/备份 lands on the right group.
     var settingsQuery by remember { mutableStateOf("") }
     val settingsKeywords = mapOf(
-        "s-download" to "下载 仅wifi wifi 同时下载 任务数 并发 全局限速 限速 速度 " +
+        "s-download" to "下载 仅wifi wifi 同时下载 任务数 并发 连接上限 总连接 连接数 上限 全局限速 限速 速度 " +
             "限速计划 计划 时段 夜间 分时 " +
             "自动重试 重试 流量保护 流量 阈值 双通道 user-agent ua 浏览器标识 " +
             "下载目录 文件夹 保存位置 开机 自启 恢复 重启 续传 分类 分文件夹 类型",
@@ -5090,6 +5097,26 @@ fun SettingsScreen(
                     options = (1..5).map { it to "${it} 个" },
                     selected = maxConc,
                     onPick = onMaxConc,
+                )
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Text("全局连接上限（所有任务合计）")
+                ChipRow(
+                    options = listOf(
+                        8 to "8 条", 16 to "16 条", 32 to "32 条",
+                        48 to "48 条", 64 to "64 条",
+                    ),
+                    selected = connCap,
+                    onPick = onConnCap,
+                )
+                Text(
+                    "所有同时下载的任务加起来，最多开多少条连接。默认 32 条，" +
+                        "正好是以前一个任务自己就能开满的数，所以单个任务下载时和以前完全一样；" +
+                        "多个任务一起下时，总数封顶，任务之间按优先级分摊（高优先分得多），" +
+                        "被压住的任务卡片上会写明。调低更省电、也更不容易被服务器限流；" +
+                        "调高只在服务器不限速时才可能有区别。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp),
                 )
                 HorizontalDivider(Modifier.padding(vertical = 10.dp))
                 Row(
@@ -6982,6 +7009,24 @@ fun TaskCard(
                                 "${Format.size(ci.downloaded)} / ${Format.size(ci.total)}",
                         )
                     }
+                }
+                // v3.9: the global connection cap is holding
+                // this task below the count it would open on
+                // its own (see ConnectionBudget) — say so here,
+                // with the live numbers, where the effect is
+                // visible. connCapHeld is only ever set by the
+                // segmented engine; task.threads is the count it
+                // is aiming for.
+                if (task.status == TaskStatus.RUNNING && task.connCapHeld) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "全局连接上限在分摊：所有任务合计最多 " +
+                            "${DownloadCenter.globalConnectionCap} 条连接，这个任务想要 " +
+                            "${task.threads} 条、现在 ${task.connInfos.size} 条在跑。" +
+                            "其他任务下完会自动补上；也可以到设置 → 下载把上限调高。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 if (task.sources.isNotEmpty()) {
                     InfoRow("下载源：", "${1 + task.sources.size} 个地址（含镜像）")

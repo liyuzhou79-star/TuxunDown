@@ -629,6 +629,12 @@ class DownloadService : Service() {
                 onRateLimited = { atLimit ->
                     DownloadCenter.recordHostRateLimit(task.url, atLimit)
                 },
+                // v3.9: the global connection cap, split live
+                // across the running tasks by priority weight
+                // (see ConnectionBudget / DownloadCenter).
+                connectionAllowance = {
+                    DownloadCenter.connectionAllowanceFor(task.id)
+                },
             )
             DownloadCenter.registerEngine(task, engine)
             try {

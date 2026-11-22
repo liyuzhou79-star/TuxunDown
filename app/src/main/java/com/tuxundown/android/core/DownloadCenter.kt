@@ -222,6 +222,56 @@ object DownloadCenter {
         get() = pInt("maxConcurrent", 1).coerceIn(1, 5)
         set(v) { prefs().edit().putInt("maxConcurrent", v.coerceIn(1, 5)).apply() }
 
+    /**
+     * v3.9: the global connection cap — the TOTAL number of
+     * connections all running tasks may hold at once (see
+     * ConnectionBudget). Default 32, which is exactly what one
+     * task could already open on its own before this setting
+     * existed, so upgrading changes nothing until a second
+     * task runs alongside. Range 8–64.
+     */
+    var globalConnectionCap: Int
+        get() = pInt("globalConnectionCap", ConnectionBudget.DEFAULT_CAP)
+            .coerceIn(ConnectionBudget.MIN_CAP, ConnectionBudget.MAX_CAP)
+        set(v) {
+            prefs().edit().putInt(
+                "globalConnectionCap", ConnectionBudget.clampCap(v)
+            ).apply()
+        }
+
+    /**
+     * v3.9: this task's current allowance under the global
+     * connection cap, split across the RUNNING tasks by
+     * priority weight (see ConnectionBudget.allocate). Read
+     * live by the segmented engine on every scaler tick, so a
+     * task starting or finishing rebalances everyone within
+     * seconds. A task that is not (yet) RUNNING gets the whole
+     * cap — the split only governs live contention.
+     */
+    fun connectionAllowanceFor(taskId: String): Int {
+        val cap = globalConnectionCap
+        val running = store.tasks.filter { it.status == TaskStatus.RUNNING }
+        if (running.isEmpty()) return cap
+        val demands = running.map {
+            ConnectionBudget.Demand(
+                it.id, BandwidthBudget.weightOf(it.priority),
+                connectionDesireOf(it),
+            )
+        }
+        return ConnectionBudget.allocate(cap, demands)[taskId] ?: cap
+    }
+
+    /** How many connections a task could use with no global
+     *  cap in the way: segmented tasks scale up to
+     *  MAX_THREADS, HLS pulls segments HLS_PARALLEL at a time,
+     *  single-stream and FTP runs hold exactly one. */
+    private fun connectionDesireOf(t: TaskRecord): Int = when {
+        t.isHls -> DownloadEngine.HLS_PARALLEL
+        t.singleThreadOnly -> 1
+        FtpClient.isFtpUrl(t.url) -> 1
+        else -> DownloadEngine.MAX_THREADS
+    }
+
     /** v1.4: whole-task automatic retries after a failure (0 = off). */
     var autoRetryCount: Int
         get() = pInt("autoRetryCount", 0).coerceIn(0, 5)
@@ -474,6 +524,7 @@ object DownloadCenter {
         o.put("speedSchedEndMin", speedSchedEndMin)
         o.put("speedSchedLimitKBps", speedSchedLimitKBps)
         o.put("maxConcurrent", maxConcurrent)
+        o.put("globalConnectionCap", globalConnectionCap)
         o.put("autoRetryCount", autoRetryCount)
         o.put("trafficThresholdMB", trafficThresholdMB)
         o.put("dualChannel", dualChannel)
@@ -531,6 +582,9 @@ object DownloadCenter {
             speedSchedLimitKBps = o.optInt("speedSchedLimitKBps", speedSchedLimitKBps)
         }
         if (o.has("maxConcurrent")) maxConcurrent = o.optInt("maxConcurrent", maxConcurrent)
+        if (o.has("globalConnectionCap")) {
+            globalConnectionCap = o.optInt("globalConnectionCap", globalConnectionCap)
+        }
         if (o.has("autoRetryCount")) autoRetryCount = o.optInt("autoRetryCount", autoRetryCount)
         if (o.has("trafficThresholdMB")) {
             trafficThresholdMB = o.optInt("trafficThresholdMB", trafficThresholdMB)

@@ -166,6 +166,13 @@ class TaskRecord(
      *  ends. Transient on purpose: a snapshot left over
      *  from a dead process would be a lie. */
     @Transient @Volatile var connInfos: List<ConnInfo> = emptyList(),
+    /** v3.9: true while the global connection cap is holding
+     *  this task below the connection count it would open on
+     *  its own (see ConnectionBudget). Set by the segmented
+     *  engine's sampler on its scaler tick, cleared in run()'s
+     *  finally next to connInfos. Transient for the same
+     *  reason: it describes a live contention, not the task. */
+    @Transient @Volatile var connCapHeld: Boolean = false,
     /**
      * HLS: byte size of each segment whose size is known (-1 =
      * unknown), aligned with the playlist order. Persisted as CSV.
