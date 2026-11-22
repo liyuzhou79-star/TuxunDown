@@ -97,6 +97,7 @@ import androidx.documentfile.provider.DocumentFile
 import com.tuxundown.android.core.Backup
 import com.tuxundown.android.core.BatchRename
 import com.tuxundown.android.core.BulkControl
+import com.tuxundown.android.core.CardFields
 import com.tuxundown.android.core.Changelog
 import com.tuxundown.android.core.Checksum
 import com.tuxundown.android.core.ChunkMap
@@ -111,6 +112,7 @@ import com.tuxundown.android.core.DownloadedFiles
 import com.tuxundown.android.core.DuplicateFinder
 import com.tuxundown.android.core.TaskPriority
 import com.tuxundown.android.core.Format
+import com.tuxundown.android.core.HostMemory
 import com.tuxundown.android.core.FtpClient
 import com.tuxundown.android.core.LinkExtract
 import com.tuxundown.android.core.LinkSchemes
@@ -417,6 +419,8 @@ fun DownApp() {
     var archiveDaysUi by remember { mutableStateOf(DownloadCenter.archiveAfterDays) }
     var userAgentUi by remember { mutableStateOf(DownloadCenter.userAgent) }
     var amoledUi by remember { mutableStateOf(DownloadCenter.amoledBlack) }
+    // v3.7: task-card optional detail rows (see CardFields).
+    var cardFieldsUi by remember { mutableStateOf(DownloadCenter.cardFieldsSnapshot()) }
     // ---- v1.9: proxy mirrors (DownloadCenter owns persistence) ----
     var proxyOn by remember { mutableStateOf(DownloadCenter.proxyEnabled) }
     var proxyTypeUi by remember { mutableStateOf(DownloadCenter.proxyType) }
@@ -1510,6 +1514,11 @@ fun DownApp() {
                 amoledUi = it
                 DownloadCenter.amoledBlack = it
                 AmoledState.enabled = it
+            },
+            cardFields = cardFieldsUi,
+            onCardField = { key, v ->
+                DownloadCenter.setCardField(key, v)
+                cardFieldsUi = DownloadCenter.cardFieldsSnapshot()
             },
             proxyOn = proxyOn,
             onProxyOn = { proxyOn = it; DownloadCenter.proxyEnabled = it },
@@ -4570,6 +4579,8 @@ fun SettingsScreen(
     onUserAgent: (String) -> Unit,
     amoled: Boolean,
     onAmoled: (Boolean) -> Unit,
+    cardFields: Map<String, Boolean>,
+    onCardField: (String, Boolean) -> Unit,
     proxyOn: Boolean,
     onProxyOn: (Boolean) -> Unit,
     proxyType: Int,
@@ -4623,6 +4634,7 @@ fun SettingsScreen(
             "下载目录 文件夹 保存位置 开机 自启 恢复 重启 续传 分类 分文件夹 类型",
         "s-proxy" to "代理 proxy http socks 端口 地址 服务器 用户名 密码 认证",
         "s-look" to "外观 amoled 纯黑 深色 暗色 主题 黑色",
+        "s-card" to "任务卡片 卡片 字段 平均速度 重试次数 创建时间 来源站点 分片 显示 详情",
         "s-notify" to "提示 震动 声音 响铃 完成 自动安装 安装 自动打开 打开 静默 夜间 时段 勿扰 " +
             "校验 哈希 完整性 sha md5 解压 zip 压缩包 自动解压",
         "s-power" to "后台运行 后台 保活 电池 白名单 省电 冻结",
@@ -5124,6 +5136,38 @@ fun SettingsScreen(
                         )
                     }
                     Switch(checked = amoled, onCheckedChange = onAmoled)
+                }
+            }
+        }
+        if (groupVisible("s-card")) item(key = "s-card") {
+            SettingsGroup("任务卡片显示") {
+                Text(
+                    "任务卡片展开「详细信息」时显示哪些可选行。关掉的行只是不显示，" +
+                        "数据都还在；平均速度、重试次数、分片进度是以前就有的行（默认开），" +
+                        "创建时间、来源站点是新增的可选行（默认关）。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                for (f in CardFields.FIELDS) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(f.label)
+                            Text(
+                                f.hint,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = cardFields[f.key] ?: f.default,
+                            onCheckedChange = { onCardField(f.key, it) },
+                        )
+                    }
                 }
             }
         }
@@ -6431,7 +6475,7 @@ fun TaskCard(
                 when (task.status) {
                     TaskStatus.RUNNING -> {
                         InfoRow("速度：", Format.speed(task.speedBps))
-                        if (task.avgBps > 0) InfoRow("平均速度：", Format.speed(task.avgBps))
+                        if (task.avgBps > 0 && DownloadCenter.cardFieldShown(CardFields.AVG_SPEED)) InfoRow("平均速度：", Format.speed(task.avgBps))
                         if (task.peakBps > 0) InfoRow("峰值速度：", Format.speed(task.peakBps))
                         val eta = Format.eta(task.etaSeconds)
                         InfoRow("剩余时间：", eta.ifBlank { "计算中…" })
@@ -6448,12 +6492,12 @@ fun TaskCard(
                             "已下载：",
                             "${Format.size(task.downloaded)} / ${Format.size(task.totalSize)}",
                         )
-                        if (task.avgBps > 0) InfoRow("平均速度：", Format.speed(task.avgBps))
+                        if (task.avgBps > 0 && DownloadCenter.cardFieldShown(CardFields.AVG_SPEED)) InfoRow("平均速度：", Format.speed(task.avgBps))
                         if (task.peakBps > 0) InfoRow("峰值速度：", Format.speed(task.peakBps))
                     }
                     TaskStatus.DONE -> {
                         InfoRow("大小：", Format.size(task.totalSize))
-                        if (task.avgBps > 0) InfoRow("平均速度：", Format.speed(task.avgBps))
+                        if (task.avgBps > 0 && DownloadCenter.cardFieldShown(CardFields.AVG_SPEED)) InfoRow("平均速度：", Format.speed(task.avgBps))
                         if (task.peakBps > 0) InfoRow("峰值速度：", Format.speed(task.peakBps))
                         if (task.elapsedMs > 0) InfoRow("总用时：", Format.duration(task.elapsedMs))
                         if (task.savedName.isNotBlank()) {
@@ -6522,6 +6566,15 @@ fun TaskCard(
                         OutlinedButton(onClick = onJumpQueue) { Text("插队到最前") }
                     }
                 }
+                // v3.7: optional card rows （创建时间 / 来源站点，
+                // both default OFF — see CardFields).
+                if (DownloadCenter.cardFieldShown(CardFields.CREATED_AT)) {
+                    InfoRow("创建时间：", Format.dateTime(task.createdAt))
+                }
+                if (DownloadCenter.cardFieldShown(CardFields.HOST)) {
+                    val cardHost = HostMemory.hostOf(task.url)
+                    if (cardHost.isNotBlank()) InfoRow("来源站点：", cardHost)
+                }
                 // v2.8: queue pre-check warning (see
                 // LinkPrecheck). Wording matters: this is a
                 // heads-up, NOT a failure — the task will still
@@ -6535,7 +6588,9 @@ fun TaskCard(
                         color = WinPalette.Red,
                     )
                 }
-                if (task.chunkSize > 0 && task.totalSize > 0 && task.status != TaskStatus.DONE) {
+                if (DownloadCenter.cardFieldShown(CardFields.CHUNKS) &&
+                    task.chunkSize > 0 && task.totalSize > 0 && task.status != TaskStatus.DONE
+                ) {
                     val total = (task.totalSize + task.chunkSize - 1) / task.chunkSize
                     InfoRow(
                         "分片：",
@@ -6566,7 +6621,9 @@ fun TaskCard(
                     )
                 }
                 // v1.6: HLS merge progress + multi-source state.
-                if (task.isHls && task.hlsTotalSegments > 0) {
+                if (DownloadCenter.cardFieldShown(CardFields.CHUNKS) &&
+                    task.isHls && task.hlsTotalSegments > 0
+                ) {
                     InfoRow(
                         "流媒体分片：",
                         "已合并 ${task.hlsDone.count { it }}/${task.hlsTotalSegments} 段",
@@ -6594,7 +6651,8 @@ fun TaskCard(
                 // v3.5: a single-stream task has no chunks to
                 // draw — say so where the map would have been
                 // instead of leaving a silent gap.
-                if (!task.isHls && task.chunkSize <= 0 && task.singleThreadOnly &&
+                if (DownloadCenter.cardFieldShown(CardFields.CHUNKS) &&
+                    !task.isHls && task.chunkSize <= 0 && task.singleThreadOnly &&
                     task.status != TaskStatus.DONE
                 ) {
                     Text(
@@ -6742,7 +6800,7 @@ fun TaskCard(
                         )
                     }
                 }
-                if (task.retryCount > 0) {
+                if (task.retryCount > 0 && DownloadCenter.cardFieldShown(CardFields.RETRY_COUNT)) {
                     InfoRow("重试次数：", "${task.retryCount} 次（分片级）")
                 }
                 // v2.8: the user's own note — displayed above

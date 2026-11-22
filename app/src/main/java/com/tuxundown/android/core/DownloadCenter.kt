@@ -42,6 +42,51 @@ object DownloadCenter {
         get() = pBool("detailsExpanded", true)
         set(v) { prefs().edit().putBoolean("detailsExpanded", v).apply() }
 
+    // ---- v3.7: optional task-card detail rows (see CardFields
+    // for the catalogue). Defaults reproduce the pre-3.7 card:
+    // the rows that existed default ON, the new ones OFF. ----
+    var cardShowAvgSpeed: Boolean
+        get() = pBool("cardShowAvgSpeed", CardFields.defaultOf(CardFields.AVG_SPEED))
+        set(v) { prefs().edit().putBoolean("cardShowAvgSpeed", v).apply() }
+    var cardShowRetryCount: Boolean
+        get() = pBool("cardShowRetryCount", CardFields.defaultOf(CardFields.RETRY_COUNT))
+        set(v) { prefs().edit().putBoolean("cardShowRetryCount", v).apply() }
+    var cardShowCreatedAt: Boolean
+        get() = pBool("cardShowCreatedAt", CardFields.defaultOf(CardFields.CREATED_AT))
+        set(v) { prefs().edit().putBoolean("cardShowCreatedAt", v).apply() }
+    var cardShowHost: Boolean
+        get() = pBool("cardShowHost", CardFields.defaultOf(CardFields.HOST))
+        set(v) { prefs().edit().putBoolean("cardShowHost", v).apply() }
+    var cardShowChunks: Boolean
+        get() = pBool("cardShowChunks", CardFields.defaultOf(CardFields.CHUNKS))
+        set(v) { prefs().edit().putBoolean("cardShowChunks", v).apply() }
+
+    /** v3.7: key-based access to the card-field switches — the
+     *  settings screen iterates CardFields.FIELDS and the task
+     *  card asks per key, so the key→property mapping lives in
+     *  exactly one place. */
+    fun cardFieldShown(key: String): Boolean = when (key) {
+        CardFields.AVG_SPEED -> cardShowAvgSpeed
+        CardFields.RETRY_COUNT -> cardShowRetryCount
+        CardFields.CREATED_AT -> cardShowCreatedAt
+        CardFields.HOST -> cardShowHost
+        CardFields.CHUNKS -> cardShowChunks
+        else -> CardFields.defaultOf(key)
+    }
+
+    fun setCardField(key: String, v: Boolean) {
+        when (key) {
+            CardFields.AVG_SPEED -> cardShowAvgSpeed = v
+            CardFields.RETRY_COUNT -> cardShowRetryCount = v
+            CardFields.CREATED_AT -> cardShowCreatedAt = v
+            CardFields.HOST -> cardShowHost = v
+            CardFields.CHUNKS -> cardShowChunks = v
+        }
+    }
+
+    fun cardFieldsSnapshot(): Map<String, Boolean> =
+        CardFields.FIELDS.associate { it.key to cardFieldShown(it.key) }
+
     /** Global per-task speed limit in KB/s (v1.3); 0 = unlimited. */
     var speedLimitKBps: Int
         get() = pInt("speedLimitKBps", 0)
@@ -447,6 +492,11 @@ object DownloadCenter {
         o.put("sortSubfolders", sortSubfolders)
         o.put("archiveAfterDays", archiveAfterDays)
         o.put("detailsExpanded", detailsExpanded)
+        o.put("cardShowAvgSpeed", cardShowAvgSpeed)
+        o.put("cardShowRetryCount", cardShowRetryCount)
+        o.put("cardShowCreatedAt", cardShowCreatedAt)
+        o.put("cardShowHost", cardShowHost)
+        o.put("cardShowChunks", cardShowChunks)
         o.put("sniffHistory", org.json.JSONArray(sniffHistory))
         o.put("sniffFilterKind", sniffFilterKind)
         o.put("sniffFilterMinMB", sniffFilterMinMB)
@@ -518,6 +568,21 @@ object DownloadCenter {
         }
         if (o.has("detailsExpanded")) {
             detailsExpanded = o.optBoolean("detailsExpanded", detailsExpanded)
+        }
+        if (o.has("cardShowAvgSpeed")) {
+            cardShowAvgSpeed = o.optBoolean("cardShowAvgSpeed", cardShowAvgSpeed)
+        }
+        if (o.has("cardShowRetryCount")) {
+            cardShowRetryCount = o.optBoolean("cardShowRetryCount", cardShowRetryCount)
+        }
+        if (o.has("cardShowCreatedAt")) {
+            cardShowCreatedAt = o.optBoolean("cardShowCreatedAt", cardShowCreatedAt)
+        }
+        if (o.has("cardShowHost")) {
+            cardShowHost = o.optBoolean("cardShowHost", cardShowHost)
+        }
+        if (o.has("cardShowChunks")) {
+            cardShowChunks = o.optBoolean("cardShowChunks", cardShowChunks)
         }
         val hist = o.optJSONArray("sniffHistory")
         if (hist != null) {
