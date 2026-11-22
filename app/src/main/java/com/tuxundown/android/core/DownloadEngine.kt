@@ -20,7 +20,8 @@ import kotlin.math.max
  *   equal pieces and take them over (see [Endgame] for the plan and
  *   for how split parts share the chunk's single bitset bit).
  * - Auto thread probing: starts low, then doubles 4 -> 8 -> 16 -> 32
- *   every 2 s while the measured speed keeps growing by more than 10%;
+ *   -> 64 every 2 s while the measured speed keeps growing by more
+ *   than 10%;
  *   stops at the first plateau. v2.3 adds mid-download DYNAMIC
  *   SCALING on top (see [ThreadScaler]): the settled count is not
  *   final — the scaler keeps growing it while the speed responds
@@ -835,10 +836,6 @@ class DownloadEngine(
         sampler.isDaemon = true
         sampler.start()
 
-        // Audit A9: a FRESH start re-probes from 4 threads (yesterday's
-        // optimum says nothing about today's network); a resume keeps
-        // the persisted count but starts at most at 8 and lets the
-        // prober grow it again if the network wants more.
         val resuming = firstOpen > 0 || downloadedBytes.get() > 0
         // v2.8: the remembered rate-limit ceiling for this host
         // (0 = none). It bounds EVERYTHING below — the hint
@@ -847,28 +844,35 @@ class DownloadEngine(
         // no ceiling at all. Only values in HostMemory's own
         // legal band are honoured (MIN_CAP..MAX_THREADS), so a
         // corrupt value can never squeeze the scaler's range
-        // shut.
+        // shut. (StartPlan applies the same band rule to its own
+        // bound; this validated copy still drives the scaler's
+        // max and the note below.)
         val cap = if (initialThreadsCap in HostMemory.MIN_CAP..MAX_THREADS) {
             initialThreadsCap
         } else {
             0
         }
-        // v1.5: a FRESH start with a remembered optimum for this host
-        // begins at that count and skips probing altogether — the
-        // first ~6 s of ramp-up are pure waste on a known server.
-        val hintRaw = if (!resuming && initialThreadsHint in 2..MAX_THREADS) {
-            initialThreadsHint
+        // v4.2: the start count is decided by the pure StartPlan
+        // (see StartPlan for the full rule table). The v1.5 hint
+        // gate stays HERE: the caller passes the remembered
+        // optimum unconditionally, and only a FRESH start may use
+        // it — a resume never sees the hint today. StartPlan's
+        // hint branch itself does not check `resuming`, so if a
+        // future caller passes a hint for a resume it will be
+        // honoured there too.
+        val plan = StartPlan.decide(
+            hint = if (!resuming) initialThreadsHint else 0,
+            cap = initialThreadsCap,
+            resuming = resuming,
+            persistedThreads = task.threads,
+        )
+        // The hint actually used (after StartPlan's bound), for
+        // the note below: a valid fresh hint always lands in the
+        // plan, pressed down by the cap when one is remembered.
+        val hint = if (!resuming && initialThreadsHint in 2..MAX_THREADS) {
+            if (cap > 0) minOf(initialThreadsHint, cap) else initialThreadsHint
         } else {
             0
-        }
-        val hint = if (cap > 0 && hintRaw > 0) minOf(hintRaw, cap) else hintRaw
-        val initial = when {
-            resuming -> {
-                val r = task.threads.coerceIn(1, 8)
-                if (cap > 0) minOf(r, cap) else r
-            }
-            hint > 0 -> hint
-            else -> 4
         }
         // v2.3: the scaler owns the count from here. A hint start
         // skips the ladder (steady state from the first tick); any
@@ -876,8 +880,8 @@ class DownloadEngine(
         // network may have changed since the count was persisted.
         // v2.8: the scaler's max IS the cap when one is remembered.
         val sc = ThreadScaler(
-            initial,
-            probing = hint == 0,
+            plan.start,
+            probing = plan.probing,
             maxThreads = if (cap > 0) cap else MAX_THREADS,
         )
         scaler = sc
@@ -2189,7 +2193,7 @@ class DownloadEngine(
     }
 
     companion object {
-        const val MAX_THREADS = 32
+        const val MAX_THREADS = 64
         const val MIN_SPLIT = 256L * 1024
         const val BUFFER_SIZE = 128 * 1024
         /** v1.7: was 6 — long CDN redirect chains hit it; loops are
@@ -2254,10 +2258,18 @@ class DownloadEngine(
         /**
          * v1.5 buffer sizing: the per-connection read buffer shrinks
          * as the worker count grows, so total read-buffer memory
-         * stays bounded (~2 MB worst case at 32 threads) instead of
-         * scaling linearly with threads. Few threads keep the full
-         * 128 KB (fewest syscalls per MB); many threads trade a
-         * little per-connection efficiency for a hard memory cap.
+         * stays bounded instead of scaling linearly with threads.
+         * Few threads keep the full 128 KB (fewest syscalls per MB);
+         * many threads trade a little per-connection efficiency for
+         * a hard memory cap.
+         *
+         * v4.2 memory account (the total budget doubled 2 MB ->
+         * 4 MB when MAX_THREADS went 32 -> 64): at 64 connections
+         * each buffer is 64 KB, so one task's worst case is
+         * 64 x 64 KB = 4 MB; at 32 connections each buffer is back
+         * at the 128 KB ceiling. App-wide the read buffers stay
+         * bounded by the global connection cap (<= 128 connections,
+         * see ConnectionBudget), i.e. ≲ 8 MB in total.
          * Connection reuse itself is the platform's keep-alive pool:
          * every path here fully consumes or explicitly closes its
          * streams, which is what lets HttpURLConnection recycle the
@@ -2265,7 +2277,7 @@ class DownloadEngine(
          */
         fun bufferSizeFor(threads: Int): Int {
             val t = threads.coerceAtLeast(1)
-            val budget = 2 * 1024 * 1024 / t
+            val budget = 4 * 1024 * 1024 / t
             return budget.coerceIn(32 * 1024, BUFFER_SIZE)
         }
 

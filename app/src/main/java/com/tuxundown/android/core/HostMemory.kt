@@ -5,7 +5,7 @@ import java.net.URL
 /**
  * Per-host optimal thread memory (v1.5).
  *
- * The engine's thread prober (4 -> 8 -> 16 -> 32) costs the first
+ * The engine's thread prober (4 -> 8 -> 16 -> 32 -> 64) costs the first
  * ~6 seconds of every download. For a server the user downloads from
  * regularly that optimum barely changes, so the settled thread count
  * is remembered per host: the next download from the same host starts

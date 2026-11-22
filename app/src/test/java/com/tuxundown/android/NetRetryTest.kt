@@ -39,9 +39,13 @@ class NetRetryTest {
     fun bufferShrinksAsThreadsGrowButStaysInRange() {
         assertEquals(DownloadEngine.BUFFER_SIZE, DownloadEngine.bufferSizeFor(1))
         assertEquals(DownloadEngine.BUFFER_SIZE, DownloadEngine.bufferSizeFor(8))
-        assertEquals(64 * 1024, DownloadEngine.bufferSizeFor(32))
-        // Worst case total stays at the ~2 MB budget.
-        assertTrue(DownloadEngine.bufferSizeFor(32) * 32 <= 2 * 1024 * 1024)
+        // v4.2: the total budget doubled to 4 MB with the 64-thread
+        // ceiling, so 32 connections are back at the 128 KB cap...
+        assertEquals(DownloadEngine.BUFFER_SIZE, DownloadEngine.bufferSizeFor(32))
+        // ...and 64 connections get 64 KB each.
+        assertEquals(64 * 1024, DownloadEngine.bufferSizeFor(64))
+        // Worst case total stays at the 4 MB budget.
+        assertTrue(DownloadEngine.bufferSizeFor(64) * 64 <= 4 * 1024 * 1024)
         assertEquals(DownloadEngine.BUFFER_SIZE, DownloadEngine.bufferSizeFor(0))
     }
 }

@@ -257,7 +257,7 @@ object DownloadCenter {
      * ConnectionBudget). Default 32, which is exactly what one
      * task could already open on its own before this setting
      * existed, so upgrading changes nothing until a second
-     * task runs alongside. Range 8–64.
+     * task runs alongside. Range 8–128 (v4.2: was 8–64).
      */
     var globalConnectionCap: Int
         get() = pInt("globalConnectionCap", ConnectionBudget.DEFAULT_CAP)

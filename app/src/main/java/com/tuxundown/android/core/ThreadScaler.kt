@@ -6,10 +6,12 @@ package com.tuxundown.android.core
  *
  * The three thread-count mechanisms divide the work like this:
  * - PROBING (this class, opening phase) decides the START: the
- *   classic ladder 4 -> 8 -> 16 -> 32, doubling every evaluation
- *   while the speed keeps growing by more than 10%, stopping at
- *   the first plateau. A remembered host hint (HostMemory) skips
- *   this phase entirely and starts in steady state.
+ *   classic ladder 4 -> 8 -> 16 -> 32 -> 64, doubling every
+ *   evaluation while the speed keeps growing by more than 10%,
+ *   stopping at the first plateau. (Since v4.2 the opening count
+ *   itself comes from StartPlan — a burst start simply joins
+ *   this ladder higher up.) A remembered host hint (HostMemory)
+ *   skips this phase entirely and starts in steady state.
  * - SCALING (this class, steady state) manages the MIDDLE: it
  *   keeps asking whether the current count still earns its keep.
  *   Add connections while the speed genuinely responds; take

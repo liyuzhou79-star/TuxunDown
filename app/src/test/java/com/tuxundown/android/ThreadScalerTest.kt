@@ -18,9 +18,10 @@ class ThreadScalerTest {
 
     @Test
     fun ladderDoublesWhileSpeedRises() {
-        val s = ThreadScaler(4, probing = true)
-        val targets = feed(s, 100, 130, 170, 220)
-        assertEquals(listOf(8, 16, 32, 32), targets)
+        // v4.2: the ladder now climbs to the raised 64 ceiling.
+        val s = ThreadScaler(4, probing = true, maxThreads = 64)
+        val targets = feed(s, 100, 130, 170, 220, 290)
+        assertEquals(listOf(8, 16, 32, 64, 64), targets)
         assertFalse(s.probing) // cap reached: ladder done
     }
 
@@ -136,10 +137,11 @@ class ThreadScalerTest {
     @Test
     fun boundsAreRespected() {
         assertEquals(ThreadScaler.MIN_TARGET, ThreadScaler(1, false).target)
-        assertEquals(32, ThreadScaler(99, false).target)
-        val s = ThreadScaler(32, probing = false)
+        // v4.2: the default ceiling is the raised MAX_THREADS (64).
+        assertEquals(64, ThreadScaler(99, false).target)
+        val s = ThreadScaler(64, probing = false)
         feed(s, 100, 200, 400, 800) // rising forever: still capped
-        assertEquals(32, s.target)
+        assertEquals(64, s.target)
         val low = ThreadScaler(2, probing = false)
         feed(low, 100, 100, 100, 100, 100, 100) // flat at the floor
         assertEquals(2, low.target)

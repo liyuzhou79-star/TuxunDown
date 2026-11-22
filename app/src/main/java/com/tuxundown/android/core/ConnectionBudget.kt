@@ -19,7 +19,7 @@ package com.tuxundown.android.core
 object ConnectionBudget {
 
     const val MIN_CAP = 8
-    const val MAX_CAP = 64
+    const val MAX_CAP = 128
     const val DEFAULT_CAP = 32
 
     fun clampCap(v: Int): Int = v.coerceIn(MIN_CAP, MAX_CAP)
