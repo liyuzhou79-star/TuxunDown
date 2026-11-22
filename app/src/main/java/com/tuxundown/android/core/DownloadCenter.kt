@@ -221,6 +221,30 @@ object DownloadCenter {
         set(v) { prefs().edit().putInt("sniffFilterMinMB", v.coerceIn(0, 102_400)).apply() }
 
     /**
+     * v3.3: home list view — group the tasks by site instead
+     * of one flat list. A view preference; rides backups like
+     * the other UI settings (round-17 completeness rule).
+     */
+    var taskGroupBySite: Boolean
+        get() = pBool("taskGroupBySite", false)
+        set(v) { prefs().edit().putBoolean("taskGroupBySite", v).apply() }
+
+    /**
+     * v3.3: site groups the user folded shut, remembered
+     * across launches (host names, one per line — a host can
+     * never contain a newline, so the encoding is exact).
+     */
+    var collapsedSites: Set<String>
+        get() = pString("collapsedSites", "")
+            .lines().map { it.trim() }.filter { it.isNotBlank() }.toSet()
+        set(v) {
+            prefs().edit().putString(
+                "collapsedSites",
+                v.filter { it.isNotBlank() }.joinToString("\n"),
+            ).apply()
+        }
+
+    /**
      * v1.6: WiFi+mobile dual channel (best effort). Default OFF.
      * When on, the service asks the system for a cellular network
      * and the engine alternates connections between the two; when
@@ -388,6 +412,8 @@ object DownloadCenter {
         o.put("sniffHistory", org.json.JSONArray(sniffHistory))
         o.put("sniffFilterKind", sniffFilterKind)
         o.put("sniffFilterMinMB", sniffFilterMinMB)
+        o.put("taskGroupBySite", taskGroupBySite)
+        o.put("collapsedSites", org.json.JSONArray(collapsedSites))
         // v1.9: proxy settings travel with the backup EXCEPT the
         // password — a credential does not belong in a file the
         // user may store or send anywhere. It must be re-entered
@@ -466,6 +492,16 @@ object DownloadCenter {
         }
         if (o.has("sniffFilterMinMB")) {
             sniffFilterMinMB = o.optInt("sniffFilterMinMB", sniffFilterMinMB)
+        }
+        if (o.has("taskGroupBySite")) {
+            taskGroupBySite = o.optBoolean("taskGroupBySite", taskGroupBySite)
+        }
+        val sites = o.optJSONArray("collapsedSites")
+        if (sites != null) {
+            collapsedSites = (0 until sites.length())
+                .map { sites.optString(it) }
+                .filter { it.isNotBlank() }
+                .toSet()
         }
         // v1.9: proxy (password deliberately not in backups).
         if (o.has("proxyEnabled")) proxyEnabled = o.optBoolean("proxyEnabled", proxyEnabled)

@@ -56,6 +56,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -523,6 +524,9 @@ fun DownApp() {
     var tab by remember { mutableStateOf(0) } // 0 全部 1 下载中 2 已完成 3 失败
     var query by remember { mutableStateOf("") }
     var sortMode by remember { mutableStateOf(0) } // 0 默认 1 大小 2 时间
+    // ---- v3.3: site-grouped view (persisted in DownloadCenter) ----
+    var groupBySite by remember { mutableStateOf(DownloadCenter.taskGroupBySite) }
+    var collapsedSites by remember { mutableStateOf(DownloadCenter.collapsedSites) }
     var selecting by remember { mutableStateOf(false) }
     var selectedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
 
@@ -1364,6 +1368,16 @@ fun DownApp() {
         null
     }
 
+    // v3.3: the site-grouped view of the SAME tab-filtered,
+    // sorted list — grouping preserves the list's order inside
+    // each group and only adds headers (see SiteGroups for the
+    // coexistence rules). Empty unless the view is on.
+    val siteGroups = if (groupBySite && globalResult == null) {
+        com.tuxundown.android.core.SiteGroups.group(displayedTasks)
+    } else {
+        emptyList()
+    }
+
     // v2.1 safe-area: the whole UI sits inside the system-bar
     // insets (see MainActivity.onCreate) — screens and their
     // bottom buttons never slide under the status or gesture bar
@@ -1707,6 +1721,34 @@ fun DownApp() {
                                 }
                             }
                         }
+                        // v3.3: list view toggle — only while
+                        // browsing (a query switches to global
+                        // search, which has its own groups).
+                        if (query.isBlank()) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(top = 6.dp)
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    "视图：",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                val views = listOf(false to "平铺", true to "按站点")
+                                for ((v, label) in views) {
+                                    if (v == groupBySite) {
+                                        Button(onClick = { }) { Text(label) }
+                                    } else {
+                                        OutlinedButton(onClick = {
+                                            groupBySite = v
+                                            DownloadCenter.taskGroupBySite = v
+                                        }) { Text(label) }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2002,7 +2044,75 @@ fun DownApp() {
             // v3.3: in global-search mode the groups above ARE
             // the list; the flat list renders only when browsing.
             if (globalResult == null) {
-                if (wideScreen) {
+                if (groupBySite) {
+                    // v3.3: site-grouped view — a header per
+                    // site (host, count, aggregate progress),
+                    // foldable, folds remembered across
+                    // launches. Single column even on wide
+                    // screens so headers span the full width;
+                    // tabs/sort already shaped the list above.
+                    for (g in siteGroups) {
+                        item(key = "site-" + g.host) {
+                            Card(
+                                Modifier.fillMaxWidth().clickable {
+                                    collapsedSites =
+                                        if (g.host in collapsedSites) {
+                                            collapsedSites - g.host
+                                        } else {
+                                            collapsedSites + g.host
+                                        }
+                                    DownloadCenter.collapsedSites = collapsedSites
+                                },
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.surface
+                                ),
+                            ) {
+                                Row(
+                                    Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            g.host,
+                                            style = MaterialTheme.typography.titleMedium,
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        val pct = g.progressPct
+                                        Text(
+                                            if (pct != null) {
+                                                "${g.tasks.size} 个任务 · 总进度 $pct%"
+                                            } else {
+                                                "${g.tasks.size} 个任务"
+                                            },
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                        if (pct != null) {
+                                            Spacer(Modifier.height(6.dp))
+                                            LinearProgressIndicator(
+                                                progress = pct / 100f,
+                                                modifier = Modifier.fillMaxWidth(),
+                                                color = WinPalette.Green,
+                                            )
+                                        }
+                                    }
+                                    Spacer(Modifier.size(10.dp))
+                                    Text(
+                                        if (g.host in collapsedSites) "展开" else "折叠",
+                                        color = MaterialTheme.colorScheme.primary,
+                                    )
+                                }
+                            }
+                        }
+                        if (g.host !in collapsedSites) {
+                            items(g.tasks, key = { it.id }) { task ->
+                                TaskCardFor(task)
+                            }
+                        }
+                    }
+                } else if (wideScreen) {
                     items(displayedTasks.chunked(2), key = { "row-" + it.first().id }) { pair ->
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             for (t in pair) {
