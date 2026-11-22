@@ -1481,7 +1481,16 @@ class DownloadEngine(
         var consumed = false
         try {
             input = c.inputStream
-            val buf = ByteArray(bufferSizeFor(task.threads))
+            // v4.2 audit round 27: size the buffer by the LIVE
+            // worker count when it exceeds the target (a scaler
+            // shrink leaves surplus workers draining chunks /
+            // tails at the new, smaller target — sizing by the
+            // target alone would hand each of them the LARGER
+            // low-count buffer and break the per-task 4 MB
+            // account in bufferSizeFor's doc).
+            val buf = ByteArray(
+                bufferSizeFor(bufferThreadsFor(task.threads, activeWorkers.get()))
+            )
             var pos = from
             while (!stopped()) {
                 val limit = ac.end // may shrink when split
@@ -2373,9 +2382,27 @@ class DownloadEngine(
          * 4 MB when MAX_THREADS went 32 -> 64): at 64 connections
          * each buffer is 64 KB, so one task's worst case is
          * 64 x 64 KB = 4 MB; at 32 connections each buffer is back
-         * at the 128 KB ceiling. App-wide the read buffers stay
-         * bounded by the global connection cap (<= 128 connections,
-         * see ConnectionBudget), i.e. ≲ 8 MB in total.
+         * at the 128 KB ceiling.
+         *
+         * Audit round 27 corrected the app-wide half of this
+         * account (the earlier "≲ 8 MB" line quietly assumed every
+         * connection runs a 64 KB buffer, which only holds when
+         * every task's target is 64): downloadRange sizes each
+         * buffer by [bufferThreadsFor] — max(target, LIVE worker
+         * count) — so one task's live buffers NEVER exceed
+         * count x (4 MB / count) = 4 MB, even while surplus
+         * workers drain after a shrink, and even when the global
+         * allowance lets fewer workers run than the target (the
+         * buffers then just come out larger per worker, total
+         * unchanged). App-wide the segmented read buffers are
+         * therefore bounded by 4 MB x concurrent tasks (at most
+         * 5, so 20 MB absolute), and in steady state by the
+         * global connection cap x the 128 KB per-buffer ceiling:
+         * the default cap 32 -> <= 4 MB; the maximum cap 128 ->
+         * <= 16 MB, reachable only with several low-target tasks
+         * sharing a raised cap; all-target-64 at cap 128 ->
+         * 128 x 64 KB = 8 MB. (Single-stream / HLS buffers are
+         * separate, fixed-size allocations, not this account.)
          * Connection reuse itself is the platform's keep-alive pool:
          * every path here fully consumes or explicitly closes its
          * streams, which is what lets HttpURLConnection recycle the
@@ -2386,6 +2413,21 @@ class DownloadEngine(
             val budget = 4 * 1024 * 1024 / t
             return budget.coerceIn(32 * 1024, BUFFER_SIZE)
         }
+
+        /**
+         * v4.2 audit round 27: the thread count a new read buffer
+         * is sized by — the scaler target, or the LIVE worker
+         * count when more workers than the target are still
+         * draining (post-shrink surplus, endgame tails). Sizing
+         * by the larger of the two is what makes the per-task
+         * 4 MB account in [bufferSizeFor]'s doc hold at every
+         * moment, not just in steady state: with n live buffers
+         * each sized by >= n, the total stays <= n x (4 MB / n).
+         * Pure — unit-tested (the bound is swept over the whole
+         * target x live-count grid in NetRetryTest).
+         */
+        fun bufferThreadsFor(target: Int, activeWorkers: Int): Int =
+            maxOf(target, activeWorkers).coerceAtLeast(1)
 
         fun fileNameFrom(contentDisposition: String?, url: String): String {
             if (!contentDisposition.isNullOrBlank()) {

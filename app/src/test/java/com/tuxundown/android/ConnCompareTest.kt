@@ -79,6 +79,23 @@ class ConnCompareTest {
     }
 
     @Test
+    fun runningTasksNoteIsEmptyWhenNothingRuns() {
+        // Audit round 27: no contention at the start moment ->
+        // no note (the static consent line already covers the
+        // general advice).
+        assertEquals("", ConnCompare.runningTasksNote(0))
+        assertEquals("", ConnCompare.runningTasksNote(-1))
+    }
+
+    @Test
+    fun runningTasksNoteNamesTheStartMomentCount() {
+        val note = ConnCompare.runningTasksNote(3)
+        assertTrue(note.contains("3"))
+        assertTrue(note.contains("开始实测时"))
+        assertTrue(note.contains("偏低"))
+    }
+
+    @Test
     fun consentTextMatchesTheConstants() {
         val text = ConnCompare.consentText()
         // The numbers the user consents to are the numbers the

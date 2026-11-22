@@ -84,6 +84,21 @@ object ConnCompare {
      * seconds, cap in MB) so the text can never drift away from
      * what the code actually enforces.
      */
+    /**
+     * v4.2 audit round 27: the dynamic companion to the static
+     * "建议在没有任务正在下载时测" line in [consentText]. The
+     * caller reads the RUNNING-task count ONCE, at the moment
+     * the run actually starts, and shows this note alongside
+     * the results that run produced — it is a snapshot of the
+     * start moment, never a live counter (a live one would go
+     * stale mid-run and misdescribe the finished tiers).
+     * Empty when nothing was running: no note needed.
+     */
+    fun runningTasksNote(runningAtStart: Int): String {
+        if (runningAtStart <= 0) return ""
+        return "开始实测时有 $runningAtStart 个任务正在下载，它们会抢带宽，这次结果会偏低。"
+    }
+
     fun consentText(): String {
         val tiers = TIERS.joinToString("、")
         val seconds = PHASE_MS / 1000

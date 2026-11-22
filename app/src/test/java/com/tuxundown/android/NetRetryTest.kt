@@ -48,4 +48,35 @@ class NetRetryTest {
         assertTrue(DownloadEngine.bufferSizeFor(64) * 64 <= 4 * 1024 * 1024)
         assertEquals(DownloadEngine.BUFFER_SIZE, DownloadEngine.bufferSizeFor(0))
     }
+
+    @Test
+    fun bufferThreadsForUsesTheLargerCount() {
+        // Audit round 27: sizing follows max(target, live workers).
+        assertEquals(64, DownloadEngine.bufferThreadsFor(64, 8))
+        assertEquals(64, DownloadEngine.bufferThreadsFor(8, 64))
+        assertEquals(16, DownloadEngine.bufferThreadsFor(16, 16))
+        assertEquals(1, DownloadEngine.bufferThreadsFor(0, 0))
+    }
+
+    @Test
+    fun liveBuffersNeverExceedThePerTaskBudget() {
+        // Audit round 27: for EVERY (target, live workers) pair,
+        // live workers x their buffer stays within the 4 MB
+        // per-task account — including the post-shrink case
+        // (small target, many workers still draining) that
+        // sizing by the target alone would have blown past
+        // (64 workers x 128 KB at target 2 = 8 MB).
+        for (target in 1..64) {
+            for (live in 1..64) {
+                val total = live *
+                    DownloadEngine.bufferSizeFor(
+                        DownloadEngine.bufferThreadsFor(target, live)
+                    )
+                assertTrue(
+                    "target=$target live=$live total=$total",
+                    total <= 4 * 1024 * 1024,
+                )
+            }
+        }
+    }
 }

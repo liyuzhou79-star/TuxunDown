@@ -4720,6 +4720,11 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
         mutableStateOf<List<ConnCompare.TierResult>>(emptyList())
     }
     var ccShowConfirm by remember { mutableStateOf(false) }
+    // v4.2 audit round 27: RUNNING tasks at the moment the
+    // comparison STARTED (read once in startConnCompare — a
+    // snapshot the results below are judged against, not a
+    // live counter).
+    var ccRunningAtStart by remember { mutableStateOf(0) }
     var ccTestRef by remember { mutableStateOf<SpeedTest?>(null) }
     // Leaving the screen stops the comparison (same rule as the
     // speed-test page: it would keep burning data otherwise).
@@ -4734,6 +4739,11 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
     fun startConnCompare() {
         if (ccRunning) return
         val url = ccUrl.trim()
+        // Audit round 27: snapshot the contention at the start
+        // moment only (see ConnCompare.runningTasksNote).
+        ccRunningAtStart = DownloadCenter.store.tasks.count {
+            it.status == TaskStatus.RUNNING
+        }
         ccRunning = true
         ccResults = emptyList()
         ccLiveBps = 0
@@ -5071,6 +5081,18 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
                         ccPhase,
                         style = MaterialTheme.typography.bodyMedium,
                         modifier = Modifier.padding(top = 10.dp),
+                    )
+                }
+                // Audit round 27: the start-moment contention
+                // snapshot, shown with this run's results (the
+                // wording lives in ConnCompare so it is tested).
+                val ccNote = ConnCompare.runningTasksNote(ccRunningAtStart)
+                if (ccNote.isNotBlank() && (ccRunning || ccResults.isNotEmpty())) {
+                    Text(
+                        ccNote,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 4.dp),
                     )
                 }
                 if (ccRunning) {
