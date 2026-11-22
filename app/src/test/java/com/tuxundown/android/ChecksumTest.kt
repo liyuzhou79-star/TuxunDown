@@ -90,7 +90,7 @@ class ChecksumTest {
         // Three buffers' worth of data; the gate closes at the
         // second check, so the digest must give up (null)
         // instead of finishing.
-        val data = ByteArray(3 * 256 * 1024) { 7 }
+        val data = ByteArray(3 * Checksum.BUFFER_BYTES) { 7 }
         var checks = 0
         val out = Checksum.digestCancellable(
             ByteArrayInputStream(data), Checksum.SHA256
@@ -109,6 +109,101 @@ class ChecksumTest {
             Checksum.SHA256,
         ) { false }
         assertNull(out)
+    }
+
+    // ---- v4.5: buffer size, progress callback, percent math ----
+
+    @Test
+    fun bufferIsOneMegabyte() {
+        // The cancel grain and the memory account in
+        // Checksum.BUFFER_BYTES' doc both hang off this value.
+        assertEquals(1024 * 1024, Checksum.BUFFER_BYTES)
+    }
+
+    @Test
+    fun digestReportsCumulativeProgressPerBuffer() {
+        // 2 full buffers + a tail: ByteArrayInputStream fills
+        // the buffer on every read until the tail, so the
+        // callbacks must be exactly the cumulative marks.
+        val tail = 12_345
+        val data = ByteArray(2 * Checksum.BUFFER_BYTES + tail) { (it % 251).toByte() }
+        val seen = mutableListOf<Long>()
+        val hex = Checksum.digestCancellable(
+            ByteArrayInputStream(data), Checksum.SHA256,
+            onProgress = { seen.add(it) },
+        ) { true }
+        assertEquals(
+            Checksum.digest(ByteArrayInputStream(data), Checksum.SHA256),
+            hex,
+        )
+        assertEquals(
+            listOf(
+                Checksum.BUFFER_BYTES.toLong(),
+                2L * Checksum.BUFFER_BYTES,
+                data.size.toLong(),
+            ),
+            seen,
+        )
+    }
+
+    @Test
+    fun digestProgressStopsWithTheCancel() {
+        // Gate closes at the second check: exactly one buffer
+        // was read and reported, then null — no progress is
+        // reported for bytes never read.
+        val data = ByteArray(3 * Checksum.BUFFER_BYTES) { 7 }
+        val seen = mutableListOf<Long>()
+        var checks = 0
+        val out = Checksum.digestCancellable(
+            ByteArrayInputStream(data), Checksum.SHA256,
+            onProgress = { seen.add(it) },
+        ) {
+            checks++
+            checks < 2
+        }
+        assertNull(out)
+        assertEquals(listOf(Checksum.BUFFER_BYTES.toLong()), seen)
+    }
+
+    @Test
+    fun digestCancelledImmediatelyReportsNoProgress() {
+        val seen = mutableListOf<Long>()
+        val out = Checksum.digestCancellable(
+            ByteArrayInputStream("abc".toByteArray(Charsets.UTF_8)),
+            Checksum.SHA256,
+            onProgress = { seen.add(it) },
+        ) { false }
+        assertNull(out)
+        assertEquals(emptyList<Long>(), seen)
+    }
+
+    @Test
+    fun progressPercentMath() {
+        assertEquals(0, Checksum.progressPercent(0, 100))
+        assertEquals(0, Checksum.progressPercent(-5, 100))
+        assertEquals(1, Checksum.progressPercent(1, 100))
+        assertEquals(50, Checksum.progressPercent(50, 100))
+        assertEquals(33, Checksum.progressPercent(1, 3))
+        assertEquals(99, Checksum.progressPercent(999, 1000))
+        assertEquals(100, Checksum.progressPercent(100, 100))
+        // Over-read (provider size lied / file grew): clamp.
+        assertEquals(100, Checksum.progressPercent(150, 100))
+    }
+
+    @Test
+    fun progressPercentUnknownTotalIsNull() {
+        assertNull(Checksum.progressPercent(0, 0))
+        assertNull(Checksum.progressPercent(500, 0))
+        assertNull(Checksum.progressPercent(500, -1))
+    }
+
+    @Test
+    fun verifyingLabelShowsPercentOnlyWhenKnown() {
+        assertEquals("正在校验…0%", Checksum.verifyingLabel(0))
+        assertEquals("正在校验…57%", Checksum.verifyingLabel(57))
+        assertEquals("正在校验…100%", Checksum.verifyingLabel(100))
+        assertEquals("校验中…", Checksum.verifyingLabel(-1))
+        assertEquals("校验中…", Checksum.verifyingLabel(101))
     }
 
     @Test

@@ -7583,9 +7583,19 @@ fun TaskCard(
                 // finished file is verified against at completion.
                 val expectedHash = Checksum.expectedOf(task)
                 if (expectedHash != null) {
+                    // v4.5: while VERIFYING, show the live
+                    // percent the verifier publishes on the
+                    // task （正在校验…N%); when the file size
+                    // is unknown the label stays a bare 校验中….
+                    val csText =
+                        if (task.checksumState == Checksum.STATE_VERIFYING) {
+                            Checksum.verifyingLabel(task.checksumProgressPct)
+                        } else {
+                            Checksum.stateLabel(task.checksumState)
+                        }
                     InfoRow(
                         "完整性校验：",
-                        "${expectedHash.first} · ${Checksum.stateLabel(task.checksumState)}",
+                        "${expectedHash.first} · $csText",
                     )
                 }
                 if (task.status != TaskStatus.RUNNING) {

@@ -228,6 +228,18 @@ class TaskRecord(
      *  finally next to connInfos. Transient for the same
      *  reason: it describes a live contention, not the task. */
     @Transient @Volatile var connCapHeld: Boolean = false,
+    /** v4.5: live checksum progress percent (0..100) while a
+     *  verification of this task streams its finished file;
+     *  -1 = no live figure (not verifying, or the file's size
+     *  is unknown so no honest percent exists — the card then
+     *  shows a bare 校验中）. Written ONLY by the one running
+     *  ChecksumVerifier.verify for this task (its in-flight
+     *  guard makes that singular) and reset to -1 in that
+     *  verify's finally for EVERY outcome — matched,
+     *  mismatched, cancelled, unreadable — so a stale percent
+     *  can never outlive its run. Transient like connInfos:
+     *  it describes a live pass, not the task. */
+    @Transient @Volatile var checksumProgressPct: Int = -1,
     /**
      * HLS: byte size of each segment whose size is known (-1 =
      * unknown), aligned with the playlist order. Persisted as CSV.
