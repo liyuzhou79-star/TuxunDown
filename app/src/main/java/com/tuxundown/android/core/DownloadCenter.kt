@@ -48,6 +48,44 @@ object DownloadCenter {
         set(v) { prefs().edit().putInt("speedLimitKBps", v).apply() }
 
     /**
+     * v3.0: the speed-limit schedule (see SpeedSchedule). One
+     * daily window in which [speedSchedLimitKBps] replaces
+     * [speedLimitKBps] as the global limit — the headline
+     * shape is "unlimited at night" (window limit 0). Default
+     * OFF; the default window mirrors quiet hours' 23:00–07:00
+     * but the two settings share nothing else.
+     */
+    var speedSchedEnabled: Boolean
+        get() = pBool("speedSchedEnabled", false)
+        set(v) { prefs().edit().putBoolean("speedSchedEnabled", v).apply() }
+
+    var speedSchedStartMin: Int
+        get() = pInt("speedSchedStartMin", SpeedSchedule.DEFAULT_START_MIN).coerceIn(0, 1439)
+        set(v) { prefs().edit().putInt("speedSchedStartMin", v.coerceIn(0, 1439)).apply() }
+
+    var speedSchedEndMin: Int
+        get() = pInt("speedSchedEndMin", SpeedSchedule.DEFAULT_END_MIN).coerceIn(0, 1439)
+        set(v) { prefs().edit().putInt("speedSchedEndMin", v.coerceIn(0, 1439)).apply() }
+
+    /** The global limit inside the schedule window (KB/s; 0 = unlimited). */
+    var speedSchedLimitKBps: Int
+        get() = pInt("speedSchedLimitKBps", 0).coerceAtLeast(0)
+        set(v) { prefs().edit().putInt("speedSchedLimitKBps", v.coerceAtLeast(0)).apply() }
+
+    /**
+     * The global limit in force RIGHT NOW: the schedule's
+     * window limit inside the window, [speedLimitKBps]
+     * otherwise. [budgetShareBps] reads this on every limiter
+     * tick, so a running download crosses the window edge
+     * live — no restart, no re-queue.
+     */
+    fun effectiveSpeedLimitKBps(nowMs: Long = System.currentTimeMillis()): Int =
+        SpeedSchedule.effectiveLimitKBpsAt(
+            speedSchedEnabled, speedSchedStartMin, speedSchedEndMin,
+            speedSchedLimitKBps, speedLimitKBps, nowMs,
+        )
+
+    /**
      * v2.1: when a download finishes, auto-launch the system
      * installer for an APK task. This only OPENS the installer —
      * the installer's own 「安装」 tap stays the user's; nothing
@@ -307,6 +345,10 @@ object DownloadCenter {
         val o = org.json.JSONObject()
         o.put("wifiOnly", wifiOnly)
         o.put("speedLimitKBps", speedLimitKBps)
+        o.put("speedSchedEnabled", speedSchedEnabled)
+        o.put("speedSchedStartMin", speedSchedStartMin)
+        o.put("speedSchedEndMin", speedSchedEndMin)
+        o.put("speedSchedLimitKBps", speedSchedLimitKBps)
         o.put("maxConcurrent", maxConcurrent)
         o.put("autoRetryCount", autoRetryCount)
         o.put("trafficThresholdMB", trafficThresholdMB)
@@ -343,6 +385,18 @@ object DownloadCenter {
     fun applySettingsJson(o: org.json.JSONObject) {
         if (o.has("wifiOnly")) wifiOnly = o.optBoolean("wifiOnly", wifiOnly)
         if (o.has("speedLimitKBps")) speedLimitKBps = o.optInt("speedLimitKBps", speedLimitKBps)
+        if (o.has("speedSchedEnabled")) {
+            speedSchedEnabled = o.optBoolean("speedSchedEnabled", speedSchedEnabled)
+        }
+        if (o.has("speedSchedStartMin")) {
+            speedSchedStartMin = o.optInt("speedSchedStartMin", speedSchedStartMin)
+        }
+        if (o.has("speedSchedEndMin")) {
+            speedSchedEndMin = o.optInt("speedSchedEndMin", speedSchedEndMin)
+        }
+        if (o.has("speedSchedLimitKBps")) {
+            speedSchedLimitKBps = o.optInt("speedSchedLimitKBps", speedSchedLimitKBps)
+        }
         if (o.has("maxConcurrent")) maxConcurrent = o.optInt("maxConcurrent", maxConcurrent)
         if (o.has("autoRetryCount")) autoRetryCount = o.optInt("autoRetryCount", autoRetryCount)
         if (o.has("trafficThresholdMB")) {
@@ -502,7 +556,10 @@ object DownloadCenter {
      * immediately.
      */
     fun budgetShareBps(forTaskId: String): Long {
-        val total = speedLimitKBps.toLong() * 1024
+        // v3.0: the budget is the limit in force NOW — the
+        // schedule's window limit inside its window (see
+        // effectiveSpeedLimitKBps), the standing limit else.
+        val total = effectiveSpeedLimitKBps().toLong() * 1024
         if (total <= 0) return 0
         val running = store.tasks.filter { it.status == TaskStatus.RUNNING }
         if (running.isEmpty()) return total

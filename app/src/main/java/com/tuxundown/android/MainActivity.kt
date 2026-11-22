@@ -113,6 +113,7 @@ import com.tuxundown.android.core.ThunderLink
 import com.tuxundown.android.core.ProxySettings
 import com.tuxundown.android.core.PublicStorage
 import com.tuxundown.android.core.ScheduleTime
+import com.tuxundown.android.core.SpeedSchedule
 import com.tuxundown.android.core.SpeedTest
 import com.tuxundown.android.core.TaskHeaders
 import com.tuxundown.android.core.TaskRecord
@@ -373,6 +374,15 @@ fun DownApp() {
     var wifiOnly by remember { mutableStateOf(DownloadCenter.wifiOnly) }
     var dirName by remember { mutableStateOf(DownloadCenter.downloadDirName) }
     var limitKBps by remember { mutableStateOf(DownloadCenter.speedLimitKBps) }
+    // v3.0: speed-limit schedule (switch + HH:MM window + window limit).
+    var schedOn by remember { mutableStateOf(DownloadCenter.speedSchedEnabled) }
+    var schedStartUi by remember {
+        mutableStateOf(QuietHours.formatMin(DownloadCenter.speedSchedStartMin))
+    }
+    var schedEndUi by remember {
+        mutableStateOf(QuietHours.formatMin(DownloadCenter.speedSchedEndMin))
+    }
+    var schedLimitKBps by remember { mutableStateOf(DownloadCenter.speedSchedLimitKBps) }
     var vibrateOn by remember { mutableStateOf(DownloadCenter.completeVibrate) }
     var soundOn by remember { mutableStateOf(DownloadCenter.completeSound) }
     // v2.5: notification quiet hours (switch + HH:MM window).
@@ -679,6 +689,12 @@ fun DownApp() {
                             // settings page shows the restored values.
                             wifiOnly = DownloadCenter.wifiOnly
                             limitKBps = DownloadCenter.speedLimitKBps
+                            schedOn = DownloadCenter.speedSchedEnabled
+                            schedStartUi =
+                                QuietHours.formatMin(DownloadCenter.speedSchedStartMin)
+                            schedEndUi =
+                                QuietHours.formatMin(DownloadCenter.speedSchedEndMin)
+                            schedLimitKBps = DownloadCenter.speedSchedLimitKBps
                             vibrateOn = DownloadCenter.completeVibrate
                             soundOn = DownloadCenter.completeSound
                             quietOn = DownloadCenter.notifyQuietEnabled
@@ -1314,6 +1330,24 @@ fun DownApp() {
             },
             limitKBps = limitKBps,
             onLimit = { limitKBps = it; DownloadCenter.speedLimitKBps = it },
+            schedOn = schedOn,
+            onSchedOn = { schedOn = it; DownloadCenter.speedSchedEnabled = it },
+            schedStartText = schedStartUi,
+            onSchedStartText = { v ->
+                schedStartUi = v
+                ScheduleTime.parseHhMm(v)?.let {
+                    DownloadCenter.speedSchedStartMin = it.first * 60 + it.second
+                }
+            },
+            schedEndText = schedEndUi,
+            onSchedEndText = { v ->
+                schedEndUi = v
+                ScheduleTime.parseHhMm(v)?.let {
+                    DownloadCenter.speedSchedEndMin = it.first * 60 + it.second
+                }
+            },
+            schedLimitKBps = schedLimitKBps,
+            onSchedLimit = { schedLimitKBps = it; DownloadCenter.speedSchedLimitKBps = it },
             maxConc = maxConc,
             onMaxConc = { maxConc = it; DownloadCenter.maxConcurrent = it },
             autoRetry = autoRetry,
@@ -3441,6 +3475,14 @@ fun SettingsScreen(
     onResetDir: () -> Unit,
     limitKBps: Int,
     onLimit: (Int) -> Unit,
+    schedOn: Boolean,
+    onSchedOn: (Boolean) -> Unit,
+    schedStartText: String,
+    onSchedStartText: (String) -> Unit,
+    schedEndText: String,
+    onSchedEndText: (String) -> Unit,
+    schedLimitKBps: Int,
+    onSchedLimit: (Int) -> Unit,
     maxConc: Int,
     onMaxConc: (Int) -> Unit,
     autoRetry: Int,
@@ -3506,6 +3548,7 @@ fun SettingsScreen(
     var settingsQuery by remember { mutableStateOf("") }
     val settingsKeywords = mapOf(
         "s-download" to "下载 仅wifi wifi 同时下载 任务数 并发 全局限速 限速 速度 " +
+            "限速计划 计划 时段 夜间 分时 " +
             "自动重试 重试 流量保护 流量 阈值 双通道 user-agent ua 浏览器标识 " +
             "下载目录 文件夹 保存位置 开机 自启 恢复 重启 续传 分类 分文件夹 类型",
         "s-proxy" to "代理 proxy http socks 端口 地址 服务器 用户名 密码 认证",
@@ -3687,6 +3730,76 @@ fun SettingsScreen(
                     selected = limitKBps,
                     onPick = onLimit,
                 )
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("限速计划")
+                        Text(
+                            "开启后，每天这个时段内改用下面那一档限速，时段外仍用上面的全局限速。" +
+                                "典型用法：白天限速不抢全家带宽，夜间（比如 23:00–07:00）设「不限」放开下。" +
+                                "改了立即生效，正在下的任务过点自动切换。和「通知静默时段」是两回事，互不影响。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = schedOn, onCheckedChange = onSchedOn)
+                }
+                if (schedOn) {
+                    Text(
+                        "计划时段内的全局限速",
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                    ChipRow(
+                        options = listOf(
+                            0 to "不限", 512 to "512KB", 1024 to "1MB",
+                            3072 to "3MB", 5120 to "5MB",
+                        ),
+                        selected = schedLimitKBps,
+                        onPick = onSchedLimit,
+                    )
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        OutlinedTextField(
+                            value = schedStartText,
+                            onValueChange = onSchedStartText,
+                            label = { Text("开始（如 23:00）") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                        OutlinedTextField(
+                            value = schedEndText,
+                            onValueChange = onSchedEndText,
+                            label = { Text("结束（如 07:00）") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    val sMin = ScheduleTime.parseHhMm(schedStartText)
+                        ?.let { it.first * 60 + it.second }
+                    val eMin = ScheduleTime.parseHhMm(schedEndText)
+                        ?.let { it.first * 60 + it.second }
+                    if (sMin != null && eMin != null) {
+                        val inWin = SpeedSchedule.inWindow(
+                            sMin, eMin,
+                            QuietHours.minuteOfDay(System.currentTimeMillis()),
+                        )
+                        Text(
+                            if (inWin) {
+                                "现在正处在计划时段内：全局限速按计划档生效中。"
+                            } else {
+                                "现在不在计划时段内：全局限速用的是上面那一档。"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 6.dp),
+                        )
+                    }
+                }
                 HorizontalDivider(Modifier.padding(vertical = 10.dp))
                 Text("流量保护（流量网络下，文件超过这个大小先暂停问你）")
                 ChipRow(
