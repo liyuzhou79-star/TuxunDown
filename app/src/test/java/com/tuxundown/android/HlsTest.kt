@@ -55,6 +55,99 @@ class HlsTest {
     }
 
     @Test
+    fun masterPlaylistParsesResolutionsAndResolvesRelativeVariants() {
+        // v3.8: RESOLUTION is captured per variant, and relative
+        // variant URLs resolve against the master URL (including
+        // ../ hops), exactly like segment URLs do.
+        val text = """
+            #EXTM3U
+            #EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360
+            low/index.m3u8
+            #EXT-X-STREAM-INF:RESOLUTION=1920x1080
+            ../hi/index.m3u8?token=abc
+            #EXT-X-STREAM-INF:BANDWIDTH=2500000
+            mid.m3u8
+        """.trimIndent()
+        val master = Hls.parse(text, "https://example.com/a/b/master.m3u8")
+            as Hls.Playlist.Master
+        assertEquals(3, master.variants.size)
+        assertEquals("640x360", master.variants[0].resolution)
+        assertEquals("https://example.com/a/b/low/index.m3u8", master.variants[0].url)
+        assertEquals(0L, master.variants[1].bandwidth)
+        assertEquals("https://example.com/a/hi/index.m3u8?token=abc", master.variants[1].url)
+        assertEquals("", master.variants[2].resolution)
+        assertEquals("https://example.com/a/b/mid.m3u8", master.variants[2].url)
+    }
+
+    @Test
+    fun variantLabelShowsWhatIsKnownAndInventsNothing() {
+        // Full house: p-label + dimensions + bitrate (bits/s,
+        // printed as Mbps — NOT bytes/s).
+        assertEquals(
+            "1080p · 1920×1080 · 约 5 Mbps",
+            Hls.variantLabel(Hls.Variant(5_000_000, "https://x/hi.m3u8", "1920x1080")),
+        )
+        assertEquals(
+            "720p · 1280×720 · 约 2.5 Mbps",
+            Hls.variantLabel(Hls.Variant(2_500_000, "https://x/mid.m3u8", "1280x720")),
+        )
+        // No resolution: bitrate alone, sub-Mbps in Kbps.
+        assertEquals(
+            "约 800 Kbps",
+            Hls.variantLabel(Hls.Variant(800_000, "https://x/low.m3u8")),
+        )
+        // No bandwidth: resolution alone.
+        assertEquals(
+            "360p · 640×360",
+            Hls.variantLabel(Hls.Variant(0, "https://x/low.m3u8", "640x360")),
+        )
+        // Neither: the file name speaks, never an invented quality.
+        assertEquals(
+            "chunklist_720.m3u8",
+            Hls.variantLabel(Hls.Variant(0, "https://cdn.example.com/v/chunklist_720.m3u8?x=1")),
+        )
+    }
+
+    @Test
+    fun choiceExistsOnlyForMultiVariantMasters() {
+        val two = Hls.parse(
+            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\n a.m3u8\n" +
+                "#EXT-X-STREAM-INF:BANDWIDTH=2\nb.m3u8",
+            "https://x/master.m3u8",
+        )
+        assertTrue(Hls.needsChoice(two))
+        val one = Hls.parse(
+            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nonly.m3u8",
+            "https://x/master.m3u8",
+        )
+        assertTrue(!Hls.needsChoice(one))
+        val media = Hls.parse(
+            "#EXTM3U\n#EXTINF:5,\nseg.ts",
+            "https://x/media.m3u8",
+        )
+        assertTrue(!Hls.needsChoice(media))
+    }
+
+    @Test
+    fun sortedForChoicePutsHighestBandwidthFirstStably() {
+        val vs = listOf(
+            Hls.Variant(800_000, "https://x/low.m3u8"),
+            Hls.Variant(5_000_000, "https://x/hi.m3u8"),
+            Hls.Variant(800_000, "https://x/low2.m3u8"),
+        )
+        assertEquals(
+            listOf("https://x/hi.m3u8", "https://x/low.m3u8", "https://x/low2.m3u8"),
+            Hls.sortedForChoice(vs).map { it.url },
+        )
+        // All-zero bandwidths: playlist order is kept as-is.
+        val zeros = listOf(
+            Hls.Variant(0, "https://x/a.m3u8"),
+            Hls.Variant(0, "https://x/b.m3u8"),
+        )
+        assertEquals(zeros, Hls.sortedForChoice(zeros))
+    }
+
+    @Test
     fun keyTagAppliesToFollowingSegments() {
         val text = """
             #EXTM3U

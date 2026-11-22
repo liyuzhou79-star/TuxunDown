@@ -11,14 +11,22 @@ import javax.crypto.spec.SecretKeySpec
  * playlist and the segments; everything here is string/byte work.
  *
  * Scope, honestly: media playlists and master playlists (the
- * highest-bandwidth variant wins), relative URLs, and the common
+ * engine still picks the highest-bandwidth variant on its own;
+ * since v3.8 the creation flows offer the user the choice first
+ * when a master carries more than one — see [needsChoice]),
+ * relative URLs, and the common
  * EXT-X-KEY AES-128 scheme via the platform's built-in
  * javax.crypto — no ffmpeg, no transcoding, no new dependency.
  * Other key methods (SAMPLE-AES etc.) are reported, not faked.
  */
 object Hls {
 
-    data class Variant(val bandwidth: Long, val url: String)
+    data class Variant(
+        val bandwidth: Long,
+        val url: String,
+        /** Raw RESOLUTION attribute ("1280x720"), "" when absent. */
+        val resolution: String = "",
+    )
 
     data class Segment(
         val url: String,
@@ -54,13 +62,15 @@ object Hls {
         if (lines.any { it.startsWith("#EXT-X-STREAM-INF") }) {
             val variants = mutableListOf<Variant>()
             var pendingBw = 0L
+            var pendingRes = ""
             var expectUrl = false
             for (line in lines) {
                 if (line.startsWith("#EXT-X-STREAM-INF")) {
                     pendingBw = attr(line, "BANDWIDTH")?.toLongOrNull() ?: 0L
+                    pendingRes = attr(line, "RESOLUTION") ?: ""
                     expectUrl = true
                 } else if (expectUrl && !line.startsWith("#")) {
-                    variants.add(Variant(pendingBw, resolve(baseUrl, line)))
+                    variants.add(Variant(pendingBw, resolve(baseUrl, line), pendingRes))
                     expectUrl = false
                 }
             }
@@ -111,6 +121,80 @@ object Hls {
             }
         }
         return Playlist.Media(segments, hasMap)
+    }
+
+    // ---- v3.8: user-facing variant choice ----
+    // Until now a master playlist was resolved silently inside
+    // the engine (highest bandwidth wins). The creation flows
+    // now offer the choice up front when there IS one; these
+    // three functions are the pure part of that offer.
+
+    /** A choice exists only when a master playlist carries
+     *  more than one variant; a single variant (or a media
+     *  playlist) is downloaded exactly as before. */
+    fun needsChoice(p: Playlist): Boolean =
+        p is Playlist.Master && p.variants.size > 1
+
+    /** Display order for the picker: highest bandwidth first
+     *  (the order a user scans qualities in). Stable, so equal
+     *  bandwidths keep playlist order; when NO variant declares
+     *  a bandwidth the playlist order is kept untouched —
+     *  sorting on all-zero keys would be a meaningless shuffle. */
+    fun sortedForChoice(variants: List<Variant>): List<Variant> =
+        if (variants.any { it.bandwidth > 0 }) {
+            variants.sortedByDescending { it.bandwidth }
+        } else {
+            variants
+        }
+
+    /**
+     * One picker row: "1080p · 1920×1080 · 约 5.0 Mbps".
+     * Missing pieces are simply left out — a variant that
+     * declares neither resolution nor bandwidth falls back to
+     * its file name (then its host), never to an invented
+     * quality. BANDWIDTH is bits/s by the HLS spec, so the
+     * rate is printed in Mbps/Kbps, NOT via Format.speed
+     * (which is bytes/s and would understate it 8x).
+     */
+    fun variantLabel(v: Variant): String {
+        val parts = mutableListOf<String>()
+        val res = v.resolution.trim()
+        if (res.isNotBlank()) {
+            val m = Regex("""(\d+)\s*[xX×]\s*(\d+)""").find(res)
+            if (m != null) {
+                val w = m.groupValues[1]
+                val h = m.groupValues[2]
+                parts.add("${h}p")
+                parts.add("$w×$h")
+            } else {
+                parts.add(res.replace('x', '×').replace('X', '×'))
+            }
+        }
+        if (v.bandwidth > 0) {
+            parts.add(
+                if (v.bandwidth >= 1_000_000) {
+                    val mbps = v.bandwidth / 1_000_000.0
+                    "约 " + (if (mbps % 1.0 == 0.0) {
+                        mbps.toInt().toString()
+                    } else {
+                        "%.1f".format(mbps)
+                    }) + " Mbps"
+                } else {
+                    "约 ${(v.bandwidth + 500) / 1000} Kbps"
+                }
+            )
+        }
+        if (parts.isEmpty()) {
+            val name = v.url.substringBefore('?').substringBefore('#')
+                .substringAfterLast('/')
+            parts.add(
+                if (name.isNotBlank()) name
+                else runCatching { java.net.URL(v.url).host }
+                    .getOrNull()?.takeIf { it.isNotBlank() }
+                    ?: "未知清晰度"
+            )
+        }
+        return parts.joinToString(" · ")
     }
 
     /**
