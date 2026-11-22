@@ -6483,6 +6483,37 @@ fun TaskCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                // v3.5: per-connection detail — the engine
+                // sampler's snapshot, republished every second
+                // on the sampler's existing tick (no new
+                // polling; the home list's 1 s refresh while
+                // running is what repaints these rows). Only
+                // while RUNNING: the snapshot is cleared when
+                // the run ends, so a paused or finished task
+                // shows nothing here instead of stale rows.
+                // HLS downloads segments on parallel
+                // connections the record does not track
+                // individually, so HLS tasks honestly show no
+                // rows (their map above is the progress view).
+                if (task.status == TaskStatus.RUNNING && task.connInfos.isNotEmpty()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "连接明细（每秒刷新）：",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    task.connInfos.forEachIndexed { i, ci ->
+                        InfoRow(
+                            if (ci.chunkIndex >= 0) {
+                                "连接 ${i + 1}（分片 ${ci.chunkIndex + 1}）："
+                            } else {
+                                "连接 ${i + 1}（整条流）："
+                            },
+                            "${Format.speed(ci.speedBps)} · 已下 " +
+                                "${Format.size(ci.downloaded)} / ${Format.size(ci.total)}",
+                        )
+                    }
+                }
                 if (task.sources.isNotEmpty()) {
                     InfoRow("下载源：", "${1 + task.sources.size} 个地址（含镜像）")
                 }
