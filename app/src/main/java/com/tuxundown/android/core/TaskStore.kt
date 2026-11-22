@@ -162,6 +162,31 @@ class TaskRecord(
      *  power returns. Transient like netDeferred: the battery
      *  state is re-read live, never remembered. */
     @Transient var chargeDeferred: Boolean = false,
+    /** v4.4 (audit round 29): the RAW-failure verdict for the
+     *  outage deferral — true when this run's failure was a
+     *  connectivity loss, judged by NetRetry.isNetworkError on
+     *  the original Throwable at the engine's failure sites.
+     *  It exists because task.error has carried only
+     *  Errors.human's plain Chinese since v2.2, which the old
+     *  string classifier could never match (the deferral was
+     *  silently dead for the HTTP paths). Transient like
+     *  netDeferred: reset at every run start and by enqueue,
+     *  never serialized. */
+    @Transient @Volatile var netOutage: Boolean = false,
+    /** v4.4 (audit round 29): the last run was stopped by an
+     *  HTML page where file bytes were expected (see
+     *  PortalDetect) — a captive portal until proven
+     *  otherwise. The service maps this to a park while the
+     *  network is unvalidated. Transient, same rules as
+     *  [netOutage]. */
+    @Transient @Volatile var portalHit: Boolean = false,
+    /** v4.4 (audit round 29): parked by the service after a
+     *  portal hit; the queue skips the task until the network
+     *  reports NET_CAPABILITY_VALIDATED (the login actually
+     *  completed) or the user acts. Transient like
+     *  netDeferred — a restart simply re-runs the task, whose
+     *  engine re-detects the portal if it is still there. */
+    @Transient var portalDeferred: Boolean = false,
     /** v2.8: queue pre-check (see LinkPrecheck) — the service's
      *  background HEAD check found this QUEUED task's link
      *  already dead (404/410). A warning on the card, never a

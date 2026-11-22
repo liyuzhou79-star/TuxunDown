@@ -45,5 +45,46 @@ object NetRetry {
         return needles.any { error.contains(it, ignoreCase = true) }
     }
 
+    /**
+     * v4.4 (audit round 29): classify the RAW failure, never
+     * the humanized card text. Since v2.2 every engine failure
+     * passes through Errors.human before it lands in
+     * task.error, and Errors.human deliberately DROPS the raw
+     * English message — so the string classifier above could
+     * never match an engine failure again, and the v1.5 outage
+     * deferral silently stopped working for the HTTP paths
+     * (verified exhaustively in the v4.4.0 checkpoint: every
+     * task.error assignment is Errors.human / Notes / a blank
+     * fill). The engine now records THIS verdict on the task
+     * (transient TaskRecord.netOutage) at the failure sites
+     * where the raw exception still exists, and the service
+     * defers on the verdict.
+     *
+     * The walk covers the cause chain and judges by TYPE
+     * first (a connect / DNS / timeout / socket failure is a
+     * connectivity loss whatever its message says), then by
+     * the same message needles as the string form. Our own
+     * plain-Chinese IllegalStateExceptions match neither —
+     * a server refusal, a changed file or a full disk must
+     * never park as an "outage".
+     */
+    fun isNetworkError(e: Throwable?): Boolean {
+        var cur = e
+        while (cur != null) {
+            when (cur) {
+                is java.net.UnknownHostException,
+                is java.net.ConnectException,
+                is java.net.SocketTimeoutException,
+                is java.net.SocketException,
+                is java.io.InterruptedIOException
+                -> return true
+            }
+            val msg = cur.message
+            if (msg != null && isNetworkError(msg)) return true
+            cur = cur.cause
+        }
+        return false
+    }
+
     fun shouldDefer(usedAttempts: Int): Boolean = usedAttempts < MAX_ATTEMPTS
 }

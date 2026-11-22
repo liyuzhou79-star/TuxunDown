@@ -47,6 +47,7 @@ object LinkPrecheck {
     fun isCandidate(t: TaskRecord, nowMs: Long): Boolean {
         if (t.status != TaskStatus.QUEUED) return false
         if (t.netDeferred) return false
+        if (t.portalDeferred) return false // v4.4: a portal park knows its problem too
         if (t.scheduledAt > nowMs) return false
         if (FtpClient.isFtpUrl(t.url)) return false
         val scheme = LinkSchemes.schemeOf(t.url)

@@ -194,6 +194,11 @@ class DownloadEngine(
         // later success (the DONE branch in the finally only
         // stamps when this is 0).
         task.finishedAt = 0
+        // v4.4 (audit round 29): the raw-failure verdicts belong
+        // to THIS run only — a stale one must never park (or
+        // fail to park) a later run.
+        task.netOutage = false
+        task.portalHit = false
         val runStartMs = System.currentTimeMillis()
         try {
             // v1.7: FTP links take their own path (hand-written
@@ -344,6 +349,13 @@ class DownloadEngine(
             // The segmented path already special-cases it per
             // chunk (downloadActive); give the other paths the
             // same sentence here.
+            // v4.4 (audit round 29): record the RAW-failure
+            // verdicts BEFORE the text is humanized — after
+            // Errors.human the English evidence is gone by
+            // design, and the service's outage / portal parks
+            // judge these flags, never the card text.
+            if (isPortalBlocked(e)) task.portalHit = true
+            if (NetRetry.isNetworkError(e)) task.netOutage = true
             task.error = if (isStorageFull(e)) {
                 Notes.storageFull()
             } else if (isStorageGone(e)) {
@@ -605,9 +617,13 @@ class DownloadEngine(
         }
         val code = c.responseCode
         val contentType = c.getHeaderField("Content-Type") ?: ""
-        if (contentType.contains("html", true) || contentType.contains("xhtml", true)) {
+        if (PortalDetect.isHtmlContentType(contentType)) {
             c.disconnect()
-            throw IllegalStateException(
+            // v4.4 (audit round 29): the shared portal signal —
+            // on an unvalidated network the service parks this
+            // as a WiFi-login wait; on a validated one it fails
+            // with the web-page wording below.
+            throw PortalBlockedException(
                 "这个链接打开的是网页，不是文件直链。请用「嗅探网页」或内置浏览器找到真正的下载地址。"
             )
         }
@@ -677,6 +693,15 @@ class DownloadEngine(
             openFollowingRedirects(task.url) { it.setRequestProperty("Range", "bytes=0-0") }
         }.getOrNull() ?: return
         try {
+            // v4.4 (audit round 29): a portal answers this
+            // revalidation with its login page too. The blank
+            // validators would otherwise change nothing and the
+            // run would walk on into the single-stream /
+            // segmented paths — let the shared detector speak
+            // here as well (those paths still re-check).
+            if (PortalDetect.isHtmlContentType(c.getHeaderField("Content-Type"))) {
+                throw PortalBlockedException()
+            }
             if (c.responseCode != HttpURLConnection.HTTP_PARTIAL &&
                 c.responseCode != HttpURLConnection.HTTP_OK
             ) return
@@ -1366,6 +1391,13 @@ class DownloadEngine(
                     break
                 }
                 if (attempt >= 3) {
+                    // v4.4 (audit round 29): the segmented path
+                    // composes task.error ONLY from humanized /
+                    // Notes text, so the raw verdicts for the
+                    // service's parks are recorded HERE, where
+                    // the original exception still exists.
+                    if (isPortalBlocked(e)) task.portalHit = true
+                    if (NetRetry.isNetworkError(e)) task.netOutage = true
                     task.error = Errors.human(e)
                 }
                 try { Thread.sleep(500L * attempt) } catch (_: InterruptedException) { }
@@ -1401,6 +1433,16 @@ class DownloadEngine(
         }
         ac.connection = c
         val code = c.responseCode
+        // v4.4 (audit round 29): a portal answers a Range
+        // request with a redirect to its login page, which the
+        // follower lands as a 200 HTML — the status /
+        // Content-Range gauntlet below already guaranteed
+        // those bytes are NEVER written; name the cause
+        // properly so the service can park instead of failing.
+        if (PortalDetect.isHtmlContentType(c.getHeaderField("Content-Type"))) {
+            c.disconnect()
+            throw PortalBlockedException()
+        }
         // v2.8: rate-limit evidence — PRIMARY source only (the
         // ceiling is remembered per host of the task URL; a
         // mirror is a different host with its own behaviour).
@@ -1567,6 +1609,15 @@ class DownloadEngine(
                 readTotal = total.toLong()
                 String(out.toByteArray(), Charsets.UTF_8)
             }
+            // v4.4 (audit round 29): a portal's login page is
+            // not a playlist — Hls.parse would turn it into an
+            // empty Media and the run would fail with the
+            // misleading "no segments". The head sniff is the
+            // verdict (a real playlist starts with #EXTM3U and
+            // can never trip it).
+            if (PortalDetect.looksLikeHtml(text)) {
+                throw PortalBlockedException()
+            }
             // v4.1 audit round 26: a playlist body that ended
             // before its declared Content-Length is a TRUNCATED
             // playlist — parsing it would silently drop the tail
@@ -1614,6 +1665,14 @@ class DownloadEngine(
                     out.write(buf, 0, n)
                 }
                 out.toByteArray()
+            }
+            // v4.4 (audit round 29): an HTML body here is a
+            // portal login page, not a segment or a key — the
+            // .ts sync-byte and 16-byte-key checks downstream
+            // would refuse it too, but with the wrong story;
+            // the shared detector names it first.
+            if (PortalDetect.looksLikeHtml(data)) {
+                throw PortalBlockedException()
             }
             // v4.1 audit round 26: a segment body that ended
             // before its declared Content-Length used to be
@@ -2269,6 +2328,20 @@ class DownloadEngine(
             if (code != HttpURLConnection.HTTP_OK && code != HttpURLConnection.HTTP_PARTIAL) {
                 throw IllegalStateException(Errors.httpMessage(code))
             }
+            // v4.4 (audit round 29): this path had NO HTML
+            // check at all. With a KNOWN total the length
+            // binding below still catches a portal page; with
+            // an UNKNOWN total (the probe saw a chunked 200)
+            // the page's own length used to be ADOPTED as the
+            // total and the login page saved as a DONE file.
+            // The Content-Type check now runs before a single
+            // byte is written, and the copy loop sniffs the
+            // first block when the total is unknown (a portal
+            // that lies about its Content-Type too).
+            if (PortalDetect.isHtmlContentType(c.getHeaderField("Content-Type"))) {
+                c.disconnect()
+                throw PortalBlockedException()
+            }
             // v2.4 audit round 10: this GET is a SECOND request —
             // the probe's 200 body was thrown away — so bind it to
             // the probed file before a single byte is written. A
@@ -2315,11 +2388,27 @@ class DownloadEngine(
             c.inputStream.use { input ->
                 target.openStream().use { out ->
                     val buf = ByteArray(bufferSizeFor(1))
+                    var firstBlock = true
                     while (!stopped()) {
                         val n = input.read(buf)
                         if (n < 0) {
                             eof = true
                             break
+                        }
+                        // v4.4 (audit round 29): unknown-total
+                        // adoption guard — judge the first
+                        // block BEFORE it is written; once a
+                        // total is known the length binding
+                        // above is the guard and binary file
+                        // heads are never sniffed.
+                        if (firstBlock) {
+                            firstBlock = false
+                            if (task.totalSize <= 0 &&
+                                PortalDetect.looksLikeHtml(buf, n)
+                            ) {
+                                c.disconnect()
+                                throw PortalBlockedException()
+                            }
                         }
                         out.write(buf, 0, n)
                         downloadedBytes.addAndGet(n.toLong())
@@ -2387,6 +2476,17 @@ class DownloadEngine(
                 m.contains("No such device", true) || m.contains("ENODEV") ||
                 m.contains("Input/output error", true) || m.contains("EIO")
             ) return true
+            cur = cur.cause
+        }
+        return false
+    }
+
+    /** v4.4 (audit round 29): did this failure chain pass
+     *  through a [PortalBlockedException]? */
+    private fun isPortalBlocked(e: Throwable): Boolean {
+        var cur: Throwable? = e
+        while (cur != null) {
+            if (cur is PortalBlockedException) return true
             cur = cur.cause
         }
         return false

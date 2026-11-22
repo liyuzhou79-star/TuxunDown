@@ -1090,11 +1090,32 @@ object DownloadCenter {
         return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
     }
 
+    /**
+     * v4.4 (audit round 29): has the system actually VALIDATED
+     * the active network — i.e. traffic really flows? A
+     * captive portal's network is "available" and has INTERNET
+     * long before the user logs in; VALIDATED is the signal
+     * that the login (or the portal's disappearance) completed.
+     * The portal park keys its release on this, never on
+     * availability alone.
+     */
+    fun hasValidatedNetwork(): Boolean {
+        val cm = appContext!!.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    }
+
     /** Queue a task and kick the foreground service. Returns false if blocked. */
     fun enqueue(task: TaskRecord): Boolean {
         task.autoRetriesUsed = 0
         task.netDeferred = false // v1.5: user action always wins over the outage park
         task.chargeDeferred = false // v3.9: same for the charge park
+        // v4.4: same for the portal park + the raw-failure
+        // verdicts — a manual （重新）排队 is a fresh start.
+        task.portalDeferred = false
+        task.portalHit = false
+        task.netOutage = false
         // v2.8: a manual （重新）排队 also retires a stale pre-check
         // warning — the user has decided to try this link again.
         task.precheckDead = false

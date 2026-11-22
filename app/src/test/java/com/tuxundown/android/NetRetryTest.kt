@@ -79,4 +79,64 @@ class NetRetryTest {
             }
         }
     }
+
+    // ---- v4.4 (audit round 29): the RAW-failure classifier ----
+
+    @Test
+    fun rawOutageExceptionsClassifyAsNetworkErrors() {
+        assertTrue(NetRetry.isNetworkError(java.net.ConnectException("Failed to connect")))
+        assertTrue(NetRetry.isNetworkError(java.net.UnknownHostException("x.com")))
+        assertTrue(NetRetry.isNetworkError(java.net.SocketTimeoutException("timeout")))
+        assertTrue(NetRetry.isNetworkError(java.net.SocketException("Connection reset")))
+        // Wrapped failures still classify — the walk follows causes.
+        assertTrue(
+            NetRetry.isNetworkError(
+                RuntimeException("boom", java.net.ConnectException("refused"))
+            )
+        )
+        assertTrue(
+            NetRetry.isNetworkError(
+                java.io.IOException("Unable to resolve host \"x.com\"")
+            )
+        )
+    }
+
+    @Test
+    fun rawNonOutagesDoNotClassify() {
+        // Our own plain-Chinese refusals: never an outage.
+        assertFalse(NetRetry.isNetworkError(IllegalStateException("服务器不支持 Range")))
+        assertFalse(
+            NetRetry.isNetworkError(
+                IllegalStateException(com.tuxundown.android.core.Errors.httpMessage(403))
+            )
+        )
+        // A full disk is an IOException with an errno message —
+        // no needle, no listed type, no park.
+        assertFalse(
+            NetRetry.isNetworkError(java.io.IOException("No space left on device"))
+        )
+        // A portal verdict is its own signal, not an outage.
+        assertFalse(
+            NetRetry.isNetworkError(com.tuxundown.android.core.PortalBlockedException())
+        )
+        assertFalse(NetRetry.isNetworkError(null as Throwable?))
+    }
+
+    @Test
+    fun compositionProofHumanizedTextKillsTheStringClassifier() {
+        // THE round-29 headline, pinned: the engine's failure
+        // text passes through Errors.human, which drops the raw
+        // English — the STRING classifier sees nothing (this is
+        // why the v1.5 deferral was dead for HTTP paths), while
+        // the Throwable classifier, fed the same original
+        // exception the engine caught, still judges correctly.
+        val raw = java.net.ConnectException("Failed to connect to /1.2.3.4:443")
+        val humanized = com.tuxundown.android.core.Errors.human(raw)
+        assertFalse(NetRetry.isNetworkError(humanized))
+        assertTrue(NetRetry.isNetworkError(raw))
+
+        val rawDns = java.net.UnknownHostException("Unable to resolve host \"x.com\"")
+        assertFalse(NetRetry.isNetworkError(com.tuxundown.android.core.Errors.human(rawDns)))
+        assertTrue(NetRetry.isNetworkError(rawDns))
+    }
 }

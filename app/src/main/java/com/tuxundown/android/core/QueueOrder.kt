@@ -42,7 +42,9 @@ object QueueOrder {
     ): TaskRecord? {
         var best: TaskRecord? = null
         for (t in tasks) {
-            if (t.status != TaskStatus.QUEUED || t.id in excludeIds || t.netDeferred) continue
+            if (t.status != TaskStatus.QUEUED || t.id in excludeIds || t.netDeferred ||
+                t.portalDeferred
+            ) continue
             if (t.scheduledAt > 0 && t.scheduledAt > now) continue
             val b = best
             if (b == null ||

@@ -59,6 +59,12 @@ class DownloadService : Service() {
     /** v1.5: per-task network-outage recovery attempts spent. */
     private val netAttempts = java.util.concurrent.ConcurrentHashMap<String, Int>()
 
+    /** v4.4 (audit round 29): portal parks spent per task,
+     *  bounded by the same NetRetry.MAX_ATTEMPTS as outages —
+     *  a "portal" that never validates is eventually just a
+     *  failure with the portal wording on the card. */
+    private val portalAttempts = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
     /** v2.8: queue link pre-check thread (see LinkPrecheck).
      *  Runs only while the service lives; the loop is all
      *  runCatching — a pre-check must never disturb a download. */
@@ -250,6 +256,26 @@ class DownloadService : Service() {
                     cellularNetwork = network
                     latch.countDown()
                 }
+
+                // v4.4 (audit round 29): the cellular leg can
+                // also DISAPPEAR mid-session (signal lost,
+                // airplane mode). Without onLost the granted
+                // Network stayed in cellularNetwork for the
+                // whole drain session and every NEW engine
+                // kept being built with a dead extraOpener.
+                // Clearing here fixes new engines; engines
+                // already running captured the Network value,
+                // but their per-connection attempt falls back
+                // to the default network when the dead leg
+                // refuses (see DownloadEngine's dual-channel
+                // branch in openFollowingRedirects), and only
+                // odd connections try the dead leg first.
+                override fun onLost(network: Network) {
+                    if (cellularNetwork == network) {
+                        cellularNetwork = null
+                        dualActive = false
+                    }
+                }
             }
             val request = NetworkRequest.Builder()
                 .addTransportType(android.net.NetworkCapabilities.TRANSPORT_CELLULAR)
@@ -282,15 +308,31 @@ class DownloadService : Service() {
                     // Connectivity is back: un-park every task that
                     // was deferred by an outage and make sure the
                     // drain loop is running to pick them up.
-                    var cleared = false
-                    for (t in DownloadCenter.store.tasks) {
-                        if (t.netDeferred && t.status == TaskStatus.QUEUED) {
-                            t.netDeferred = false
-                            t.note = "网络已恢复，自动继续下载。"
-                            cleared = true
-                        }
+                    // Portal parks are NOT cleared here: a portal
+                    // network is "available" long before its
+                    // login completes (see onCapabilitiesChanged).
+                    if (clearDeferredParks(portal = false)) {
+                        DownloadCenter.store.save()
+                        ensureWorker()
                     }
-                    if (cleared) {
+                }
+
+                // v4.4 (audit round 29): the captive-portal
+                // login signal. The portal network was already
+                // "available" before login; what changes when
+                // the user finishes the login page is that the
+                // network gains NET_CAPABILITY_VALIDATED. That —
+                // plus the drain loop's own validated poll as a
+                // backstop — is what releases a portal park.
+                override fun onCapabilitiesChanged(
+                    network: Network,
+                    caps: android.net.NetworkCapabilities,
+                ) {
+                    if (!caps.hasCapability(
+                            android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED
+                        )
+                    ) return
+                    if (clearDeferredParks(portal = true)) {
                         DownloadCenter.store.save()
                         ensureWorker()
                     }
@@ -299,6 +341,34 @@ class DownloadService : Service() {
             cm.registerNetworkCallback(NetworkRequest.Builder().build(), cb)
             netCallback = cb
         }
+    }
+
+    /**
+     * v4.4 (audit round 29): release parked tasks whose wait is
+     * over. Outage parks ([portal] = false) release on plain
+     * availability, as since v1.5. Portal parks release ONLY on
+     * a validated network — the caller has already established
+     * that signal (the capabilities callback, or the drain
+     * loop's poll of DownloadCenter.hasValidatedNetwork).
+     * Returns true when anything was released.
+     */
+    private fun clearDeferredParks(portal: Boolean): Boolean {
+        var cleared = false
+        for (t in DownloadCenter.store.tasks) {
+            if (t.status != TaskStatus.QUEUED) continue
+            if (t.netDeferred) {
+                t.netDeferred = false
+                t.note = "网络已恢复，自动继续下载。"
+                cleared = true
+            }
+            if (portal && t.portalDeferred) {
+                t.portalDeferred = false
+                portalAttempts.remove(t.id)
+                t.note = "网络已登录，自动继续下载。"
+                cleared = true
+            }
+        }
+        return cleared
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -505,12 +575,26 @@ class DownloadService : Service() {
                 // eligible, so without this branch the service would
                 // stop and nobody would ever un-park them.
                 val anyDeferred = store.tasks.any {
-                    it.netDeferred && it.status == TaskStatus.QUEUED
+                    (it.netDeferred || it.portalDeferred) && it.status == TaskStatus.QUEUED
                 }
                 if (!anyQueued && !anyDeferred) break
                 if (anyDeferred &&
                     QueueOrder.nextEligible(store.tasks, System.currentTimeMillis()) == null
                 ) {
+                    // v4.4 (audit round 29): backstop release
+                    // for portal parks — if the capabilities
+                    // callback was missed but the network IS
+                    // validated now, the login is done; let
+                    // the tasks go on this very pass.
+                    if (store.tasks.any {
+                            it.portalDeferred && it.status == TaskStatus.QUEUED
+                        } && DownloadCenter.hasValidatedNetwork()
+                    ) {
+                        if (clearDeferredParks(portal = true)) {
+                            store.save()
+                            continue
+                        }
+                    }
                     notifyUpdate(
                         "等待网络恢复",
                         "断网的任务已排队，网络一回来就自动继续",
@@ -739,6 +823,7 @@ class DownloadService : Service() {
                 if (runResult == TaskStatus.DONE) {
                     task.status = TaskStatus.DONE
                     netAttempts.remove(task.id)
+                    portalAttempts.remove(task.id)
                     finalizeFinished(task)
                     // v2.1 audit (C3): a delete tap that landed
                     // DURING finalize (after the check above) used
@@ -759,12 +844,49 @@ class DownloadService : Service() {
                 // flush NOW instead of riding the coalesced window.
                 store.saveNow()
             }
+            // v4.4 (audit round 29): a failure stopped by a
+            // captive portal is not the server's fault either —
+            // park the task until the network reports VALIDATED
+            // (the user finished the WiFi login), bounded like
+            // the outage park. Only park while the network is
+            // genuinely unvalidated: on a validated network an
+            // HTML answer means the link itself is a web page,
+            // and the engine's plain wording stays as the
+            // failure. The park is judged on the engine's raw
+            // verdict (task.portalHit), never on card text.
+            if (task.status == TaskStatus.FAILED && task.portalHit &&
+                !DownloadCenter.hasValidatedNetwork()
+            ) {
+                val used = portalAttempts[task.id] ?: 0
+                if (NetRetry.shouldDefer(used)) {
+                    portalAttempts[task.id] = used + 1
+                    task.portalDeferred = true
+                    task.status = TaskStatus.QUEUED
+                    task.note = "${PortalDetect.PARK_NOTE_PREFIX}" +
+                        "（第 ${used + 1}/${NetRetry.MAX_ATTEMPTS} 次等待）"
+                    task.error = ""
+                    store.save()
+                    notifyUpdate(
+                        "等待登录 WiFi",
+                        task.fileName,
+                        Format.percent(task.progress),
+                    )
+                    return
+                }
+                portalAttempts.remove(task.id)
+            }
             // v1.5: a failure caused by the network going away is not
             // the server's fault and must not burn the v1.4 retry
             // budget — park the task and let the connectivity
             // callback re-queue it when the network returns (bounded
             // by NetRetry.MAX_ATTEMPTS per outage streak).
-            if (task.status == TaskStatus.FAILED && NetRetry.isNetworkError(task.error)) {
+            // v4.4 (audit round 29): the judgement reads the
+            // engine's RAW-failure verdict (task.netOutage). The
+            // old form classified task.error as a string — dead
+            // since v2.2, when Errors.human started replacing
+            // every engine failure text with plain Chinese that
+            // contains none of the classifier's English needles.
+            if (task.status == TaskStatus.FAILED && task.netOutage) {
                 val used = netAttempts[task.id] ?: 0
                 if (NetRetry.shouldDefer(used)) {
                     netAttempts[task.id] = used + 1
