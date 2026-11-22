@@ -98,6 +98,7 @@ import com.tuxundown.android.core.Backup
 import com.tuxundown.android.core.BatchRename
 import com.tuxundown.android.core.BulkControl
 import com.tuxundown.android.core.Checksum
+import com.tuxundown.android.core.ChunkMap
 import com.tuxundown.android.core.CrashGuard
 import com.tuxundown.android.core.Errors
 import com.tuxundown.android.core.FailureAdvice
@@ -6416,12 +6417,70 @@ fun TaskCard(
                         "分片：",
                         "已完成 ${task.chunkDone.count { it }}/$total 块 · ${task.threads} 条连接",
                     )
+                    // v3.5: the chunk progress map. ACTIVE
+                    // cells come from the engine's per-second
+                    // connection snapshot (empty while paused —
+                    // then nothing is bright, honestly).
+                    Spacer(Modifier.height(6.dp))
+                    ChunkMapView(
+                        cells = ChunkMap.cells(
+                            task.chunkDone,
+                            task.connInfos.map { it.chunkIndex }.toSet(),
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        "分片图：绿 = 已下完 · 亮绿 = 正在下 · 半绿 = 这一格下了一部分 · 灰 = 还没下" +
+                            if (task.chunkDone.size > ChunkMap.MAX_CELLS) {
+                                "（分片较多，每格代表连续的 " +
+                                    "${(task.chunkDone.size + ChunkMap.MAX_CELLS - 1) / ChunkMap.MAX_CELLS} 块）"
+                            } else {
+                                ""
+                            },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 // v1.6: HLS merge progress + multi-source state.
                 if (task.isHls && task.hlsTotalSegments > 0) {
                     InfoRow(
                         "流媒体分片：",
                         "已合并 ${task.hlsDone.count { it }}/${task.hlsTotalSegments} 段",
+                    )
+                    // v3.5: the HLS map is drawn by MERGED
+                    // prefix (see ChunkMap.hlsCells) — that is
+                    // the only progress the record vouches for.
+                    if (task.status != TaskStatus.DONE) {
+                        Spacer(Modifier.height(6.dp))
+                        ChunkMapView(
+                            cells = ChunkMap.hlsCells(
+                                task.hlsDone,
+                                running = task.status == TaskStatus.RUNNING,
+                            ),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Text(
+                            "流媒体分片图按已合并的进度画：绿 = 已合并 · 亮绿 = 正在处理的一段 · " +
+                                "灰 = 还没合并（后面的段可能已在同时下载，合并进度以绿色为准）",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                // v3.5: a single-stream task has no chunks to
+                // draw — say so where the map would have been
+                // instead of leaving a silent gap.
+                if (!task.isHls && task.chunkSize <= 0 && task.singleThreadOnly &&
+                    task.status != TaskStatus.DONE
+                ) {
+                    Text(
+                        if (FtpClient.isFtpUrl(task.url)) {
+                            "FTP 是单条数据流下载，没有分片图。"
+                        } else {
+                            "这个任务是单线程下载（服务器不支持分片），整个文件一条连接从头下到尾，没有分片图。"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 if (task.sources.isNotEmpty()) {
@@ -6605,6 +6664,47 @@ fun TaskCard(
  * the time window labelled along the bottom. History is
  * right-aligned in a 90-second window.
  */
+/**
+ * v3.5: chunk progress map — a grid of cells, one per chunk
+ * (or per aggregated bucket past [ChunkMap.MAX_CELLS]
+ * chunks; the aggregation rule lives in ChunkMap). Hand-
+ * drawn like the other charts: solid green = done, bright
+ * green = downloading right now, translucent green = this
+ * bucket is partly done, grey = not started yet.
+ */
+@androidx.compose.runtime.Composable
+fun ChunkMapView(cells: List<ChunkMap.Cell>, modifier: Modifier = Modifier) {
+    if (cells.isEmpty()) return
+    val dark = isSystemInDarkTheme()
+    val pendingColor = if (dark) WinPalette.TrackDark else WinPalette.TrackLight
+    val cols = 12
+    val rows = (cells.size + cols - 1) / cols
+    Canvas(modifier.height((rows * 14 + (rows - 1) * 3).dp)) {
+        val gap = 3.dp.toPx()
+        val cellW = (size.width - gap * (cols - 1)) / cols
+        val cellH = 14.dp.toPx()
+        cells.forEachIndexed { i, cell ->
+            val x = (i % cols) * (cellW + gap)
+            val y = (i / cols) * (cellH + gap)
+            val color = when (cell.state) {
+                ChunkMap.State.DONE -> WinPalette.Green
+                ChunkMap.State.ACTIVE -> WinPalette.GreenLight
+                ChunkMap.State.PARTIAL -> WinPalette.ChartGreen.copy(
+                    alpha = 0.35f + 0.65f *
+                        (cell.done.toFloat() / cell.total.coerceAtLeast(1)),
+                )
+                ChunkMap.State.PENDING -> pendingColor
+            }
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(x, y),
+                size = Size(cellW, cellH),
+                cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx()),
+            )
+        }
+    }
+}
+
 /**
  * v2.7: last-7-days download volume bars, hand-drawn in the
  * same visual language as [SpeedChart] (same background, grid,

@@ -137,6 +137,10 @@ class DownloadEngine(
         @Volatile var pos: Long = start // next byte to write
         @Volatile var end: Long = end   // exclusive; may shrink when split
         val start: Long = start
+        /** v3.5: pos at the sampler's previous tick — the
+         *  per-connection speed in the details view is this
+         *  tick's delta over it (see the sampler). */
+        @Volatile var lastSamplePos: Long = start
         /** Live connection, so the sampler can evict a stalled worker. */
         @Volatile var connection: HttpURLConnection? = null
         @Volatile var lastAdvanceMs: Long = System.currentTimeMillis()
@@ -318,6 +322,10 @@ class DownloadEngine(
             task.status = if (paused) TaskStatus.PAUSED else TaskStatus.FAILED
             return task.status
         } finally {
+            // v3.5: the live connection snapshot dies with
+            // the run — a stale one would show connections
+            // that no longer exist.
+            task.connInfos = emptyList()
             task.elapsedMs += System.currentTimeMillis() - runStartMs
             if (task.status == TaskStatus.DONE && task.finishedAt == 0L) {
                 task.finishedAt = System.currentTimeMillis()
@@ -689,6 +697,25 @@ class DownloadEngine(
                 recordSpeed(task.speedBps)
                 task.downloaded = bytes
                 ticks++
+                // v3.5: publish the per-connection snapshot
+                // the details view reads (the connection list
+                // and the chunk map's ACTIVE cells). Same 1 s
+                // tick — no new polling anywhere: each live
+                // part's speed is its position delta since the
+                // last tick, computed here where the sampler
+                // already walks the active set.
+                synchronized(activeLock) {
+                    task.connInfos = active.map { ac ->
+                        val sp = (ac.pos - ac.lastSamplePos) * 1000 / dt
+                        ac.lastSamplePos = ac.pos
+                        ConnInfo(
+                            chunkIndex = ac.index,
+                            downloaded = (ac.pos - ac.start).coerceAtLeast(0),
+                            total = (ac.end - ac.start).coerceAtLeast(0),
+                            speedBps = sp.coerceAtLeast(0),
+                        )
+                    }.sortedBy { it.chunkIndex }
+                }
                 // Evict stalled connections: a part that has not
                 // advanced for 12 s while the task as a whole IS
                 // moving gets its connection dropped; the worker
@@ -1697,6 +1724,12 @@ class DownloadEngine(
                 task.speedBps = if (task.speedBps == 0L) speed else (task.speedBps * 3 + speed) / 4
                 recordSpeed(task.speedBps)
                 task.downloaded = bytes
+                // v3.5: one whole-file data connection — the
+                // details view's snapshot is this single entry
+                // (chunkIndex -1, see ConnInfo).
+                task.connInfos = listOf(
+                    ConnInfo(-1, bytes, task.totalSize, task.speedBps)
+                )
                 lastBytes = bytes
                 lastTime = now
                 onProgress(task)
@@ -1847,6 +1880,12 @@ class DownloadEngine(
                 task.speedBps = if (task.speedBps == 0L) speed else (task.speedBps * 3 + speed) / 4
                 recordSpeed(task.speedBps)
                 task.downloaded = bytes
+                // v3.5: one whole-file connection — the
+                // details view's snapshot is this single entry
+                // (chunkIndex -1, see ConnInfo).
+                task.connInfos = listOf(
+                    ConnInfo(-1, bytes, task.totalSize, task.speedBps)
+                )
                 lastBytes = bytes
                 lastTime = now
                 onProgress(task)

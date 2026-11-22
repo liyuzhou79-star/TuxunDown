@@ -8,6 +8,23 @@ import java.util.UUID
 
 enum class TaskStatus { QUEUED, RUNNING, PAUSED, DONE, FAILED }
 
+/**
+ * v3.5: one live connection of a running task, as published
+ * by the engine's 1 s sampler (see DownloadEngine) for the
+ * details view's connection list and the chunk map's ACTIVE
+ * cells. [chunkIndex] is the chunk this connection is
+ * working on, or -1 for a whole-file stream (single-stream
+ * / FTP — one connection, no chunks). [downloaded] and
+ * [total] are THIS connection's part of the file; when the
+ * endgame splits a chunk, the new part re-bases both.
+ */
+data class ConnInfo(
+    val chunkIndex: Int,
+    val downloaded: Long,
+    val total: Long,
+    val speedBps: Long,
+)
+
 class TaskRecord(
     val id: String = UUID.randomUUID().toString(),
     var url: String,
@@ -143,6 +160,12 @@ class TaskRecord(
     @Transient var speedBps: Long = 0,
     @Transient var peakBps: Long = 0,
     @Transient val speedHistory: MutableList<Long> = mutableListOf(),
+    /** v3.5: live per-connection snapshot, republished by
+     *  the engine's sampler every second while this task
+     *  runs and cleared in run()'s finally when the run
+     *  ends. Transient on purpose: a snapshot left over
+     *  from a dead process would be a lie. */
+    @Transient @Volatile var connInfos: List<ConnInfo> = emptyList(),
     /**
      * HLS: byte size of each segment whose size is known (-1 =
      * unknown), aligned with the playlist order. Persisted as CSV.
