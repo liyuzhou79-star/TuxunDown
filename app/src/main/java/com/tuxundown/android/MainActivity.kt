@@ -97,6 +97,7 @@ import androidx.documentfile.provider.DocumentFile
 import com.tuxundown.android.core.Backup
 import com.tuxundown.android.core.BatchRename
 import com.tuxundown.android.core.BulkControl
+import com.tuxundown.android.core.Changelog
 import com.tuxundown.android.core.Checksum
 import com.tuxundown.android.core.ChunkMap
 import com.tuxundown.android.core.CrashGuard
@@ -4716,6 +4717,8 @@ fun SettingsScreen(
         mutableStateOf<Pair<Int, List<com.tuxundown.android.core.TaskRecord>>?>(null)
     }
     var cleanupTick by remember { mutableStateOf(0) }
+    // v3.6: the About page's in-app changelog dialog.
+    var showChangelog by remember { mutableStateOf(false) }
     fun startCleanup(days: Int) {
         cleanupBusy = true
         Thread {
@@ -5532,6 +5535,22 @@ fun SettingsScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 8.dp),
                 )
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("更新日志")
+                        Text(
+                            "从 1.2 到现在，每个版本变了什么，一页看完（离线，不用联网）",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    OutlinedButton(onClick = { showChangelog = true }) { Text("查看") }
+                }
             }
         }
     }
@@ -5603,6 +5622,34 @@ fun SettingsScreen(
     // v3.4: old-record cleanup confirmation — exact counts,
     // what is NOT deleted, and the backup-first rule, all
     // stated before anything happens.
+    // v3.6: in-app changelog (About -> 更新日志) — bundled
+    // offline text from core/Changelog, one line per version.
+    if (showChangelog) {
+        AlertDialog(
+            onDismissRequest = { showChangelog = false },
+            title = { Text("更新日志") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    for (e in Changelog.entries) {
+                        Text(
+                            "v${e.version}",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Text(
+                            e.summary,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(10.dp))
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showChangelog = false }) { Text("关闭") }
+            },
+        )
+    }
     if (cleanupConfirm != null) {
         val (cDays, victims) = cleanupConfirm!!
         val doneN = victims.count {
