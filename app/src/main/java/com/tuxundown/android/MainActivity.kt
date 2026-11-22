@@ -124,6 +124,7 @@ import com.tuxundown.android.core.ThunderLink
 import com.tuxundown.android.core.ProxySettings
 import com.tuxundown.android.core.PublicStorage
 import com.tuxundown.android.core.ScheduleTime
+import com.tuxundown.android.core.SpeedCurveExport
 import com.tuxundown.android.core.SpeedSchedule
 import com.tuxundown.android.core.SpeedCompare
 import com.tuxundown.android.core.SpeedHistory
@@ -7703,6 +7704,52 @@ fun TaskCard(
                         if (ext == "apk") {
                             OutlinedButton(onClick = onShare) { Text("分享") }
                         }
+                    }
+                    // v4.5: export the retained speed curve as
+                    // CSV into the download folder (same door as
+                    // the sniff-list export). A task that kept no
+                    // samples gets a plain explanation, never an
+                    // empty file; a write failure is shown, never
+                    // swallowed.
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedButton(onClick = {
+                        val ctx = context
+                        val csv = SpeedCurveExport.buildCsv(task)
+                        if (csv == null) {
+                            Toast.makeText(
+                                ctx,
+                                "这个任务没有留下速度曲线，没法导出",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                        } else {
+                            val name = SpeedCurveExport.exportFileName(
+                                task.savedName.ifBlank { task.fileName },
+                            )
+                            Thread {
+                                val saved = runCatching {
+                                    PublicStorage.saveTextFile(ctx, name, csv)
+                                }
+                                android.os.Handler(
+                                    android.os.Looper.getMainLooper(),
+                                ).post {
+                                    saved.onSuccess { usedName ->
+                                        Toast.makeText(
+                                            ctx,
+                                            "已导出 $usedName 到下载目录",
+                                            Toast.LENGTH_LONG,
+                                        ).show()
+                                    }.onFailure {
+                                        Toast.makeText(
+                                            ctx,
+                                            "导出失败：${Errors.human(it)}",
+                                            Toast.LENGTH_SHORT,
+                                        ).show()
+                                    }
+                                }
+                            }.start()
+                        }
+                    }) {
+                        Text("导出速度曲线（CSV）")
                     }
                 }
                 // Rename is only safe before any byte/target exists.
