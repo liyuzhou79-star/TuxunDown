@@ -243,8 +243,7 @@ class DownloadEngine(
                 dropPreTarget()
                 trafficBlocked = true
                 task.status = TaskStatus.PAUSED
-                task.note = "流量保护：当前是流量网络，这个文件有 ${Format.size(task.totalSize)}，" +
-                    "已自动暂停省流量。回到 WiFi 点继续，或在流量下再点一次继续也可下载。"
+                task.note = Notes.trafficGuardAtStart(task.totalSize)
                 return task.status
             }
             // v2.3 space pre-check: the size is certain only now —
@@ -315,7 +314,7 @@ class DownloadEngine(
             // chunk (downloadActive); give the other paths the
             // same sentence here.
             task.error = if (isStorageFull(e)) {
-                "手机存储空间不足，下载已停下。清出空间后点继续即可续传。"
+                Notes.storageFull()
             } else {
                 Errors.human(e)
             }
@@ -866,13 +865,12 @@ class DownloadEngine(
                 task.status
             }
             trafficBlocked -> {
-                task.note = "流量保护：网络已切到流量，这个文件有 ${Format.size(task.totalSize)}，" +
-                    "已自动暂停省流量。回到 WiFi 点继续，或在流量下再点一次继续也可下载。"
+                task.note = Notes.trafficGuardSwitched(task.totalSize)
                 task.status = TaskStatus.PAUSED
                 task.status
             }
             netBlocked -> {
-                task.note = "网络已切到流量（已开启「仅 WiFi 下载」），已暂停；回到 WiFi 后点继续即可续传。"
+                task.note = Notes.wifiOnlyPaused()
                 task.status = TaskStatus.PAUSED
                 task.status
             }
@@ -1158,7 +1156,7 @@ class DownloadEngine(
             } catch (e: Exception) {
                 if (isStorageFull(e)) {
                     // No point retrying into a full disk (audit A10).
-                    task.error = "手机存储空间不足，下载已停下。清出空间后点继续即可续传。"
+                    task.error = Notes.storageFull()
                     break
                 }
                 if (attempt >= 3) {
@@ -1649,11 +1647,11 @@ class DownloadEngine(
         return when {
             trafficBlocked -> TaskStatus.PAUSED.also {
                 task.status = it
-                task.note = "流量保护：网络已切到流量，已自动暂停省流量。回到 WiFi 点继续即可续传。"
+                task.note = Notes.trafficGuardSwitchedHls()
             }
             netBlocked -> TaskStatus.PAUSED.also {
                 task.status = it
-                task.note = "网络已切到流量（已开启「仅 WiFi 下载」），已暂停；回到 WiFi 后点继续即可续传。"
+                task.note = Notes.wifiOnlyPaused()
             }
             paused -> TaskStatus.PAUSED.also { task.status = it }
             writeIndex >= segments.size -> TaskStatus.DONE.also {
@@ -1753,8 +1751,7 @@ class DownloadEngine(
             if (!trafficGuard()) {
                 trafficBlocked = true
                 task.status = TaskStatus.PAUSED
-                task.note = "流量保护：当前是流量网络，这个文件有 ${Format.size(task.totalSize)}，" +
-                    "已自动暂停省流量。回到 WiFi 点继续，或在流量下再点一次继续也可下载。"
+                task.note = Notes.trafficGuardAtStart(task.totalSize)
                 return task.status
             }
             // v2.3 space pre-check (FTP learns its size from SIZE).
@@ -1823,12 +1820,11 @@ class DownloadEngine(
         return when {
             trafficBlocked -> TaskStatus.PAUSED.also {
                 task.status = it
-                task.note = "流量保护：网络已切到流量，这个文件有 ${Format.size(task.totalSize)}，" +
-                    "已自动暂停省流量。回到 WiFi 点继续，或在流量下再点一次继续也可下载。"
+                task.note = Notes.trafficGuardSwitched(task.totalSize)
             }
             netBlocked -> TaskStatus.PAUSED.also {
                 task.status = it
-                task.note = "网络已切到流量（已开启「仅 WiFi 下载」），已暂停；回到 WiFi 后点继续即可续传。"
+                task.note = Notes.wifiOnlyPaused()
             }
             paused -> TaskStatus.PAUSED.also { task.status = it }
             task.totalSize > 0 && task.downloaded >= task.totalSize ->
@@ -1919,9 +1915,7 @@ class DownloadEngine(
                 if (crTotal > 0) {
                     if (task.totalSize > 0 && crTotal != task.totalSize) {
                         c.disconnect()
-                        throw IllegalStateException(
-                            "服务器在下载途中换了文件（大小和刚才探到的对不上），已停下；点继续会重新开始"
-                        )
+                        throw IllegalStateException(Notes.fileChangedSize())
                     }
                     task.totalSize = crTotal
                 }
@@ -1930,18 +1924,14 @@ class DownloadEngine(
                 if (len > 0) {
                     if (task.totalSize > 0 && len != task.totalSize) {
                         c.disconnect()
-                        throw IllegalStateException(
-                            "服务器在下载途中换了文件（大小和刚才探到的对不上），已停下；点继续会重新开始"
-                        )
+                        throw IllegalStateException(Notes.fileChangedSize())
                     }
                     task.totalSize = len
                 }
                 val respEtag = c.getHeaderField("ETag") ?: ""
                 if (etagChanged(task.etag, respEtag)) {
                     c.disconnect()
-                    throw IllegalStateException(
-                        "服务器在下载途中换了文件（校验标记对不上），已停下；点继续会重新开始"
-                    )
+                    throw IllegalStateException(Notes.fileChangedValidator())
                 }
             }
             c.inputStream.use { input ->
@@ -1968,12 +1958,11 @@ class DownloadEngine(
         return when {
             trafficBlocked -> TaskStatus.PAUSED.also {
                 task.status = it
-                task.note = "流量保护：网络已切到流量，这个文件有 ${Format.size(task.totalSize)}，" +
-                    "已自动暂停省流量。回到 WiFi 点继续，或在流量下再点一次继续也可下载。"
+                task.note = Notes.trafficGuardSwitched(task.totalSize)
             }
             netBlocked -> TaskStatus.PAUSED.also {
                 task.status = it
-                task.note = "网络已切到流量（已开启「仅 WiFi 下载」），已暂停；回到 WiFi 后点继续即可续传。"
+                task.note = Notes.wifiOnlyPaused()
             }
             paused -> TaskStatus.PAUSED.also { task.status = it }
             task.totalSize > 0 && task.downloaded >= task.totalSize ->

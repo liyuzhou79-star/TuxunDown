@@ -322,7 +322,6 @@ object WinPalette {
     val Red = Color(0xFFE81123)          // error
     val TrackLight = Color(0xFFE1E1E1)
     val TrackDark = Color(0xFF3F3F3F)
-    val GrayText = Color(0xFF767676)
     // v2.9 (audit round 15): ChartGreen (#1F9D2C) on a light
     // background is ~3.5:1 — fine for charts, bars and the big
     // bold speed readouts (large text / graphics), NOT for

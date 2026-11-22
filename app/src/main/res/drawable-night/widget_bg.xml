@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- v3.7 (audit round 23): night variant — before this the
+     widget background was hardcoded white in every theme, a
+     bright slab on dark launchers. #242424 matches the app's
+     dark surface. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <corners android:radius="16dp" />
+    <solid android:color="#242424" />
+</shape>
