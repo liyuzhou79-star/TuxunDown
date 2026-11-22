@@ -628,6 +628,12 @@ class DownloadService : Service() {
                 // away, so if it ever queues again it may be
                 // warmed again (see QueuePreheat).
                 clearPreheatMark(task.id)
+                // v4.8: host-rotation memory — recorded HERE, at
+                // the point the task is definitely starting (the
+                // thread is created just below), so a task a gate
+                // (Wi-Fi / charge) turned away above does NOT
+                // count as served and cannot skew the rotation.
+                QueueOrder.noteServed(task)
                 val th = Thread {
                     // v4.4 (finalize pipeline): when runOne handed
                     // the task to the finalize lane, the daily

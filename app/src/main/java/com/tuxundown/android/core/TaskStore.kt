@@ -125,6 +125,15 @@ class TaskRecord(
      *  not an HTTP failure. Diagnostic value; the kind above
      *  is what consumers judge by. */
     var failureHttpCode: Int = 0,
+    // ---- v4.8 additions ----
+    /** When the user last jumped this task to the front of the
+     *  queue (插队, epoch ms); 0 = never jumped. Persisted so a
+     *  jump survives a restart until the task actually starts:
+     *  QueueOrder gives jumped tasks first pick inside their
+     *  tier, and DownloadEngine.run() clears it at start (the
+     *  jump is spent once the task really starts). Records
+     *  written before v4.8 parse as 0 = never jumped. */
+    var jumpedAt: Long = 0,
     // ---- v2.1 additions ----
     /** Per-task speed cap in KB/s (0 = no cap of its own). Composes
      *  with the global budget via RateCap — the smaller limit wins.
@@ -577,6 +586,7 @@ class TaskStore(context: Context) {
                 o.put("checksumState", t.checksumState)
                 o.put("failureKind", t.failureKind.name)
                 o.put("failureHttpCode", t.failureHttpCode)
+                o.put("jumpedAt", t.jumpedAt)
                 o.put("scheduleDaily", t.scheduleDaily)
                 o.put("taskLimitKBps", t.taskLimitKBps)
                 o.put("archived", t.archived)
@@ -668,6 +678,7 @@ class TaskStore(context: Context) {
                             FailureKind.valueOf(o.optString("failureKind"))
                         }.getOrDefault(FailureKind.UNKNOWN),
                         failureHttpCode = o.optInt("failureHttpCode", 0),
+                        jumpedAt = o.optLong("jumpedAt", 0).coerceAtLeast(0),
                         scheduleDaily = o.optBoolean("scheduleDaily", false),
                         taskLimitKBps = o.optInt("taskLimitKBps", 0).coerceAtLeast(0),
                         archived = o.optBoolean("archived", false),

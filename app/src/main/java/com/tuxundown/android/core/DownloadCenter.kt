@@ -1258,6 +1258,11 @@ object DownloadCenter {
             // v3.1: 插队 also raises the task to the 高 tier
             // (priority 1 IS 高 — the same value v1.6 wrote).
             if (task.priority == 0) task.priority = 1
+            // v4.8: stamp the jump itself — inside its tier a
+            // jumped task is picked before host rotation applies
+            // (see QueueOrder). A no-op jump (changed == false)
+            // sets nothing, exactly like the priority raise.
+            task.jumpedAt = System.currentTimeMillis()
             store.save()
         }
         return changed

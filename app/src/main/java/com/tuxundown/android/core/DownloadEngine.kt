@@ -233,6 +233,10 @@ class DownloadEngine(
         // and a stale one must never classify a later run.
         task.failureKind = FailureKind.UNKNOWN
         task.failureHttpCode = 0
+        // v4.8: the queue jump is spent once the task actually
+        // starts — clear it in this per-run reset so a later
+        // re-queue does not inherit a stale first pick.
+        task.jumpedAt = 0
         val runStartMs = System.currentTimeMillis()
         try {
             // v1.7: FTP links take their own path (hand-written

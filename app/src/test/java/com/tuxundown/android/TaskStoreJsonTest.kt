@@ -84,6 +84,28 @@ class TaskStoreJsonTest {
     }
 
     @Test
+    fun roundTripKeepsJumpedAtAndOldRecordsDefaultZero() {
+        // v4.8: the queue-jump stamp rides the shared serializer.
+        val t = TaskRecord(url = "https://a.b/f.bin", status = TaskStatus.QUEUED)
+        t.jumpedAt = 1_700_000_123_000L
+        val back = TaskStore.deserialize(TaskStore.serialize(listOf(t)))
+        assertEquals(1, back.size)
+        assertEquals(1_700_000_123_000L, back[0].jumpedAt)
+        // A pre-v4.8 record has no jumpedAt key: 0 = never jumped.
+        val legacy = TaskStore.deserialize(
+            """[{"id":"x","url":"https://e.com/f","status":"PAUSED"}]"""
+        )
+        assertEquals(1, legacy.size)
+        assertEquals(0L, legacy[0].jumpedAt)
+        // A corrupt negative stamp clamps to the same 0.
+        val hostile = TaskStore.deserialize(
+            """[{"id":"y","url":"https://e.com/f","status":"PAUSED","jumpedAt":-5}]"""
+        )
+        assertEquals(1, hostile.size)
+        assertEquals(0L, hostile[0].jumpedAt)
+    }
+
+    @Test
     fun roundTripKeepsV16Fields() {
         val t = TaskRecord(
             url = "https://example.com/live/index.m3u8",
