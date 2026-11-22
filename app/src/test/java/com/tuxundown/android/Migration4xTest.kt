@@ -559,17 +559,29 @@ class Migration4xTest {
 
     @Test
     fun sourceBytesHostileValuesDroppedNotFatal() {
-        // Negative, zero and string-typed values never become
-        // contribution rows; the one honest entry survives.
+        // Negative and zero values never become contribution
+        // rows. A NON-numeric string reads as 0 via optLong and
+        // drops the same way — but a NUMERIC string is coerced
+        // by org.json's optLong to the number it spells, and is
+        // kept as exactly that number. (The round-33 pre-audit
+        // claimed "wrong types read 0 and drop"; that is only
+        // true for non-numeric strings — verified against the
+        // real parser in CI, and pinned here as the actual
+        // contract: the coercion invents nothing, the value is
+        // the one the file itself wrote.)
         val back = TaskStore.deserialize(
             "[" + hostileRecord(
                 "h-src",
                 """"sourceBytes":{"https://a.b/f":500,"https://a.b/neg":-5,
-                   "https://a.b/str":"900","https://a.b/zero":0}""",
+                   "https://a.b/str":"900","https://a.b/bad":"not-a-number",
+                   "https://a.b/zero":0}""",
             ) + "]",
         )
         assertEquals(1, back.size)
-        assertEquals(mapOf("https://a.b/f" to 500L), back[0].sourceBytes.toMap())
+        assertEquals(
+            mapOf("https://a.b/f" to 500L, "https://a.b/str" to 900L),
+            back[0].sourceBytes.toMap(),
+        )
 
         // Key flood: at most the primary + MAX_SOURCES mirrors
         // can ever be real keys, so the parse caps there.
