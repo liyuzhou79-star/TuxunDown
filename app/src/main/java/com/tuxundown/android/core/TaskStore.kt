@@ -646,8 +646,15 @@ class TaskStore(context: Context) {
                         startedAt = o.optLong("startedAt", 0),
                         finishedAt = o.optLong("finishedAt", 0),
                         elapsedMs = o.optLong("elapsedMs", 0),
-                        retryCount = o.optInt("retryCount", 0),
-                        autoRetriesUsed = o.optInt("autoRetriesUsed", 0),
+                        // v4.8 audit (round 33): a negative count
+                        // from a corrupt/hostile record is nonsense
+                        // — worse, a negative autoRetriesUsed makes
+                        // RetryPolicy.shouldRetry (used < limit)
+                        // grant MORE whole-task retries than the
+                        // user configured. Clamp at the parse door.
+                        retryCount = o.optInt("retryCount", 0).coerceAtLeast(0),
+                        autoRetriesUsed = o.optInt("autoRetriesUsed", 0)
+                            .coerceAtLeast(0),
                         mobileConfirmed = o.optBoolean("mobileConfirmed", false),
                         priority = o.optInt("priority", 0),
                         isHls = o.optBoolean("isHls", false),
@@ -668,7 +675,14 @@ class TaskStore(context: Context) {
                     )
                     // A verify never survives a restart: a persisted
                     // "verifying" just means it was interrupted.
-                    if (t.checksumState == Checksum.STATE_VERIFYING) {
+                    // v4.8 audit (round 33): any value outside the
+                    // known 0..3 range is normalized the same way —
+                    // consumers judge by equality today so it was
+                    // inert, but the persisted field should never
+                    // carry a state no writer can produce.
+                    if (t.checksumState == Checksum.STATE_VERIFYING ||
+                        t.checksumState !in Checksum.STATE_NONE..Checksum.STATE_MISMATCHED
+                    ) {
                         t.checksumState = Checksum.STATE_NONE
                     }
                     val srcArr = o.optJSONArray("sources")
@@ -708,7 +722,13 @@ class TaskStore(context: Context) {
                         t.downloaded = sum
                     }
                     t.peakBps = o.optLong("peakBps", 0)
-                    t.peakConns = o.optInt("peakConns", 0).coerceAtLeast(0)
+                    // v4.8 audit (round 33): the only writer is
+                    // the segmented sampler, whose worker pool can
+                    // never exceed MAX_THREADS — clamp the upper
+                    // end too, so a corrupt Int.MAX cannot make
+                    // the server profile display nonsense.
+                    t.peakConns = o.optInt("peakConns", 0)
+                        .coerceIn(0, DownloadEngine.MAX_THREADS)
                     val sbObj = o.optJSONObject("sourceBytes")
                     if (sbObj != null) {
                         val skeys = sbObj.keys()
@@ -735,14 +755,34 @@ class TaskStore(context: Context) {
                             // record with thousands of headers.
                             if (hn++ >= MAX_HEADERS) break
                             val k = keys.next()
-                            t.headers[k] = h.getString(k)
+                            // v4.8 audit (round 33): this was the
+                            // one getString in a parser where every
+                            // sibling field uses opt* — ONE
+                            // non-string header value threw and the
+                            // per-record guard discarded the WHOLE
+                            // record. Skip just the bad entry (and
+                            // blank keys) and keep the record.
+                            // optString alone would STRINGIFY a
+                            // number/object value, so the type is
+                            // checked first, then read via optString.
+                            if (k.isBlank()) continue
+                            if (h.opt(k) !is String) continue
+                            t.headers[k] = h.optString(k)
                         }
                     }
                     val hist = o.optJSONArray("speedHistory")
                     if (hist != null) {
                         synchronized(t.speedHistory) {
-                            for (j in 0 until hist.length()) t.speedHistory.add(hist.optLong(j, 0))
-                            while (t.speedHistory.size > 90) t.speedHistory.removeAt(0)
+                            // v4.8 audit (round 33): only the
+                            // last 90 samples are ever kept, so
+                            // read only that window — the old
+                            // append-all-then-trim paid one
+                            // optLong per entry of a hostile
+                            // million-entry array for nothing.
+                            val from = maxOf(0, hist.length() - 90)
+                            for (j in from until hist.length()) {
+                                t.speedHistory.add(hist.optLong(j, 0))
+                            }
                         }
                     }
                     if (t.chunkSize > 0 && t.totalSize > 0) {
