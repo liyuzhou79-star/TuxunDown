@@ -64,7 +64,8 @@ if (monthDone.isNotEmpty()) {
 anySection = true
 val cal = java.util.Calendar.getInstance().apply { timeInMillis = nowMs}
 out.append(
-"\n\n",
+"\n本月 · ${cal.get(java.util.Calendar.YEAR)} 年 " +
+"${cal.get(java.util.Calendar.MONTH) + 1} 月\n",
 )
 out.append(
 "完成 ${monthDone.size} 个文件，共 " +
@@ -81,7 +82,7 @@ val done = tasks.filter { it.status == TaskStatus.DONE}
 val failed = tasks.filter { it.status == TaskStatus.FAILED}
 if (done.isNotEmpty() || failed.isNotEmpty()) {
 anySection = true
-out.append("\n\n")
+out.append("\n全部记录\n")
 val total = done.size + failed.size
 val rate = Math.round(done.size * 100.0 / total).toInt()
 out.append("完成 ${done.size} 个 · 失败 ${failed.size} 个 · 成功率 $rate%\n")
@@ -98,7 +99,7 @@ out.append("最大文件：${displayName(biggest)}（${Format.size(bytesOf(bigge
 // ---- the long-running counters ----
 if (counters.totalBytes > 0 || counters.doneCount > 0 || counters.avgBps > 0) {
 anySection = true
-out.append("\n\n")
+out.append("\n本机累计统计\n")
 if (counters.totalBytes > 0) {
 out.append("累计下载：${Format.size(counters.totalBytes)}\n")
 }
@@ -113,7 +114,7 @@ out.append("平均速度：${Format.speed(counters.avgBps)}\n")
 // ---- top sites ----
 if (hostTop.isNotEmpty()) {
 anySection = true
-out.append("\n\n")
+out.append("\n下载最多的站点\n")
 hostTop.forEachIndexed { i, h ->
 out.append("${i + 1}. ${h.host} · ${Format.size(h.bytes)} · ${h.count} 个文件\n")
 }
