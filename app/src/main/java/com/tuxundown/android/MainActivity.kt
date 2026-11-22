@@ -591,7 +591,7 @@ fun DownApp() {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "4.6.0"
+        }.getOrNull() ?: "4.7.0"
     }
     var showGuide by remember {
         // v2.2 safe mode: after 2+ consecutive crashes, first-
@@ -6619,9 +6619,9 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 修了一个充电等待的隐患：开了「充电时才下载」、任务正在等插电时，极少数情况下后台服务会被误判成没事可做提前退出，任务就干等在那里。现在只要还有任务在等充电，服务就会稳稳留着，插上电源马上接着下\n" +
-            "· 卡死的连接换得更聪明：以前一条连接卡住不动，要等满 12 秒才换掉。现在按整个任务的速度来定：下得越快、卡住的连接换得越果断；下得慢的站更耐心，不会把本来就慢的连接来回折腾。任务只剩一条连接时绝不换它\n" +
-            "· 任务详情多了「服务器画像」：展开任务卡片，能看到这次下载实际记下来的服务器情况——支不支持断点续传、服务器报的文件大小、实际最多开了几条连接、每个下载源各下了多少，等等。没探到的数据就不显示，不编数字；这一段可以在设置里关掉",
+            "· 登录状态只发给原站，更安全：有些下载要带上你在网站上的登录状态（Cookie）才能下。以前用镜像加速、或服务器把下载跳转到别的站点时，这份登录状态也会被一起带过去。现在改成只发给链接本身的那个站点：镜像和跳转不会再带上你在原站的登录状态；该带的地方照常带，下载不受影响\n" +
+            "· 相邻的小分片合并下，更利落：文件切出的小块，以前每一小块都要单独发一次请求。现在相邻的几小块会合并成一次请求一起下完，请求次数少了，来回等待也少了；万一中途断了，最多重下这一小段，不影响已经下好的部分\n" +
+            "· 扫码入口和其它入口走同一道检查：扫二维码加链接时，现在会和粘贴链接一样，先检查这个链接是不是支持的类型，不支持的当场说明，不会建出一个下不了的任务",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
             "· 文件直链 → 直接开始多线程下载，还能预先改好保存文件名\n" +
@@ -7680,7 +7680,7 @@ fun TaskCard(
                     val version = runCatching {
                         ctx.packageManager.getPackageInfo(ctx.packageName, 0)
                             .versionName
-                    }.getOrNull() ?: "4.6.0"
+                    }.getOrNull() ?: "4.7.0"
                     val cm = ctx.getSystemService(
                         android.content.Context.CLIPBOARD_SERVICE,
                     ) as android.content.ClipboardManager
