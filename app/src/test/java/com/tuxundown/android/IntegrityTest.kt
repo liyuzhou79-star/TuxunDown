@@ -36,6 +36,19 @@ class IntegrityTest {
     }
 
     @Test
+    fun missingContentRangeStartCondemnsAnyOffset() {
+        // v4.1 audit round 26: the segmented path judges a 206
+        // by contentRangeStart(cr) != from — a missing or
+        // garbled header parses to -1, which matches NO legal
+        // offset (from >= 0), so the old "unparsable = excused"
+        // hole is closed by this parse alone.
+        assertTrue(DownloadEngine.contentRangeStart(null) != 0L)
+        assertTrue(DownloadEngine.contentRangeStart("") != 500L)
+        assertTrue(DownloadEngine.contentRangeStart("garbage") != 500L)
+        assertEquals(500L, DownloadEngine.contentRangeStart("bytes 500-999/2000"))
+    }
+
+    @Test
     fun strongEtagMismatchCondemns() {
         assertTrue(DownloadEngine.etagChanged("\"abc123\"", "\"def456\""))
         assertFalse(DownloadEngine.etagChanged("\"abc123\"", "\"abc123\""))

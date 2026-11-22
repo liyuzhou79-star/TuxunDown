@@ -544,9 +544,17 @@ class DownloadEngine(
         when (code) {
             HttpURLConnection.HTTP_PARTIAL -> {
                 val range = c.getHeaderField("Content-Range") ?: ""
-                val total = range.substringAfter('/', "").toLongOrNull() ?: -1
+                val total = contentRangeTotal(range)
                 task.totalSize = total
-                if (total < 0) task.singleThreadOnly = true
+                // v4.1 audit round 26: a 206 whose range does not
+                // START at byte 0 (missing / garbled / shifted
+                // Content-Range) is not evidence the server can
+                // serve arbitrary ranges at all — its total may
+                // still bind the single-stream path's own checks,
+                // but the segmented path must not trust it.
+                if (total < 0 || contentRangeStart(range) != 0L) {
+                    task.singleThreadOnly = true
+                }
                 // v2.2: the body is the single probed byte — drain
                 // it so the first chunk request reuses this warm
                 // connection instead of paying a new handshake.
@@ -1025,7 +1033,13 @@ class DownloadEngine(
         try {
             if (c.responseCode != HttpURLConnection.HTTP_PARTIAL) return -1
             val range = c.getHeaderField("Content-Range") ?: return -1
-            return range.substringAfter('/', "").trim().toLongOrNull() ?: -1
+            // v4.1 audit round 26: a total quoted on a range that
+            // does not start at byte 0 (or carries no parseable
+            // range at all) is not this file's total — refuse it
+            // (-1 rejects the mirror in validateSources, the safe
+            // direction) instead of binding validation to it.
+            if (contentRangeStart(range) != 0L) return -1
+            return contentRangeTotal(range)
         } finally {
             // v4.1 (step A): release warm like probe() does — a 206
             // here carries the same 1-byte body, and the old
@@ -1294,8 +1308,14 @@ class DownloadEngine(
         // A redirect chain that lands on a different byte range than
         // asked would corrupt the file; Content-Range must match.
         val cr = c.getHeaderField("Content-Range") ?: ""
-        val crStart = cr.removePrefix("bytes ").substringBefore('-').trim().toLongOrNull()
-        if (crStart != null && crStart != from) {
+        // v4.1 audit round 26: a MISSING or unparsable
+        // Content-Range used to SKIP this check entirely (the old
+        // inline parse yielded null and null was excused) — a 206
+        // carrying no range header at all was trusted to hold the
+        // requested bytes blind. contentRangeStart returns -1 for
+        // those, and -1 != from condemns, exactly how the
+        // single-stream path has always judged its own 206.
+        if (contentRangeStart(cr) != from) {
             c.disconnect()
             throw IllegalStateException("服务器返回的分片位置不对，已重试")
         }
@@ -1395,6 +1415,7 @@ class DownloadEngine(
             if (c.responseCode !in 200..299) {
                 throw IllegalStateException(Errors.httpMessage(c.responseCode))
             }
+            var readTotal = 0L
             val text = c.inputStream.use { input ->
                 val out = java.io.ByteArrayOutputStream()
                 val buf = ByteArray(32 * 1024)
@@ -1408,7 +1429,17 @@ class DownloadEngine(
                     out.write(buf, 0, n)
                     total += n
                 }
+                readTotal = total.toLong()
                 String(out.toByteArray(), Charsets.UTF_8)
+            }
+            // v4.1 audit round 26: a playlist body that ended
+            // before its declared Content-Length is a TRUNCATED
+            // playlist — parsing it would silently drop the tail
+            // segments and merge a partial stream as DONE. Only
+            // an EOF read is judged; a body cut at the cap was
+            // never claimed to be complete (see DeclaredLength).
+            if (consumed && !DeclaredLength.eofMatches(c.contentLengthLong, readTotal)) {
+                throw IllegalStateException("播放列表长度对不上（服务器声明和实际发来的不一样），已停下")
             }
             return text
         } finally {
@@ -1439,6 +1470,18 @@ class DownloadEngine(
                     out.write(buf, 0, n)
                 }
                 out.toByteArray()
+            }
+            // v4.1 audit round 26: a segment body that ended
+            // before its declared Content-Length used to be
+            // merged and marked written exactly like a whole
+            // one — a silently truncated segment inside a file
+            // that reports DONE. A declared length is a promise
+            // (see DeclaredLength); breaking it throws here,
+            // and segmentBytes' existing 3-attempt retry is what
+            // answers. An undeclared (chunked) body cannot be
+            // judged and never condemns.
+            if (!DeclaredLength.eofMatches(c.contentLengthLong, data.size.toLong())) {
+                throw IllegalStateException("分片长度对不上（服务器声明和实际发来的不一样），已重试")
             }
             return data
         } finally {
@@ -1895,6 +1938,19 @@ class DownloadEngine(
                     downloadedBytes.addAndGet(n.toLong())
                     limiter?.throttle(n)
                 }
+                // v4.1 audit round 26: SIZE declared a total —
+                // a transfer that delivered a different byte
+                // count (a clean 226 over a short body, or extra
+                // bytes past the declared end) is not the promised
+                // file. The old ">=" completion check below would
+                // have called the oversized case DONE; pos is the
+                // whole file's length here (resume offset + what
+                // this run added), so it must equal the total
+                // exactly. An undeclared total (SIZE refused)
+                // never condemns.
+                if (total > 0 && pos != total) {
+                    throw IllegalStateException("FTP 发来的数据和声明的大小对不上，已停下")
+                }
                 // v1.8: seal the file before it counts as DONE.
                 if (!stopped()) runCatching { target.sync() }
             }
@@ -1920,7 +1976,11 @@ class DownloadEngine(
                 task.note = Notes.wifiOnlyPaused()
             }
             paused -> TaskStatus.PAUSED.also { task.status = it }
-            task.totalSize > 0 && task.downloaded >= task.totalSize ->
+            // v4.1 audit round 26: equality, not ">=" — more
+            // bytes than SIZE declared is a broken promise too
+            // (the retrieve check above throws first in the
+            // streamed case; this also covers alreadyComplete).
+            task.totalSize > 0 && task.downloaded == task.totalSize ->
                 TaskStatus.DONE.also { task.status = it }
             task.totalSize <= 0 ->
                 TaskStatus.DONE.also { task.status = it }
@@ -2042,6 +2102,19 @@ class DownloadEngine(
                         }
                         out.write(buf, 0, n)
                         downloadedBytes.addAndGet(n.toLong())
+                        // v4.1 audit round 26: a fixed-length
+                        // stream is bounded by the platform, but
+                        // a CHUNKED response (no Content-Length)
+                        // is not — with a total known from the
+                        // probe it could keep sending past it,
+                        // and the old ">=" completion check below
+                        // would call the oversized file DONE.
+                        if (DeclaredLength.exceedsKnownTotal(
+                                task.totalSize, downloadedBytes.get()
+                            )
+                        ) {
+                            throw IllegalStateException("服务器发来的数据比声明的文件还多，已停下")
+                        }
                         limiter?.throttle(n)
                     }
                 }
