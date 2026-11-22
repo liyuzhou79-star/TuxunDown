@@ -1061,7 +1061,7 @@ class DownloadService : Service() {
             // stays FAILED with its reason on the card.
             val limit = DownloadCenter.autoRetryCount
             if (task.status != TaskStatus.FAILED ||
-                RetryPolicy.needsUserAction(task.error) ||
+                RetryPolicy.needsUserAction(task) ||
                 !RetryPolicy.shouldRetry(task.autoRetriesUsed, limit)
             ) {
                 return false
@@ -1136,6 +1136,8 @@ class DownloadService : Service() {
         task.retryCount = 0
         task.autoRetriesUsed = 0
         task.error = ""
+        task.failureKind = FailureKind.UNKNOWN
+        task.failureHttpCode = 0
         task.checksumState = Checksum.STATE_NONE
         task.hlsDone = BooleanArray(0)
         task.hlsTotalSegments = 0
@@ -1345,6 +1347,10 @@ class DownloadService : Service() {
             // obtainTarget's vanished-target reset).
             task.status = TaskStatus.FAILED
             task.error = e.message ?: "文件在下载途中被删掉了，请重新下载。"
+            // v4.5 (audit round 30): this failure is produced
+            // HERE, outside the engine — record its structured
+            // verdict at the same time, like the engine does.
+            task.failureKind = FailureKind.TARGET_GONE
             task.note = ""
             notifyAggregate()
         } catch (e: Exception) {

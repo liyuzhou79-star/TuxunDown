@@ -109,6 +109,22 @@ class TaskRecord(
     /** Checksum verdict: see Checksum.STATE_* (0 none, 1 verifying,
      *  2 matched 对上， 3 mismatched 对不上）. */
     var checksumState: Int = 0,
+    // ---- v4.5 additions (audit round 30) ----
+    /** The STRUCTURED failure verdict, recorded by the engine
+     *  at the failure site where the raw exception / HTTP code
+     *  still exists (see FailureClassifier). Persisted on
+     *  purpose — unlike the transient netOutage/portalHit
+     *  flags: FailureAdvice renders for FAILED records after
+     *  a process restart, when only serialized fields
+     *  survive. Records written before v4.5 parse as UNKNOWN
+     *  and consumers fall back to the legacy text matching
+     *  for those (see FailureClassifier.verdictFor). Reset
+     *  by the engine at every run start. */
+    var failureKind: FailureKind = FailureKind.UNKNOWN,
+    /** The raw HTTP status code of the failure, 0 = none /
+     *  not an HTTP failure. Diagnostic value; the kind above
+     *  is what consumers judge by. */
+    var failureHttpCode: Int = 0,
     // ---- v2.1 additions ----
     /** Per-task speed cap in KB/s (0 = no cap of its own). Composes
      *  with the global budget via RateCap — the smaller limit wins.
@@ -520,6 +536,8 @@ class TaskStore(context: Context) {
                 o.put("expectedSha256", t.expectedSha256)
                 o.put("expectedMd5", t.expectedMd5)
                 o.put("checksumState", t.checksumState)
+                o.put("failureKind", t.failureKind.name)
+                o.put("failureHttpCode", t.failureHttpCode)
                 o.put("scheduleDaily", t.scheduleDaily)
                 o.put("taskLimitKBps", t.taskLimitKBps)
                 o.put("archived", t.archived)
@@ -594,6 +612,10 @@ class TaskStore(context: Context) {
                         expectedSha256 = o.optString("expectedSha256"),
                         expectedMd5 = o.optString("expectedMd5"),
                         checksumState = o.optInt("checksumState", 0),
+                        failureKind = runCatching {
+                            FailureKind.valueOf(o.optString("failureKind"))
+                        }.getOrDefault(FailureKind.UNKNOWN),
+                        failureHttpCode = o.optInt("failureHttpCode", 0),
                         scheduleDaily = o.optBoolean("scheduleDaily", false),
                         taskLimitKBps = o.optInt("taskLimitKBps", 0).coerceAtLeast(0),
                         archived = o.optBoolean("archived", false),

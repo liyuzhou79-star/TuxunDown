@@ -47,6 +47,16 @@ object PublicStorage {
      */
     class TargetGoneException(message: String) : IllegalStateException(message)
 
+    /**
+     * v4.5 (audit round 30): the custom (SAF) folder's grant
+     * is dead or unwritable — only re-picking the folder in
+     * settings can fix it. A marker TYPE, like
+     * [TargetGoneException], so the failure classification
+     * (see FailureClassifier) judges the type, never the
+     * sentence: the message wording stays free to change.
+     */
+    class FolderGrantException(message: String) : IllegalStateException(message)
+
     private const val TARGET_GONE_MESSAGE =
         "文件在下载途中被删掉了，下载结果已经不在了，请重新下载。"
 
@@ -205,13 +215,13 @@ object PublicStorage {
         val custom = DownloadCenter.downloadDirUri
         val uri: Uri = if (custom.isNotBlank()) {
             val tree = DocumentFile.fromTreeUri(context, Uri.parse(custom))
-                ?: throw IllegalStateException("自定义文件夹打不开，请在设置里重选下载目录")
+                ?: throw FolderGrantException("自定义文件夹打不开，请在设置里重选下载目录")
             if (!tree.canWrite()) {
-                throw IllegalStateException("自定义文件夹不可写（授权可能已失效，请在设置里重选）")
+                throw FolderGrantException("自定义文件夹不可写（授权可能已失效，请在设置里重选）")
             }
             val doc = tree.findFile(part)
                 ?: tree.createFile("application/octet-stream", part)
-                ?: throw IllegalStateException("在自定义文件夹里建不了文件")
+                ?: throw FolderGrantException("在自定义文件夹里建不了文件")
             doc.uri
         } else {
             // v2.6: with 按类型分文件夹 on, the .part is born in

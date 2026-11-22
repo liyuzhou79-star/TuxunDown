@@ -22,6 +22,17 @@ object NetRetry {
      * looks like a connectivity loss rather than a server refusal.
      * HTTP status errors ("服务器返回 HTTP 403") are NOT network
      * errors: retrying those on a network callback would be wrong.
+     *
+     * CONTRACT (v4.5, audit round 30): this string form may
+     * ONLY be fed RAW exception text — an original
+     * Throwable's message, as the Throwable overload below
+     * does while walking the cause chain. NEVER feed it
+     * task.error: since v2.2 that field carries only
+     * Errors.human's plain Chinese, which contains none of
+     * these needles, so the verdict would silently always
+     * be false (exactly the round-29 headline bug). Anything
+     * that starts from a task record must judge the
+     * engine's recorded verdict (task.netOutage) instead.
      */
     fun isNetworkError(error: String): Boolean {
         if (error.isBlank()) return false

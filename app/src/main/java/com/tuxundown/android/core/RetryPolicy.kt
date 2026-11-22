@@ -25,12 +25,28 @@ object RetryPolicy {
      * (re-pick the folder in settings), or the storage device
      * went away / turned read-only mid-run. Auto-retrying them
      * cannot succeed: every attempt fails identically and the
-     * retry notes bury the real reason. Matching runs over the
-     * app's own plain error strings, like FailureAdvice.
+     * retry notes bury the real reason.
+     *
+     * v4.5 (audit round 30): the judgement reads the
+     * STRUCTURED verdict recorded at the failure site (see
+     * FailureKind), not the error text — the round-28 form
+     * matched contains() needles over Errors.human's
+     * sentences, so any wording edit could silently turn
+     * this gate off (auto-retry grinding a hopeless task)
+     * or on (a retryable task never retrying). The text
+     * form below survives only as the fallback for
+     * verdict-less records written before v4.5, via
+     * FailureClassifier.
      */
-    fun needsUserAction(error: String): Boolean {
-        if (error.isBlank()) return false
-        return error.contains("重选") || error.contains("授权可能已失效") ||
-            error.contains("自定义文件夹") || error.contains("存储设备")
-    }
+    fun needsUserAction(kind: FailureKind): Boolean =
+        kind == FailureKind.FOLDER_GRANT || kind == FailureKind.STORAGE_GONE
+
+    /** The gate's entry point: verdict first, text fallback
+     *  only for verdict-less (pre-v4.5) records. */
+    fun needsUserAction(task: TaskRecord): Boolean =
+        needsUserAction(FailureClassifier.verdictFor(task))
+
+    /** Legacy text form — fallback use only (see above). */
+    fun needsUserAction(error: String): Boolean =
+        needsUserAction(FailureClassifier.fromErrorText(error))
 }

@@ -199,6 +199,11 @@ class DownloadEngine(
         // fail to park) a later run.
         task.netOutage = false
         task.portalHit = false
+        // v4.5 (audit round 30): same for the structured
+        // failure verdict — it belongs to THIS run's failure,
+        // and a stale one must never classify a later run.
+        task.failureKind = FailureKind.UNKNOWN
+        task.failureHttpCode = 0
         val runStartMs = System.currentTimeMillis()
         try {
             // v1.7: FTP links take their own path (hand-written
@@ -354,8 +359,7 @@ class DownloadEngine(
             // Errors.human the English evidence is gone by
             // design, and the service's outage / portal parks
             // judge these flags, never the card text.
-            if (isPortalBlocked(e)) task.portalHit = true
-            if (NetRetry.isNetworkError(e)) task.netOutage = true
+            recordFailureVerdict(e)
             task.error = if (isStorageFull(e)) {
                 Notes.storageFull()
             } else if (isStorageGone(e)) {
@@ -662,7 +666,7 @@ class DownloadEngine(
             }
             else -> {
                 c.disconnect()
-                throw IllegalStateException(Errors.httpMessage(code))
+                throw HttpFailureException(code)
             }
         }
         onSave()
@@ -1382,12 +1386,14 @@ class DownloadEngine(
                 if (isStorageFull(e)) {
                     // No point retrying into a full disk (audit A10).
                     task.error = Notes.storageFull()
+                    task.failureKind = FailureKind.STORAGE_FULL
                     break
                 }
                 if (isStorageGone(e)) {
                     // Nor into a pulled card / read-only volume:
                     // every chunk would fail the same way.
                     task.error = Notes.storageDeviceGone()
+                    task.failureKind = FailureKind.STORAGE_GONE
                     break
                 }
                 if (attempt >= 3) {
@@ -1396,8 +1402,9 @@ class DownloadEngine(
                     // Notes text, so the raw verdicts for the
                     // service's parks are recorded HERE, where
                     // the original exception still exists.
-                    if (isPortalBlocked(e)) task.portalHit = true
-                    if (NetRetry.isNetworkError(e)) task.netOutage = true
+                    // v4.5 (audit round 30): the structured
+                    // failure verdict joins them, same site.
+                    recordFailureVerdict(e)
                     task.error = Errors.human(e)
                 }
                 try { Thread.sleep(500L * attempt) } catch (_: InterruptedException) { }
@@ -1463,7 +1470,7 @@ class DownloadEngine(
         }
         if (code != HttpURLConnection.HTTP_PARTIAL) {
             c.disconnect()
-            throw IllegalStateException(Errors.httpMessage(code))
+            throw HttpFailureException(code)
         }
         // A redirect chain that lands on a different byte range than
         // asked would corrupt the file; Content-Range must match.
@@ -1590,7 +1597,7 @@ class DownloadEngine(
         var consumed = false
         try {
             if (c.responseCode !in 200..299) {
-                throw IllegalStateException(Errors.httpMessage(c.responseCode))
+                throw HttpFailureException(c.responseCode)
             }
             var readTotal = 0L
             val text = c.inputStream.use { input ->
@@ -1648,7 +1655,7 @@ class DownloadEngine(
         var consumed = false
         try {
             if (c.responseCode !in 200..299) {
-                throw IllegalStateException(Errors.httpMessage(c.responseCode))
+                throw HttpFailureException(c.responseCode)
             }
             val data = c.inputStream.use { input ->
                 val out = java.io.ByteArrayOutputStream()
@@ -2326,7 +2333,7 @@ class DownloadEngine(
             val c = openFollowingRedirects(task.url) { }
             val code = c.responseCode
             if (code != HttpURLConnection.HTTP_OK && code != HttpURLConnection.HTTP_PARTIAL) {
-                throw IllegalStateException(Errors.httpMessage(code))
+                throw HttpFailureException(code)
             }
             // v4.4 (audit round 29): this path had NO HTML
             // check at all. With a KNOWN total the length
@@ -2479,6 +2486,29 @@ class DownloadEngine(
             cur = cur.cause
         }
         return false
+    }
+
+    /**
+     * v4.5 (audit round 30): record every raw-failure verdict
+     * for [e] on the task, at a site where the original
+     * exception still exists — the v4.4 netOutage/portalHit
+     * flags plus the structured, PERSISTED failure kind and
+     * HTTP code (see FailureKind). Consumers downstream
+     * (FailureAdvice, the auto-retry gate, the service's
+     * parks) judge these verdicts, never the humanized
+     * task.error text that is composed right after.
+     */
+    private fun recordFailureVerdict(e: Throwable) {
+        if (isPortalBlocked(e)) task.portalHit = true
+        if (NetRetry.isNetworkError(e)) task.netOutage = true
+        val kind = when {
+            isStorageFull(e) -> FailureKind.STORAGE_FULL
+            isStorageGone(e) -> FailureKind.STORAGE_GONE
+            else -> FailureClassifier.ofThrowable(e)
+        }
+        if (kind != FailureKind.UNKNOWN) task.failureKind = kind
+        val code = FailureClassifier.httpCodeOf(e)
+        if (code != 0) task.failureHttpCode = code
     }
 
     /** v4.4 (audit round 29): did this failure chain pass
