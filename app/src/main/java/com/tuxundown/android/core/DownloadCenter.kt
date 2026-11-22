@@ -315,6 +315,44 @@ object DownloadCenter {
         return n
     }
 
+    /**
+     * v3.4: delete DONE / FAILED records whose terminal time is
+     * at least [days] days old (the selection rule is the pure
+     * [RecordCleanup]). RECORDS ONLY — downloaded files and
+     * unfinished .part files are never touched (a leftover
+     * .part belongs to the orphan cleaner in the same settings
+     * group).
+     *
+     * Safety choice — automatic backup, not just a confirm
+     * dialog: a full backup (settings + tasks, the standard
+     * export shape) is written into the download folder FIRST,
+     * and the cleanup ABORTS (throws) when that write fails.
+     * A dialog only guards the tap itself; a backup file makes
+     * the deletion actually recoverable afterwards — it
+     * re-imports through 设置 → 导入备份 like any other backup
+     * (the records come back as records; files were never
+     * deleted, so nothing else needs restoring). Returns
+     * (removedCount, backupFileName); (0, "") when nothing was
+     * eligible — and no backup is written in that case either.
+     */
+    fun cleanupOldRecords(days: Int): Pair<Int, String> {
+        val ctx = appContext ?: return 0 to ""
+        val now = System.currentTimeMillis()
+        val victims = RecordCleanup.select(store.tasks, now, days)
+        if (victims.isEmpty()) return 0 to ""
+        val backupText = Backup.build(
+            store.exportJson(), settingsSnapshotJson(), now,
+        )
+        val stamp = java.text.SimpleDateFormat(
+            "yyyyMMdd-HHmm", java.util.Locale.US,
+        ).format(java.util.Date(now))
+        val backupName = PublicStorage.saveTextFile(
+            ctx, "tuxundown-backup-before-cleanup-$stamp.json", backupText,
+        )
+        store.removeAll(victims)
+        return victims.size to backupName
+    }
+
     // ---- v1.9: download proxy (engine + sniffer; ProxySettings) ----
     // Every setter re-syncs the runtime mirror the sniff layer
     // reads (ProxyState) and the SOCKS authenticator.

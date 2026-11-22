@@ -169,6 +169,12 @@ class DownloadEngine(
         trafficBlocked = false
         // v1.4 stats: first-start stamp + accumulated transfer time.
         if (task.startedAt == 0L) task.startedAt = System.currentTimeMillis()
+        // v3.4: a fresh run is by definition unfinished — clear
+        // any terminal stamp an earlier run left, so a failure
+        // stamp from before a resume can never survive into a
+        // later success (the DONE branch in the finally only
+        // stamps when this is 0).
+        task.finishedAt = 0
         val runStartMs = System.currentTimeMillis()
         try {
             // v1.7: FTP links take their own path (hand-written
@@ -314,6 +320,16 @@ class DownloadEngine(
         } finally {
             task.elapsedMs += System.currentTimeMillis() - runStartMs
             if (task.status == TaskStatus.DONE && task.finishedAt == 0L) {
+                task.finishedAt = System.currentTimeMillis()
+            }
+            if (task.status == TaskStatus.FAILED) {
+                // v3.4: a failure is a terminal state too — stamp
+                // when THIS run failed, so the old-record cleanup
+                // (RecordCleanup) and the download report can date
+                // a failure instead of falling back to the
+                // creation time. run() cleared the stamp at the
+                // start of this run, so this can only ever be the
+                // current failure's time.
                 task.finishedAt = System.currentTimeMillis()
             }
             running = false

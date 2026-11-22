@@ -333,6 +333,28 @@ class TaskStore(context: Context) {
         saveNow()
     }
 
+    /**
+     * v3.4: bulk removal with ONE flush. [remove] saves
+     * immediately per record — right for a single user tap,
+     * wrong for the old-record cleanup: hundreds of victims
+     * would mean hundreds of full-store serializations and
+     * writes (quadratic IO — exactly what audit round 20
+     * exists to catch). Only the records go; downloaded files
+     * and .part files are never touched here.
+     */
+    fun removeAll(victims: Collection<TaskRecord>) {
+        if (victims.isEmpty()) return
+        val ids = victims.mapTo(HashSet()) { it.id }
+        val doomed = tasks.filter { it.id in ids }
+        if (doomed.isEmpty()) return
+        // CopyOnWriteArrayList supports removeAll(Collection)
+        // (it rebuilds the array under its lock); the predicate
+        // form would go through the iterator and throw.
+        tasks.removeAll(doomed)
+        for (v in doomed) fileOf(v).delete()
+        saveNow()
+    }
+
     fun byId(id: String): TaskRecord? = tasks.firstOrNull { it.id == id }
 
     companion object {

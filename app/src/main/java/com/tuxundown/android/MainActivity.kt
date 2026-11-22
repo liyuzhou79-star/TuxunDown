@@ -4516,7 +4516,7 @@ fun SettingsScreen(
             "校验 哈希 完整性 sha md5 解压 zip 压缩包 自动解压",
         "s-power" to "后台运行 后台 保活 电池 白名单 省电 冻结",
         "s-data" to "引导与数据 引导 新手引导 帮助 常见问题 备份 导出 导入 " +
-            "恢复 孤儿 清理 part 数据 诊断 自检 体检 归档",
+            "恢复 孤儿 清理 part 数据 诊断 自检 体检 归档 旧记录 删除记录",
         "s-about" to "关于 版本 检查更新 更新 github 开源 gpl 许可",
     )
     fun groupVisible(key: String): Boolean {
@@ -4591,6 +4591,43 @@ fun SettingsScreen(
             android.os.Handler(android.os.Looper.getMainLooper()).post {
                 orphanScanning = false
                 orphanScan = found
+            }
+        }.start()
+    }
+    // v3.4: old-record cleanup state — the day window, the
+    // confirm dialog's frozen (days, victims) pair, and a tick
+    // that makes the "currently eligible" count re-read after
+    // a cleanup finishes.
+    var cleanupDays by remember { mutableStateOf(90) }
+    var cleanupBusy by remember { mutableStateOf(false) }
+    var cleanupConfirm by remember {
+        mutableStateOf<Pair<Int, List<com.tuxundown.android.core.TaskRecord>>?>(null)
+    }
+    var cleanupTick by remember { mutableStateOf(0) }
+    fun startCleanup(days: Int) {
+        cleanupBusy = true
+        Thread {
+            val result = runCatching { DownloadCenter.cleanupOldRecords(days) }
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                cleanupBusy = false
+                cleanupTick++
+                result.onSuccess { (n, backup) ->
+                    Toast.makeText(
+                        context,
+                        if (n > 0) {
+                            "已清理 $n 条旧记录；清理前备份已存到下载目录：$backup"
+                        } else {
+                            "没有符合条件的旧记录，一条都没删"
+                        },
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }.onFailure {
+                    Toast.makeText(
+                        context,
+                        "清理已取消：清理前备份没存成功，记录一条都没删",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
             }
         }.start()
     }
@@ -5234,6 +5271,54 @@ fun SettingsScreen(
                     selected = archiveDays,
                     onPick = onArchiveDays,
                 )
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Text("清理旧任务记录")
+                Text(
+                    "把超过所选天数的已完成 / 已失败记录从列表里删掉，列表更清爽。" +
+                        "只删记录：已经下好的文件本体不动，没下完的 .part 也不动" +
+                        "（.part 用上面的「清理孤儿 .part 文件」清）。" +
+                        "清理前会先自动把全部设置＋任务记录备份成一个文件存到下载目录，" +
+                        "删错了用「导入备份」就能恢复；备份存失败就一条都不删。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                ChipRow(
+                    options = listOf(
+                        30 to "30 天", 90 to "90 天", 180 to "180 天",
+                    ),
+                    selected = cleanupDays,
+                    onPick = { cleanupDays = it },
+                )
+                val cleanupEligible = remember(cleanupDays, cleanupTick) {
+                    com.tuxundown.android.core.RecordCleanup.select(
+                        DownloadCenter.store.tasks,
+                        System.currentTimeMillis(),
+                        cleanupDays,
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton(
+                        onClick = {
+                            if (cleanupEligible.isEmpty()) {
+                                Toast.makeText(
+                                    context,
+                                    "没有符合条件的旧记录",
+                                    Toast.LENGTH_SHORT,
+                                ).show()
+                            } else {
+                                cleanupConfirm = cleanupDays to cleanupEligible
+                            }
+                        },
+                        enabled = !cleanupBusy,
+                    ) { Text(if (cleanupBusy) "清理中…" else "清理") }
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        "当前符合条件：${cleanupEligible.size} 条",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
         if (groupVisible("s-about")) item(key = "s-about") {
@@ -5372,6 +5457,38 @@ fun SettingsScreen(
             },
             dismissButton = {
                 TextButton(onClick = { orphanScan = null }) { Text("关闭") }
+            },
+        )
+    }
+    // v3.4: old-record cleanup confirmation — exact counts,
+    // what is NOT deleted, and the backup-first rule, all
+    // stated before anything happens.
+    if (cleanupConfirm != null) {
+        val (cDays, victims) = cleanupConfirm!!
+        val doneN = victims.count {
+            it.status == com.tuxundown.android.core.TaskStatus.DONE
+        }
+        val failN = victims.size - doneN
+        AlertDialog(
+            onDismissRequest = { cleanupConfirm = null },
+            title = { Text("清理旧任务记录") },
+            text = {
+                Text(
+                    "将删除 $cDays 天前的 ${victims.size} 条记录" +
+                        "（已完成 $doneN 条、失败 $failN 条）。\n" +
+                        "只删记录：已下载的文件本体不动，没下完的 .part 也不动。\n" +
+                        "开始前会先把全部设置＋任务记录备份成文件存到下载目录" +
+                        "（文件名带 before-cleanup），删错了用上面的「导入备份」选它就能恢复。",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    cleanupConfirm = null
+                    startCleanup(cDays)
+                }) { Text("开始清理") }
+            },
+            dismissButton = {
+                TextButton(onClick = { cleanupConfirm = null }) { Text("取消") }
             },
         )
     }
