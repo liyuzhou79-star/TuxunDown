@@ -3952,6 +3952,14 @@ fun StatsScreen(onBack: () -> Unit, onSpeedTest: () -> Unit, tick: Int) {
     )
     var refresh by remember { mutableStateOf(0) }
     @Suppress("UNUSED_EXPRESSION") refresh // re-read counters after a clear
+    // v6.2: the fastest-records board — a pure ranking over
+    // the records' already-stored peakBps (see
+    // core/FastestRecords). Empty when no record has a
+    // measured peak, and then the section below is omitted
+    // entirely, title included.
+    val fastest = com.tuxundown.android.core.FastestRecords.top(
+        DownloadCenter.store.tasks,
+    )
     LazyColumn(
         Modifier
             .fillMaxSize()
@@ -4043,6 +4051,30 @@ fun StatsScreen(onBack: () -> Unit, onSpeedTest: () -> Unit, tick: Int) {
                             "${h.host} · ${Format.size(h.bytes)} · ${h.count} 个文件",
                         )
                     }
+                }
+            }
+        }
+        if (fastest.isNotEmpty()) {
+            item(key = "st-fastest") {
+                SettingsGroup("最快纪录") {
+                    fastest.forEachIndexed { i, e ->
+                        val dateText = Format.dateTime(e.dateMs)
+                        InfoRow(
+                            "第 ${i + 1} 名：",
+                            if (dateText.isBlank()) {
+                                "${e.name} · ${Format.speed(e.peakBps)}"
+                            } else {
+                                "${e.name} · ${Format.speed(e.peakBps)} · $dateText"
+                            },
+                        )
+                    }
+                    Text(
+                        "按每个任务自己跑到过的最高速度排，只算现在还留着的任务记录；" +
+                            "日期是任务的完成时间，没下完的按创建时间算。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
                 }
             }
         }
