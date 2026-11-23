@@ -3,7 +3,8 @@ package com.tuxundown.android.core
 /**
  * Canvas chart label sizing (v6.5, audit round 50, item A-F2).
  *
- * The hand-drawn charts (WeekChart / SpeedChart) paint their
+ * The hand-drawn charts (WeekChart / SpeedChart /
+ * SpeedCompareChart) paint their
  * axis labels with a raw android.graphics.Paint, whose textSize
  * is in PIXELS — so the Compose side has to do the unit math
  * itself. The old code used `10.dp.toPx()`: dp follows the

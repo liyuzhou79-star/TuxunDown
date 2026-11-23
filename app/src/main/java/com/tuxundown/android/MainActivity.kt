@@ -5225,7 +5225,11 @@ fun SpeedCompareChart(
         )
         val paint = android.graphics.Paint().apply {
             color = labelColor
-            textSize = 10.dp.toPx()
+            // v6.6: sp caliber via ChartText, same as
+            // WeekChart / SpeedChart (v6.5 audit round 50,
+            // A-F2), so the labels follow the system
+            // font-size setting (10.dp ignored fontScale).
+            textSize = ChartText.labelPx(density, fontScale)
             isAntiAlias = true
         }
         drawContext.canvas.nativeCanvas.drawText(topLabel, 4.dp.toPx(), 11.dp.toPx(), paint)

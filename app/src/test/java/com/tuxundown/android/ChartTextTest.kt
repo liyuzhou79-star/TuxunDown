@@ -39,6 +39,23 @@ class ChartTextTest {
     }
 
     @Test
+    fun standardLabelFollowsDensityAndFontScaleTogether() {
+        // All three charts (WeekChart / SpeedChart /
+        // SpeedCompareChart) call the two-arg overload, so
+        // this is the single caliber they share: LABEL_SP x
+        // density x fontScale, for every combination.
+        for (density in listOf(1.0f, 2.0f, 2.625f, 3.5f)) {
+            for (fontScale in listOf(0.85f, 1.0f, 1.15f, 1.3f)) {
+                assertEquals(
+                    ChartText.LABEL_SP * density * fontScale,
+                    ChartText.labelPx(density, fontScale),
+                    0.001f,
+                )
+            }
+        }
+    }
+
+    @Test
     fun standardLabelIsTenSp() {
         assertEquals(10f, ChartText.LABEL_SP, 0.0f)
         assertEquals(
