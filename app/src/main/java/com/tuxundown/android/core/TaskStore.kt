@@ -305,6 +305,14 @@ class TaskRecord(
      *  stale claim. */
     @Transient @Volatile var duplicateBytes: Long = 0,
     @Transient @Volatile var tailRaceCount: Int = 0,
+    /** v7.8 (Step C): summed over races that reached a winner in
+     *  this process — at the moment each winner finished, how
+     *  many bytes its loser still had left (snapshotted in
+     *  DownloadEngine.cancelRaceLoser via
+     *  TailRace.loserRemainingAtWin). A recorded fact, never
+     *  converted into a time saving. Transient like the two
+     *  counters above; races still open contribute nothing. */
+    @Transient @Volatile var tailRaceLoserRemainingBytes: Long = 0,
     @Transient val speedHistory: MutableList<Long> = mutableListOf(),
     /** v3.5: live per-connection snapshot, republished by
      *  the engine's sampler every second while this task

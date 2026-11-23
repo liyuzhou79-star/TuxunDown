@@ -97,6 +97,30 @@ object ServerProfile {
     }
 
     /**
+     * v7.8 (Step C): the tail-race record for THIS process's
+     * runs, in facts only — how many spans were raced
+     * ([TaskRecord.tailRaceCount], counted in
+     * DownloadEngine.startRace), the duplicate traffic they
+     * cost ([TaskRecord.duplicateBytes], booked by the ledger,
+     * never hidden), and — only over races that reached a
+     * winner — how many bytes the loser still had left when
+     * the winner finished ([TaskRecord.tailRaceLoserRemainingBytes],
+     * snapshotted in cancelRaceLoser). That last figure is a
+     * recorded byte count, deliberately NOT converted into a
+     * time saving: how long those bytes would have taken is an
+     * estimate, not a fact. Null when no race ever triggered
+     * (the switch is default-off, so most tasks never see this
+     * row — the profile's absence rule applies unchanged).
+     */
+    fun tailRaceText(task: TaskRecord): String? {
+        if (task.tailRaceCount <= 0) return null
+        val base = "触发 ${task.tailRaceCount} 次，重复下载 ${Format.size(task.duplicateBytes)}"
+        if (task.tailRaceLoserRemainingBytes <= 0) return base
+        return base + "；已分出胜负的竞速里，赢家下完时输家还剩 " +
+            "${Format.size(task.tailRaceLoserRemainingBytes)} 没下"
+    }
+
+    /**
      * The full ordered row list for the card. [hostCap] is
      * HostMemory.capOf for the host of task.url (0 = no ceiling
      * remembered / no entry / expired — the row is absent).
@@ -123,6 +147,7 @@ object ServerProfile {
         for ((host, bytes, pct) in sourceShares(task)) {
             out.add(Row("来源贡献 · $host：", "${Format.size(bytes)}（$pct%）"))
         }
+        tailRaceText(task)?.let { out.add(Row("尾巴双下：", it)) }
         return out
     }
 }

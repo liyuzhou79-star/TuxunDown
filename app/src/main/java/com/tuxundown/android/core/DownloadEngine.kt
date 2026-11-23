@@ -1947,6 +1947,21 @@ class DownloadEngine(
         val loser = synchronized(activeLock) {
             active.firstOrNull { it !== winner && it.race === ledger }
         } ?: return
+        // v7.8 (Step C): record the provable race outcome BEFORE
+        // cancelling — how many bytes the loser still had left
+        // at the moment the winner finished. The loser's pos is
+        // snapshotted under its own lock (the same lock its
+        // write + counting block holds), so the figure is a
+        // whole write, never a torn mid-write position. It is a
+        // byte count only; nothing converts it into seconds.
+        val remaining = synchronized(loser) {
+            TailRace.loserRemainingAtWin(ledger.end, loser.pos)
+        }
+        if (remaining > 0) {
+            synchronized(activeLock) {
+                task.tailRaceLoserRemainingBytes += remaining
+            }
+        }
         loser.raceCancelled = true
         loser.connection?.let { dropConnection(it) }
     }

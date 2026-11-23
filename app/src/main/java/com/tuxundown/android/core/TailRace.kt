@@ -100,6 +100,20 @@ object TailRace {
             remaining >= MIN_RACE_BYTES && remaining <= minSplit &&
             remaining <= budgetLeft
 
+    /**
+     * v7.8 (Step C): the provable "what the race bought" figure —
+     * when the winner reaches [end], how many bytes the loser
+     * still had left at that moment ([loserPos] is the loser's
+     * position snapshotted by the engine inside cancelRaceLoser,
+     * under the loser's own lock). This is a recorded fact, NOT
+     * a time estimate: it is never converted into seconds.
+     * Clamped to [0, span]: a loser position outside the span
+     * (already at the end, or a stale snapshot) contributes 0
+     * rather than a negative or inflated claim.
+     */
+    fun loserRemainingAtWin(end: Long, loserPos: Long): Long =
+        (end - loserPos).coerceAtLeast(0)
+
     /** Result of one racer advance: how many of the [fetched]
      *  bytes were new (credited) and how many were duplicate. */
     data class Advance(val credited: Long, val duplicate: Long, val becameWinner: Boolean)

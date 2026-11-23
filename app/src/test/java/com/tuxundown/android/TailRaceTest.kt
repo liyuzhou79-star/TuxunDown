@@ -147,6 +147,23 @@ class TailRaceTest {
     }
 
     @Test
+    fun loserRemainingAtWinIsEndMinusLoserPosClamped() {
+        // v7.8 Step C caliber: the figure is the loser's
+        // unfinished bytes at the winner's finish — end minus
+        // the snapshotted loser position, never negative (a
+        // loser already at the end contributes 0, not a claim).
+        assertEquals(30_000L, TailRace.loserRemainingAtWin(100_000, 70_000))
+        assertEquals(100_000L, TailRace.loserRemainingAtWin(100_000, 0))
+        assertEquals(0L, TailRace.loserRemainingAtWin(100_000, 100_000))
+        assertEquals(0L, TailRace.loserRemainingAtWin(100_000, 120_000))
+        // Summed over two finished races it is plain addition —
+        // the task counter accumulates exactly these values.
+        val total = TailRace.loserRemainingAtWin(100_000, 70_000) +
+            TailRace.loserRemainingAtWin(50_000, 50_000)
+        assertEquals(30_000L, total)
+    }
+
+    @Test
     fun shouldRaceTriggerTable() {
         val minSplit = 128L * 1024
         fun call(

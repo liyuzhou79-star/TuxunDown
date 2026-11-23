@@ -9834,6 +9834,8 @@ fun TaskCard(
                         task.totalSize, task.etag, task.lastModified,
                         task.singleThreadOnly, task.startedAt, task.isHls,
                         task.sources.size, sourceBytesFingerprint,
+                        task.tailRaceCount, task.duplicateBytes,
+                        task.tailRaceLoserRemainingBytes,
                         DownloadCenter.hostMemoryVersion,
                     ) {
                         com.tuxundown.android.core.ServerProfile.rows(

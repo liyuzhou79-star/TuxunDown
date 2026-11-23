@@ -224,6 +224,52 @@ class ServerProfileTest {
         assertEquals(100, shares[0].third)
     }
 
+    // ---------- tail-race record (v7.8 Step C) ----------
+
+    @Test
+    fun tailRaceRowAbsentWhenNoRaceTriggered() {
+        // Default-off switch: a task that never raced shows no
+        // row at all (the profile's absence rule), even if the
+        // other counters somehow hold values.
+        val t = TaskRecord(url = "https://a.example.com/f.bin", totalSize = 1000)
+        t.duplicateBytes = 4096
+        t.tailRaceLoserRemainingBytes = 2048
+        assertNull(ServerProfile.tailRaceText(t))
+        assertFalse(labels(ServerProfile.rows(t, 0)).contains("尾巴双下："))
+    }
+
+    @Test
+    fun tailRaceTextReportsCountAndDuplicateBytes() {
+        val t = TaskRecord(url = "https://a.example.com/f.bin", totalSize = 1000)
+        t.tailRaceCount = 2
+        t.duplicateBytes = 3L * 1024
+        // No race reached a winner yet: the loser-remaining
+        // clause stays absent rather than claiming 0 saved.
+        assertEquals(
+            "触发 2 次，重复下载 ${Format.size(3L * 1024)}",
+            ServerProfile.tailRaceText(t),
+        )
+        val rows = ServerProfile.rows(t, 0)
+        assertEquals(ServerProfile.tailRaceText(t), valueOf(rows, "尾巴双下："))
+        // The race row is the LAST row (appended after shares).
+        assertEquals("尾巴双下：", labels(rows).last())
+    }
+
+    @Test
+    fun tailRaceTextAddsLoserRemainingOnlyWhenRecorded() {
+        val t = TaskRecord(url = "https://a.example.com/f.bin", totalSize = 1000)
+        t.tailRaceCount = 1
+        t.duplicateBytes = 0 // winner led the whole way: cost can be 0, still shown
+        t.tailRaceLoserRemainingBytes = 96L * 1024
+        val text = ServerProfile.tailRaceText(t)!!
+        assertTrue(text.contains("触发 1 次"))
+        assertTrue(text.contains("重复下载 ${Format.size(0)}"))
+        assertTrue(text.contains("赢家下完时输家还剩 ${Format.size(96L * 1024)} 没下"))
+        // Facts only: no seconds / time-saving claim anywhere.
+        assertFalse(text.contains("秒"))
+        assertFalse(text.contains("省"))
+    }
+
     // ---------- row order is stable ----------
 
     @Test
