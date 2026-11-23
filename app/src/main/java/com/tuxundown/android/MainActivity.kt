@@ -797,7 +797,7 @@ fun DownApp() {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "6.6.0"
+        }.getOrNull() ?: "6.7.0"
     }
     var showGuide by remember {
         // v2.2 safe mode: after 2+ consecutive crashes, first-
@@ -8260,9 +8260,10 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 下载中途切网或断网，不再干等了：以前默认网络一断，单条连接的下载（包括单流和 HLS 视频）最长要等满 30 秒的读取超时才发现网络没了；现在网络一断，正在传的连接立刻失败、马上走原来的重试，换到新网络接着下\n" +
-            "· 切换网络之后落成的「断网停泊」，以前要等系统事件来才解除，偶尔会卡住、等人手动点继续；现在多了一道轮询兜底，最迟约 5 秒就会自动解除、接着下载，不会再卡住\n" +
-            "· 连接数对比图上的标签小字，现在也跟随系统的字体大小设置一起变大变小了，和速度曲线图、统计图三张图的口径统一",
+            "· 文件页新增「一键对账」：点一下就把下载记录和实际文件对一遍——记录还在、文件却没了的，和文件还在、记录却没了的，分成两组列出来；每一条都由你自己决定怎么处理，绝不会自动删任何东西\n" +
+            "· 没有记录的文件可以直接「认领」成一条已完成记录，以后在文件页里就能正常打开、分享；被改过名的文件，对账时会提示你一键把记录里的名字更新成现在的名字\n" +
+            "· 文件已经不在的记录，现在会明确标上「文件已不在」：任务卡、文件页和搜索结果里都一样，打开、安装、分享按钮会提前置灰并写明原因，不再点了才报错；文件页顶部的合计也不再把这些文件的大小算进去，会单独列一行说明\n" +
+            "· 打开或分享失败时的提示也改了：会分清到底是文件已经不在，还是手机上没有能打开这个文件的应用，不再把两种情况混成一句",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
             "· 文件直链 → 直接开始多线程下载，还能预先改好保存文件名\n" +
@@ -8698,7 +8699,7 @@ fun TaskCard(
         val version = runCatching {
             ctx.packageManager.getPackageInfo(ctx.packageName, 0)
                 .versionName
-        }.getOrNull() ?: "6.6.0"
+        }.getOrNull() ?: "6.7.0"
         val cm = ctx.getSystemService(
             android.content.Context.CLIPBOARD_SERVICE,
         ) as android.content.ClipboardManager
