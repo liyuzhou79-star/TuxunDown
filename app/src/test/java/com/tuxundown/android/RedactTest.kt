@@ -66,7 +66,10 @@ class RedactTest {
         )
         assertFalse(out.contains("FAKESESSION"))
         assertFalse(out.contains("fakedark"))
-        assertTrue(out.contains("Cookie:"))
+        // The name stays (the shared secret-pair pass rewrites
+        // the marker's colon, so pin the name, not the colon).
+        assertTrue(out.contains("Cookie"))
+        assertTrue(out.contains("已隐藏"))
         assertTrue(out.contains("下一行正常"))
     }
 
