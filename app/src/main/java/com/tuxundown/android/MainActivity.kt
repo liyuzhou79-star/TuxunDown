@@ -131,6 +131,7 @@ import com.tuxundown.android.core.GhostMark
 import com.tuxundown.android.core.GhostSnapshot
 import com.tuxundown.android.core.HealthCheck
 import com.tuxundown.android.core.SecurityStatus
+import com.tuxundown.android.core.StorageHealth
 import com.tuxundown.android.core.HelpTopics
 import com.tuxundown.android.core.ThermalStatus
 import com.tuxundown.android.core.HostMemory
@@ -6700,6 +6701,84 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
             if (securityLines.isNotEmpty()) {
                 SettingsGroup("安全现状") {
                     for ((label, value) in securityLines) {
+                        InfoRow(label, value)
+                    }
+                }
+            }
+        }
+        // ---- v7.3 (audit round 58, Step C): 存储健康 — a
+        // read-only snapshot of the local data stores, all
+        // from runtime reads made once for this page visit:
+        // the task count is the loaded store's own count, the
+        // file size / last-write time are read off tasks.json
+        // itself, the health fragment is Step B's persisted
+        // recovery event （有事件 = 已自愈过， 没有 = 正常）,
+        // and the sub-store rows reuse the existing counters
+        // (host learning, day series, sniff history) plus
+        // Step B's fallback traces. The prefs sub-stores have
+        // no real last-write time, so their rows carry counts
+        // only. A read that fails drops its fragment; if
+        // every read fails the whole group is absent (see
+        // StorageHealth for the pinned caliber). ----
+        item(key = "d-storage") {
+            val storageLines = remember {
+                val taskFile = File(context.filesDir, "tasks.json")
+                val taskFileBytes = runCatching {
+                    if (taskFile.exists()) taskFile.length() else null
+                }.getOrNull()
+                val taskFileModifiedMs = runCatching {
+                    if (taskFile.exists()) taskFile.lastModified() else null
+                }.getOrNull()
+                var taskHealth: StorageHealth.TaskHealth? = null
+                var taskRecoveryText: String? = null
+                runCatching { DownloadCenter.tasksRecoveryEvent() }
+                    .onSuccess { event ->
+                        if (event == null) {
+                            taskHealth = StorageHealth.TaskHealth.NORMAL
+                        } else {
+                            taskHealth = StorageHealth.TaskHealth.RECOVERED
+                            taskRecoveryText = runCatching {
+                                DownloadCenter.tasksRecoveryEventText(event)
+                            }.getOrNull()
+                        }
+                    }
+                StorageHealth.lines(
+                    StorageHealth.Snapshot(
+                        taskCount = runCatching {
+                            DownloadCenter.store.tasks.size
+                        }.getOrNull(),
+                        taskFileBytes = taskFileBytes,
+                        taskFileModifiedMs = taskFileModifiedMs,
+                        taskHealth = taskHealth,
+                        taskRecoveryText = taskRecoveryText,
+                        hostMemoryCount = runCatching {
+                            DownloadCenter.hostMemoryCount()
+                        }.getOrNull(),
+                        statsDaysWithData = runCatching {
+                            DownloadCenter.statsLastDays(7)
+                                .count { it.bytes > 0 }
+                        }.getOrNull(),
+                        statsDoneCount = runCatching {
+                            DownloadCenter.statsDoneCount()
+                        }.getOrNull(),
+                        statsTotalBytes = runCatching {
+                            DownloadCenter.statsTotalBytes()
+                        }.getOrNull(),
+                        sniffHistoryCount = runCatching {
+                            DownloadCenter.sniffHistory.size
+                        }.getOrNull(),
+                        prefFallbackKeys = runCatching {
+                            DownloadCenter.prefFallbackKeys()
+                        }.getOrNull(),
+                        subStoreDroppedLines = runCatching {
+                            DownloadCenter.subStoreDroppedLines()
+                        }.getOrNull(),
+                    )
+                )
+            }
+            if (storageLines.isNotEmpty()) {
+                SettingsGroup("存储健康") {
+                    for ((label, value) in storageLines) {
                         InfoRow(label, value)
                     }
                 }
