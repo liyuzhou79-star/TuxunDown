@@ -85,16 +85,17 @@ class HostMemoryTest {
         assertEquals(24, HostMemory.capOf(entries, "a.com", now))
         entries = HostMemory.recordSuccess(entries, "a.com", 24, now)
         assertEquals(28, HostMemory.capOf(entries, "a.com", now))
-        // v4.2: the engine max is 64 now, so the steps keep going
-        // +4 at a time instead of retiring at 28...
+        // v4.2: the engine max rose, so the steps keep going
+        // +4 at a time instead of retiring at 28; v7.7: the max
+        // is 128 now, so they keep going past 64 the same way...
         var cap = 28
-        while (cap < 60) {
+        while (cap < 124) {
             entries = HostMemory.recordSuccess(entries, "a.com", cap, now)
             cap += HostMemory.CAP_RELAX_STEP
             assertEquals(cap, HostMemory.capOf(entries, "a.com", now))
         }
         // ...until a step would reach the engine max: the cap retires.
-        entries = HostMemory.recordSuccess(entries, "a.com", 60, now)
+        entries = HostMemory.recordSuccess(entries, "a.com", 124, now)
         assertEquals(0, HostMemory.capOf(entries, "a.com", now))
     }
 
@@ -109,27 +110,43 @@ class HostMemoryTest {
     }
 
     @Test
-    fun relaxNearTheTopRetiresOnlyAt64() {
-        // A rejection at 112 teaches cap 56; one settled completion
-        // at the cap relaxes it +4 to 60 — NOT retired yet, because
-        // 56 + 4 = 60 < 64.
-        var entries = HostMemory.recordRateLimit(emptyList(), "a.com", 112, now)
-        assertEquals(56, HostMemory.capOf(entries, "a.com", now))
-        entries = HostMemory.recordSuccess(entries, "a.com", 56, now)
-        assertEquals(60, HostMemory.capOf(entries, "a.com", now))
-        // Settling at 60: 60 + 4 >= 64, so the ceiling retires.
-        entries = HostMemory.recordSuccess(entries, "a.com", 60, now)
+    fun relaxNearTheTopRetiresOnlyAt128() {
+        // A rejection at 240 teaches cap 120; one settled completion
+        // at the cap relaxes it +4 to 124 — NOT retired yet, because
+        // 120 + 4 = 124 < 128.
+        var entries = HostMemory.recordRateLimit(emptyList(), "a.com", 240, now)
+        assertEquals(120, HostMemory.capOf(entries, "a.com", now))
+        entries = HostMemory.recordSuccess(entries, "a.com", 120, now)
+        assertEquals(124, HostMemory.capOf(entries, "a.com", now))
+        // Settling at 124: 124 + 4 >= 128, so the ceiling retires.
+        entries = HostMemory.recordSuccess(entries, "a.com", 124, now)
         assertEquals(0, HostMemory.capOf(entries, "a.com", now))
     }
 
     @Test
-    fun successThreadsClampAt64() {
-        val entries = HostMemory.recordSuccess(emptyList(), "a.com", 100, now)
-        assertEquals(64, HostMemory.lookup(entries, "a.com", now))
+    fun successThreadsClampAt128() {
+        val entries = HostMemory.recordSuccess(emptyList(), "a.com", 200, now)
+        assertEquals(128, HostMemory.lookup(entries, "a.com", now))
         assertEquals(DownloadEngine.MAX_THREADS, HostMemory.lookup(entries, "a.com", now))
-        // And a settled 64 is remembered verbatim.
-        val at64 = HostMemory.recordSuccess(emptyList(), "b.com", 64, now)
-        assertEquals(64, HostMemory.lookup(at64, "b.com", now))
+        // A settled count inside the widened band is remembered
+        // verbatim — including 100, which the old 64 top would
+        // have clamped, and the old top 64 itself.
+        val at100 = HostMemory.recordSuccess(emptyList(), "b.com", 100, now)
+        assertEquals(100, HostMemory.lookup(at100, "b.com", now))
+        val at128 = HostMemory.recordSuccess(emptyList(), "c.com", 128, now)
+        assertEquals(128, HostMemory.lookup(at128, "c.com", now))
+    }
+
+    @Test
+    fun rateLimitAt128RecordsCap64() {
+        // v7.7: rejected while running the full 128: the ceiling
+        // is half of it, inside the widened legal band.
+        val entries = HostMemory.recordRateLimit(emptyList(), "a.com", 128, now)
+        assertEquals(64, HostMemory.capOf(entries, "a.com", now))
+        // A manual pick of 128 (the new comparison tier) is
+        // stored verbatim too.
+        val manual = HostMemory.recordManual(emptyList(), "a.com", 128, now)
+        assertEquals(128, HostMemory.lookup(manual, "a.com", now))
     }
 
     @Test

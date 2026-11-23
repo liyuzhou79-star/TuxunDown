@@ -78,6 +78,23 @@ package com.tuxundown.android.core
  *     192 MB floor; the formal 197 MB fat-1500 mix is
  *     unreachable because the max segmented mix and the max
  *     HLS mix are mutually exclusive), HIGH ~275 MB.
+ *
+ * v7.7 (Step B2): the per-task top rose 64 -> 128
+ * (DownloadEngine.MAX_THREADS), aligned with the global
+ * budget cap of 128. Recomputed ledger: the GLOBAL budget
+ * still caps the whole process at 128 connections, so the
+ * cross-task totals above are UNCHANGED — steady threads
+ * stay 138 (the 128 workers can now belong to fewer tasks,
+ * that is all), FD and memory accounts do not move, and the
+ * per-task buffer totals still land exactly on their tier
+ * budget (bufferSizeFor's floor dropped to 16 KB so LOW's
+ * 2 MB / 128 = 16 KB share is not rounded up — see its doc).
+ * The one NEW scenario gets its own line: a single task
+ * monopolising the whole budget — 1 task x 128 workers
+ * + 1 sampler + 1 engine thread, its read buffers still
+ * capped by its tier budget (2 / 4 / 6 MB), connections
+ * 128 of the global 128. HLS width (<= 16) and FTP (<= 8)
+ * do not read MAX_THREADS and are unaffected.
  */
 enum class MemoryTier { LOW, STANDARD, HIGH }
 

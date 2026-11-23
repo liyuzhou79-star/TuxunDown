@@ -7,7 +7,7 @@ package com.tuxundown.android.core
  * The question this answers is different from the speed-test
  * page's: that page measures this phone against a speed-test
  * SERVER; this one takes ONE user-supplied file link and measures
- * it with 4 / 16 / 32 / 64 parallel connections in turn, to see
+ * it with 4 / 16 / 32 / 64 / 128 parallel connections in turn, to see
  * how many connections THAT link, on the CURRENT network, can
  * actually use — the more speed grows with connection count, the
  * more that server is limiting per connection.
@@ -17,7 +17,7 @@ package com.tuxundown.android.core
  * steady-state口径 (warmup discarded, Δbytes/Δt over the steady
  * window) — the numbers are comparable with the speed-test page's.
  *
- * Traffic honesty: the four tiers share ONE hard byte budget,
+ * Traffic honesty: the tiers share ONE hard byte budget,
  * [TOTAL_CAP_BYTES]. Each tier is started with only the budget
  * that is left ([tierBudget]) as its runPhase total cap, so the
  * whole run can never move more than the cap no matter how fast
@@ -29,12 +29,12 @@ package com.tuxundown.android.core
 object ConnCompare {
 
     /** Connection counts measured, in run order (ascending). */
-    val TIERS: List<Int> = listOf(4, 16, 32, 64)
+    val TIERS: List<Int> = listOf(4, 16, 32, 64, 128)
 
     /** Longest time one tier may run. */
     const val PHASE_MS: Long = 4_000L
 
-    /** Hard traffic ceiling shared by ALL four tiers together. */
+    /** Hard traffic ceiling shared by ALL tiers together. */
     const val TOTAL_CAP_BYTES: Long = 200L * 1024 * 1024
 
     /** One tier's outcome: steady-state [bps] over [windowMs],
@@ -104,7 +104,7 @@ object ConnCompare {
         val seconds = PHASE_MS / 1000
         val capMB = TOTAL_CAP_BYTES / 1024 / 1024
         return "会依次用 $tiers 条连接各测一小段，每档最多约 $seconds 秒；" +
-            "四档共用最多约 $capMB MB 流量，下满就停（实际通常远少于这个数）。" +
+            "各档共用最多约 $capMB MB 流量，下满就停（实际通常远少于这个数）。" +
             "建议在没有任务正在下载时测——正在下的任务会抢带宽，结果会偏低。"
     }
 }

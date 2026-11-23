@@ -44,6 +44,11 @@ package com.tuxundown.android.core
  * climb from the 16 baseline to any target up to 64 completes
  * in at most 4 adjudications (~8 s) — the same overall pace as
  * the old doubling ladder, except it starts at 16 instead of 4.
+ * v7.7 (per-task top raised to 128): the same rule reaches 128
+ * in exactly 4 adjudications too — stepFor(128) = 32, so the
+ * grant walks 16 -> 48 -> 80 -> 112 -> 128 (~8 s on the
+ * segmented path). No constant changed: the step is defined
+ * from the target, so it scales with the new top on its own.
  * (Most targets take 3 or fewer; 59, 62 and 63 take 4, because
  * [stepFor] uses integer division and falls one short there —
  * the true counts are pinned by GrowthRampTest.)

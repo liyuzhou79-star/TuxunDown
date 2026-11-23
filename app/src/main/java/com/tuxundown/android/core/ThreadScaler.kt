@@ -6,7 +6,7 @@ package com.tuxundown.android.core
  *
  * The three thread-count mechanisms divide the work like this:
  * - PROBING (this class, opening phase) decides the START: the
- *   classic ladder 4 -> 8 -> 16 -> 32 -> 64, doubling every
+ *   classic ladder 4 -> 8 -> 16 -> 32 -> 64 -> 128, doubling every
  *   evaluation while the speed keeps growing by more than 10%,
  *   stopping at the first plateau. (Since v4.2 the opening count
  *   itself comes from StartPlan — a burst start simply joins

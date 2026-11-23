@@ -44,8 +44,11 @@ class NetRetryTest {
         assertEquals(DownloadEngine.BUFFER_SIZE, DownloadEngine.bufferSizeFor(32))
         // ...and 64 connections get 64 KB each.
         assertEquals(64 * 1024, DownloadEngine.bufferSizeFor(64))
+        // v7.7: 128 connections get 32 KB each (STANDARD share).
+        assertEquals(32 * 1024, DownloadEngine.bufferSizeFor(128))
         // Worst case total stays at the 4 MB budget.
         assertTrue(DownloadEngine.bufferSizeFor(64) * 64 <= 4 * 1024 * 1024)
+        assertTrue(DownloadEngine.bufferSizeFor(128) * 128 <= 4 * 1024 * 1024)
         assertEquals(DownloadEngine.BUFFER_SIZE, DownloadEngine.bufferSizeFor(0))
     }
 
@@ -66,8 +69,8 @@ class NetRetryTest {
         // (small target, many workers still draining) that
         // sizing by the target alone would have blown past
         // (64 workers x 128 KB at target 2 = 8 MB).
-        for (target in 1..64) {
-            for (live in 1..64) {
+        for (target in 1..128) {
+            for (live in 1..128) {
                 val total = live *
                     DownloadEngine.bufferSizeFor(
                         DownloadEngine.bufferThreadsFor(target, live)

@@ -1,6 +1,7 @@
 package com.tuxundown.android
 
 import com.tuxundown.android.core.ConnCompare
+import com.tuxundown.android.core.DownloadEngine
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -67,6 +68,22 @@ class ConnCompareTest {
     @Test
     fun tierBudgetExactlySpentIsZero() {
         assertEquals(0L, ConnCompare.tierBudget(ConnCompare.TOTAL_CAP_BYTES))
+    }
+
+    @Test
+    fun tiersIncludeThe128TopAndConsentNamesIt() {
+        // v7.7: the comparison gains the raised per-task top as
+        // a fifth tier, so the user can measure whether 128
+        // actually helps on their link. The traffic honesty is
+        // unchanged: all tiers still share the ONE hard cap, so
+        // the extra tier can only spend what earlier tiers left.
+        assertEquals(listOf(4, 16, 32, 64, 128), ConnCompare.TIERS)
+        assertEquals(DownloadEngine.MAX_THREADS, ConnCompare.TIERS.last())
+        assertTrue(ConnCompare.consentText().contains("128"))
+        assertEquals(
+            ConnCompare.TOTAL_CAP_BYTES,
+            ConnCompare.tierBudget(0),
+        )
     }
 
     @Test

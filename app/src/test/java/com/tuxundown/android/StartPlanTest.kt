@@ -82,6 +82,28 @@ class StartPlanTest {
         assertEquals(2, StartPlan.decide(0, 0, true, 0).start)
         // A persisted count above the bound is pressed down to it.
         assertEquals(16, StartPlan.decide(0, 16, true, 48).start)
-        assertEquals(64, StartPlan.decide(0, 0, true, 100).start)
+        // v7.7: the bound is MAX_THREADS (128) now, so a persisted
+        // 100 restarts at 100; only past 128 is pressed down.
+        assertEquals(100, StartPlan.decide(0, 0, true, 100).start)
+        assertEquals(128, StartPlan.decide(0, 0, true, 200).start)
+    }
+
+    @Test
+    fun burstStartAndHintBandUnderThe128Top() {
+        // v7.7 adjudication: the fresh-start burst is UNCHANGED —
+        // still 16, well under the new top; the ramp and ladder
+        // do the climbing from there.
+        val fresh = StartPlan.decide(0, 0, false, 0)
+        assertEquals(16, fresh.start)
+        assertEquals(StartPlan.BURST_START, fresh.start)
+        assertTrue(fresh.probing)
+        // A remembered optimum of 128 is inside the legal band
+        // now: a fresh start begins AT it, no probing.
+        val hinted = StartPlan.decide(128, 0, false, 0)
+        assertEquals(128, hinted.start)
+        assertFalse(hinted.probing)
+        // A remembered rate-limit cap in the widened band
+        // (e.g. 100) still bounds that start.
+        assertEquals(100, StartPlan.decide(128, 100, false, 0).start)
     }
 }

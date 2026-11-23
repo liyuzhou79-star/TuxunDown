@@ -6315,7 +6315,7 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
             var spent = 0L
             for (tier in ConnCompare.TIERS) {
                 if (test.cancelled) break
-                // The four tiers share ONE traffic budget: each
+                // The tiers share ONE traffic budget: each
                 // tier only gets what the earlier tiers left.
                 val budget = ConnCompare.tierBudget(spent)
                 ccPost {
@@ -7154,7 +7154,7 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
                     }
                     if (best == null) {
                         Text(
-                            "四档都没测出速度：这个链接多半已经失效，或者服务器不给数据。",
+                            "各档都没测出速度：这个链接多半已经失效，或者服务器不给数据。",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 6.dp),
@@ -7529,7 +7529,7 @@ fun SettingsScreen(
                 )
                 Text(
                     "所有同时下载的任务加起来，最多开多少条连接。默认 32 条，" +
-                        "单个任务自己最多能开 64 条；" +
+                        "单个任务自己最多能开 128 条；" +
                         "多个任务一起下时，总数封顶，任务之间按优先级分摊（高优先分得多），" +
                         "被压住的任务卡片上会写明。调低更省电、也更不容易被服务器限流；" +
                         "调高只在服务器不限速时才可能有区别。",

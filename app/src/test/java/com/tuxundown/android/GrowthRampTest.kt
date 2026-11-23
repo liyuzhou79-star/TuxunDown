@@ -58,6 +58,21 @@ class GrowthRampTest {
     }
 
     @Test
+    fun growthTo128ClimbsThirtyTwoPerAdjudication() {
+        // v7.7: stepFor(128) = max(8, 128 / 4) = 32, so the new
+        // per-task top is reached from the burst grant in exactly
+        // 4 adjudications — the same count the climb to 64 took.
+        assertEquals(32, GrowthRamp.stepFor(128))
+        val ramp = GrowthRamp(128)
+        assertEquals(16, ramp.granted)
+        assertEquals(48, ramp.allow(128))
+        assertEquals(80, ramp.allow(128))
+        assertEquals(112, ramp.allow(128))
+        assertEquals(128, ramp.allow(128))
+        assertEquals(128, ramp.allow(128)) // settled: no overshoot
+    }
+
+    @Test
     fun smallTargetIsReachedInOneStep() {
         // stepFor(20) = max(8, 20 / 4) = 8: 16 + 8 >= 20.
         val ramp = GrowthRamp(20)

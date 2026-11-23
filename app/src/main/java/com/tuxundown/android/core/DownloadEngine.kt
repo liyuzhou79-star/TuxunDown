@@ -21,7 +21,7 @@ import kotlin.math.max
  *   equal pieces and take them over (see [Endgame] for the plan and
  *   for how split parts share the chunk's single bitset bit).
  * - Auto thread probing: starts low, then doubles 4 -> 8 -> 16 -> 32
- *   -> 64 every 2 s while the measured speed keeps growing by more
+ *   -> 64 -> 128 every 2 s while the measured speed keeps growing by more
  *   than 10%;
  *   stops at the first plateau. v2.3 adds mid-download DYNAMIC
  *   SCALING on top (see [ThreadScaler]): the settled count is not
@@ -3603,7 +3603,7 @@ class DownloadEngine(
     }
 
     companion object {
-        const val MAX_THREADS = 64
+        const val MAX_THREADS = 128
         /** v4.8: FTP segmented ceiling — the single source is
          *  [FtpSegmented.MAX_CONNECTIONS] (see its doc for why 8);
          *  this alias exists so DownloadCenter's desire table
@@ -3708,6 +3708,20 @@ class DownloadEngine(
          * 64 x 64 KB = 4 MB; at 32 connections each buffer is back
          * at the 128 KB ceiling.
          *
+         * v7.7 (MAX_THREADS 64 -> 128): at 128 connections each
+         * tier's share is LOW 2 MB / 128 = 16 KB, STANDARD
+         * 4 MB / 128 = 32 KB, HIGH 6 MB / 128 = 48 KB, so every
+         * task total still lands exactly on its tier budget. The
+         * floor therefore dropped 32 KB -> 16 KB: with the old
+         * floor, LOW's 16 KB share would have been rounded UP to
+         * 32 KB and one LOW task would have pinned 128 x 32 KB
+         * = 4 MB — double its 2 MB budget. The lower floor
+         * changes nothing at 64 connections or fewer in any tier
+         * (every tier's share there is already >= 32 KB), and
+         * 16 KB is still 4x the 4 KB drain cap connection reuse
+         * works with, so read efficiency is not the binding
+         * constraint at the top rung — the tier budget is.
+         *
          * Audit round 27 corrected the app-wide half of this
          * account (the earlier "≲ 8 MB" line quietly assumed every
          * connection runs a 64 KB buffer, which only holds when
@@ -3724,8 +3738,9 @@ class DownloadEngine(
          * global connection cap x the 128 KB per-buffer ceiling:
          * the default cap 32 -> <= 4 MB; the maximum cap 128 ->
          * <= 16 MB, reachable only with several low-target tasks
-         * sharing a raised cap; all-target-64 at cap 128 ->
-         * 128 x 64 KB = 8 MB. (Single-stream / HLS buffers are
+         * sharing a raised cap; one task alone at the 128 top ->
+         * 128 x 32 KB = 4 MB (STANDARD), exactly its tier budget.
+         * (Single-stream / HLS buffers are
          * separate, fixed-size allocations, not this account.)
          * Connection reuse itself is the platform's keep-alive pool:
          * every path here fully consumes or explicitly closes its
@@ -3750,7 +3765,7 @@ class DownloadEngine(
         fun bufferSizeFor(threads: Int, perTaskBudgetBytes: Long): Int {
             val t = threads.coerceAtLeast(1)
             val budget = (perTaskBudgetBytes / t).toInt()
-            return budget.coerceIn(32 * 1024, BUFFER_SIZE)
+            return budget.coerceIn(16 * 1024, BUFFER_SIZE)
         }
 
         /**

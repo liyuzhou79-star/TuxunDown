@@ -1,5 +1,6 @@
 package com.tuxundown.android
 
+import com.tuxundown.android.core.DownloadEngine
 import com.tuxundown.android.core.ThreadScaler
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -135,13 +136,26 @@ class ThreadScalerTest {
     }
 
     @Test
+    fun ladderReaches128WithTheDefaultCeiling() {
+        // v7.7: the ladder gains its 128 rung — with the default
+        // max (DownloadEngine.MAX_THREADS, now 128) a speed that
+        // keeps rising walks the whole ladder and settles there.
+        val s = ThreadScaler(4, probing = true)
+        val targets = feed(s, 100, 130, 170, 220, 290, 380, 500)
+        assertEquals(listOf(8, 16, 32, 64, 128, 128, 128), targets)
+        assertFalse(s.probing) // cap reached: ladder done
+        assertEquals(DownloadEngine.MAX_THREADS, s.target)
+    }
+
+    @Test
     fun boundsAreRespected() {
         assertEquals(ThreadScaler.MIN_TARGET, ThreadScaler(1, false).target)
-        // v4.2: the default ceiling is the raised MAX_THREADS (64).
-        assertEquals(64, ThreadScaler(99, false).target)
-        val s = ThreadScaler(64, probing = false)
+        // v7.7: the default ceiling is the raised MAX_THREADS (128).
+        assertEquals(128, ThreadScaler(200, false).target)
+        assertEquals(99, ThreadScaler(99, false).target)
+        val s = ThreadScaler(128, probing = false)
         feed(s, 100, 200, 400, 800) // rising forever: still capped
-        assertEquals(64, s.target)
+        assertEquals(128, s.target)
         val low = ThreadScaler(2, probing = false)
         feed(low, 100, 100, 100, 100, 100, 100) // flat at the floor
         assertEquals(2, low.target)

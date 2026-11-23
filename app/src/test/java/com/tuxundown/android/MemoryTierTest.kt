@@ -111,12 +111,32 @@ class MemoryTierTest {
     }
 
     @Test
+    fun bufferSizesAt128ConnectionsPerTier() {
+        // v7.7: at the raised 128 top each tier's per-connection
+        // buffer is exactly its budget share — LOW 16 KB,
+        // STANDARD 32 KB, HIGH 48 KB — and each task total lands
+        // exactly on the tier budget (the 16 KB floor is what
+        // keeps LOW's share from being rounded up to 32 KB,
+        // which would have doubled its total to 4 MB).
+        val low = MemoryTiers.budgetFor(MemoryTier.LOW)
+        val std = MemoryTiers.budgetFor(MemoryTier.STANDARD)
+        val high = MemoryTiers.budgetFor(MemoryTier.HIGH)
+        assertEquals(16 * 1024, DownloadEngine.bufferSizeFor(128, low.perTaskBufferBytes))
+        assertEquals(32 * 1024, DownloadEngine.bufferSizeFor(128, std.perTaskBufferBytes))
+        assertEquals(48 * 1024, DownloadEngine.bufferSizeFor(128, high.perTaskBufferBytes))
+        // At 64 and below nothing moved in any tier.
+        assertEquals(32 * 1024, DownloadEngine.bufferSizeFor(64, low.perTaskBufferBytes))
+        assertEquals(64 * 1024, DownloadEngine.bufferSizeFor(64, std.perTaskBufferBytes))
+    }
+
+    @Test
     fun tieredBufferTotalsNeverExceedThePerTaskBudget() {
         // The v4.2 invariant, swept per tier: n buffers sized by
         // bufferSizeFor(n, budget) total at most the budget.
+        // v7.7: the sweep now runs to the raised 128 top.
         for (tier in MemoryTier.values()) {
             val budget = MemoryTiers.budgetFor(tier).perTaskBufferBytes
-            for (n in 1..64) {
+            for (n in 1..128) {
                 val total = DownloadEngine.bufferSizeFor(n, budget).toLong() * n
                 assertTrue(
                     "$tier x$n buffers total $total exceeds budget $budget",

@@ -548,13 +548,32 @@ class Migration4xTest {
             "[" + hostileRecord("h-peak1", """"peakConns":2147483647""") +
                 "," + hostileRecord("h-peak2", """"peakConns":-5""") +
                 "," + hostileRecord("h-peak3", """"peakConns":99999""") +
-                "," + hostileRecord("h-peak4", """"peakConns":64""") + "]",
+                "," + hostileRecord("h-peak4", """"peakConns":128""") + "]",
         )
         assertEquals(4, back.size)
         assertEquals(DownloadEngine.MAX_THREADS, back[0].peakConns)
         assertEquals(0, back[1].peakConns)
         assertEquals(DownloadEngine.MAX_THREADS, back[2].peakConns)
         assertEquals(DownloadEngine.MAX_THREADS, back[3].peakConns)
+    }
+
+    @Test
+    fun peakConnsOldStoredValuesParseUnchanged() {
+        // v7.7: the clamp widened 0..64 -> 0..128 with the
+        // per-task top. Values stored under the old caliber
+        // parse EXACTLY as before (a stored 64 stays 64, never
+        // rewritten upward); a stored 100 — impossible under
+        // the old top, clamped to 64 back then — is legal now
+        // and parses verbatim; only past 128 clamps.
+        val back = TaskStore.deserialize(
+            "[" + hostileRecord("h-old1", """"peakConns":64""") +
+                "," + hostileRecord("h-old2", """"peakConns":100""") +
+                "," + hostileRecord("h-old3", """"peakConns":129""") + "]",
+        )
+        assertEquals(3, back.size)
+        assertEquals(64, back[0].peakConns)
+        assertEquals(100, back[1].peakConns)
+        assertEquals(128, back[2].peakConns)
     }
 
     @Test
