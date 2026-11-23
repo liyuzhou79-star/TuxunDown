@@ -703,6 +703,33 @@ object PublicStorage {
         }
     }
 
+    /**
+     * v7.7.0 Step C2: delete a DONE task's saved file through
+     * its savedUri, honestly. Probe (the reconcile three-state
+     * probe, verbatim) -> delete ([deleteByUri]: DocumentFile
+     * for SAF documents, ContentResolver.delete for
+     * MediaStore entries — the existing per-provider paths) ->
+     * probe again, and [DeleteFile.outcome] maps the three
+     * facts to DELETED / ALREADY_GONE / FAILED. The task
+     * record is NOT touched here. Background thread only.
+     */
+    fun deleteSavedFile(context: Context, task: TaskRecord): DeleteFile.Outcome {
+        val snap = Reconcile.RecordSnap(
+            id = task.id,
+            savedUri = task.savedUri,
+            savedName = task.savedName.ifBlank { task.fileName },
+            size = if (task.totalSize > 0) task.totalSize else task.downloaded,
+        )
+        fun probe(): Reconcile.Verdict? =
+            probeRecords(context, listOf(snap), emptyList())[task.savedUri]?.verdict
+        val before = probe()
+        if (before == Reconcile.Verdict.MISSING) {
+            return DeleteFile.Outcome.ALREADY_GONE
+        }
+        val deleted = deleteByUri(context, task.savedUri)
+        return DeleteFile.outcome(before, deleted, probe())
+    }
+
     /** Delete one file by its Uri string; false when refused. */
     fun deleteByUri(context: Context, uriString: String): Boolean {
         val uri = runCatching { Uri.parse(uriString) }.getOrNull() ?: return false

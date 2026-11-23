@@ -269,6 +269,11 @@ object ChecksumVerifier {
         cancelRequests.add(taskId)
     }
 
+    /** v7.7.0 Step C2: is a verification of this task running
+     *  right now (the inFlight set — the same occupancy the
+     *  verify guard itself uses). */
+    fun isVerifying(taskId: String): Boolean = taskId in inFlight
+
     /**
      * The finished file's total bytes — the progress
      * denominator. Asked from the provider first (that IS the

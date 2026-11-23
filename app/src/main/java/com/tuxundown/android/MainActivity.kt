@@ -29,6 +29,8 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -121,6 +123,7 @@ import com.tuxundown.android.core.Errors
 import com.tuxundown.android.core.FailureAdvice
 import com.tuxundown.android.core.ChecksumVerifier
 import com.tuxundown.android.core.DaySeries
+import com.tuxundown.android.core.DeleteFile
 import com.tuxundown.android.core.Diagnostics
 import com.tuxundown.android.core.DownloadCenter
 import com.tuxundown.android.core.DownloadedFiles
@@ -8538,6 +8541,39 @@ fun SettingsGroup(title: String, content: @androidx.compose.runtime.Composable (
     }
 }
 
+/**
+ * v7.7.0 Step C2: one compact action button for a task card's
+ * detail area. The detail buttons used to be full-size
+ * OutlinedButtons, each alone on its own line, stretching the
+ * card; these are one size smaller (tight padding, no forced
+ * full width) and live in a FlowRow so they sit side by side
+ * where they fit. [red] marks a destructive action with the
+ * card's existing danger red (WinPalette.Red — the same red
+ * as the ghost mark, FAILED text and the swipe-delete side).
+ */
+@androidx.compose.runtime.Composable
+fun CompactActionButton(
+    text: String,
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+    filled: Boolean = false,
+    red: Boolean = false,
+) {
+    val padding = PaddingValues(horizontal = 12.dp, vertical = 5.dp)
+    val label: @androidx.compose.runtime.Composable () -> Unit = {
+        Text(
+            text,
+            style = MaterialTheme.typography.labelLarge,
+            color = if (red) WinPalette.Red else Color.Unspecified,
+        )
+    }
+    if (filled) {
+        Button(onClick = onClick, enabled = enabled, contentPadding = padding) { label() }
+    } else {
+        OutlinedButton(onClick = onClick, enabled = enabled, contentPadding = padding) { label() }
+    }
+}
+
 @androidx.compose.runtime.Composable
 fun ChipRow(options: List<Pair<Int, String>>, selected: Int, onPick: (Int) -> Unit) {
     // v2.0 font-scale fix: at the system maximum font scale the
@@ -9049,7 +9085,7 @@ fun InfoRow(label: String, value: String) {
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
 @androidx.compose.runtime.Composable
 fun TaskCard(
     task: TaskRecord,
@@ -9105,6 +9141,8 @@ fun TaskCard(
     val context = LocalContext.current
     // v6.2 step B: long-press quick menu open state.
     var quickMenuOpen by remember(task.id) { mutableStateOf(false) }
+    // v7.7.0 Step C2: 「删除文件」 confirmation open state.
+    var deleteFileConfirm by remember(task.id) { mutableStateOf(false) }
     // v6.2 step B: the two clipboard actions live ONCE here —
     // the expanded-section diagnostics button below and the
     // quick menu both call these, never a second copy of the
@@ -9523,9 +9561,9 @@ fun TaskCard(
                             "${Format.size(task.downloaded)} / ${Format.size(task.totalSize)}",
                         )
                         // v1.3: one-tap retry that KEEPS the progress
-                        // already downloaded (chunk bitmap survives).
-                        Spacer(Modifier.height(6.dp))
-                        OutlinedButton(onClick = onResume) { Text("重试（保留已下载进度）") }
+                        // already downloaded (chunk bitmap survives) —
+                        // the button itself moved into the compact
+                        // action flow below in v7.7.0 Step C2.
                         // v2.7: diagnosis advice for this failure
                         // category (pure FailureAdvice) — one
                         // concrete next step, and a button only
@@ -9541,18 +9579,21 @@ fun TaskCard(
                             )
                             if (advice.action != FailureAdvice.Action.NONE) {
                                 Spacer(Modifier.height(4.dp))
-                                OutlinedButton(onClick = {
-                                    when (advice.action) {
-                                        FailureAdvice.Action.RETRY -> onResume()
-                                        FailureAdvice.Action.OPEN_BROWSER ->
-                                            onOpenInBrowser()
-                                        FailureAdvice.Action.MANAGE_SOURCES ->
-                                            onSources()
-                                        FailureAdvice.Action.OPEN_FILES ->
-                                            onOpenFiles()
-                                        FailureAdvice.Action.NONE -> Unit
-                                    }
-                                }) { Text(advice.actionLabel) }
+                                CompactActionButton(
+                                    text = advice.actionLabel,
+                                    onClick = {
+                                        when (advice.action) {
+                                            FailureAdvice.Action.RETRY -> onResume()
+                                            FailureAdvice.Action.OPEN_BROWSER ->
+                                                onOpenInBrowser()
+                                            FailureAdvice.Action.MANAGE_SOURCES ->
+                                                onSources()
+                                            FailureAdvice.Action.OPEN_FILES ->
+                                                onOpenFiles()
+                                            FailureAdvice.Action.NONE -> Unit
+                                        }
+                                    },
+                                )
                             }
                         }
                     }
@@ -9567,8 +9608,8 @@ fun TaskCard(
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        Spacer(Modifier.height(6.dp))
-                        OutlinedButton(onClick = onJumpQueue) { Text("插队到最前") }
+                        // The 插队到最前 button moved into the
+                        // compact action flow below (v7.7.0 C2).
                     }
                 }
                 // v3.7: optional card rows （创建时间 / 来源站点，
@@ -9850,12 +9891,10 @@ fun TaskCard(
                         onPick = onPriority,
                     )
                 }
-                if (task.status != TaskStatus.DONE) {
-                    Spacer(Modifier.height(6.dp))
-                    OutlinedButton(onClick = onSources) {
-                        Text(if (task.sources.isEmpty()) "加镜像源（多源并下）" else "管理镜像源")
-                    }
-                }
+                // The sources / checksum / verify / headers /
+                // note / diagnostics buttons that used to stack
+                // here one per line now live in the compact
+                // action flow further below (v7.7.0 Step C2).
                 // v1.7: integrity check — the expected hash the
                 // finished file is verified against at completion.
                 val expectedHash = Checksum.expectedOf(task)
@@ -9879,41 +9918,12 @@ fun TaskCard(
                         "${expectedHash.first} · $csText",
                     )
                 }
-                if (task.status != TaskStatus.RUNNING) {
-                    Spacer(Modifier.height(6.dp))
-                    OutlinedButton(onClick = onChecksum) {
-                        Text(if (expectedHash == null) "设置校验哈希" else "改校验哈希")
-                    }
-                }
-                // v2.9: manual verify + cancel. VERIFYING can be
-                // entered by the service (auto-verify at finalize)
-                // or by this button (hash set late, or the auto
-                // switch off) — the cancel flag is process-wide,
-                // so 取消校验 stops either one.
-                if (task.status == TaskStatus.DONE && expectedHash != null) {
-                    Spacer(Modifier.height(6.dp))
-                    if (task.checksumState == Checksum.STATE_VERIFYING) {
-                        OutlinedButton(onClick = onCancelVerify) {
-                            Text("取消校验")
-                        }
-                    } else {
-                        OutlinedButton(onClick = onVerifyHash) {
-                            Text("立即校验")
-                        }
-                    }
-                }
-                // v1.9: per-task request headers — view/edit the
-                // Cookie / Referer / UA this task sends. Edits hit
-                // the live map the engine reads per connection.
-                if (task.status != TaskStatus.DONE) {
-                    Spacer(Modifier.height(6.dp))
-                    OutlinedButton(onClick = onHeaders) {
-                        Text(
-                            if (task.headers.isEmpty()) "加请求头（Cookie 等）"
-                            else "查看 / 改请求头（${task.headers.size} 个）"
-                        )
-                    }
-                }
+                // v2.9 note: manual verify + cancel (in the
+                // action flow below) — VERIFYING can be entered
+                // by the service (auto-verify at finalize) or by
+                // that button; the cancel flag is process-wide,
+                // so 取消校验 stops either one. The v1.9 headers
+                // button is in the same flow.
                 if (task.retryCount > 0 && DownloadCenter.cardFieldShown(CardFields.RETRY_COUNT)) {
                     InfoRow("重试次数：", "${task.retryCount} 次（分片级）")
                 }
@@ -9925,17 +9935,9 @@ fun TaskCard(
                 if (task.userNote.isNotBlank()) {
                     InfoRow("备注：", task.userNote)
                 }
-                Spacer(Modifier.height(6.dp))
-                OutlinedButton(onClick = onUserNote) {
-                    Text(if (task.userNote.isBlank()) "加备注" else "改备注")
-                }
-                // v3.8: copy a redacted per-task diagnostic for
-                // bug reports (see TaskDiagnostics — link query
-                // and header VALUES never leave the phone).
-                Spacer(Modifier.height(6.dp))
-                OutlinedButton(onClick = { copyTaskDiagnostics() }) {
-                    Text("复制诊断信息")
-                }
+                // The 加备注 and 复制诊断信息 (v3.8, redacted —
+                // see TaskDiagnostics) buttons are in the compact
+                // action flow below (v7.7.0 Step C2).
                 if (task.note.isNotBlank()) {
                     Spacer(Modifier.height(4.dp))
                     Text(
@@ -9944,103 +9946,201 @@ fun TaskCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                if (task.status == TaskStatus.DONE) {
-                    // ---- quick actions (v1.4 item 9) ----
-                    // v6.7.0 Step C: a ghost's open / install /
-                    // share are disabled UP FRONT (the file is
-                    // probed gone — tapping could only fail),
-                    // with the reason written under the row.
-                    // v7.5: same discipline for the finalize
-                    // window — the file is not under its final
-                    // name yet, so those taps could only fail;
-                    // disabled WITH the reason under the row,
-                    // never silently grey.
-                    Spacer(Modifier.height(6.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // ---- v7.7.0 Step C2: ONE compact action flow
+                // for every status. Every detail action that
+                // used to be a full-size button alone on its own
+                // line (sources / checksum / verify / headers /
+                // note / diagnostics / open / share / CSV /
+                // rename, plus FAILED retry and QUEUED jump)
+                // is now a CompactActionButton in this FlowRow —
+                // same handlers, same conditions, smaller and
+                // side by side where they fit, so the buttons no
+                // longer stretch the card. ----
+                Spacer(Modifier.height(8.dp))
+                FlowRow(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (task.status == TaskStatus.FAILED) {
+                        CompactActionButton("重试（保留已下载进度）", onResume)
+                    }
+                    if (task.status == TaskStatus.QUEUED) {
+                        CompactActionButton("插队到最前", onJumpQueue)
+                    }
+                    if (task.status != TaskStatus.DONE) {
+                        CompactActionButton(
+                            if (task.sources.isEmpty()) "加镜像源（多源并下）" else "管理镜像源",
+                            onSources,
+                        )
+                    }
+                    if (task.status != TaskStatus.RUNNING) {
+                        CompactActionButton(
+                            if (expectedHash == null) "设置校验哈希" else "改校验哈希",
+                            onChecksum,
+                        )
+                    }
+                    if (task.status == TaskStatus.DONE && expectedHash != null) {
+                        if (task.checksumState == Checksum.STATE_VERIFYING) {
+                            CompactActionButton("取消校验", onCancelVerify)
+                        } else {
+                            CompactActionButton("立即校验", onVerifyHash)
+                        }
+                    }
+                    if (task.status != TaskStatus.DONE) {
+                        CompactActionButton(
+                            if (task.headers.isEmpty()) "加请求头（Cookie 等）"
+                            else "查看 / 改请求头（${task.headers.size} 个）",
+                            onHeaders,
+                        )
+                    }
+                    CompactActionButton(
+                        if (task.userNote.isBlank()) "加备注" else "改备注",
+                        onUserNote,
+                    )
+                    CompactActionButton("复制诊断信息", { copyTaskDiagnostics() })
+                    if (task.status == TaskStatus.DONE) {
+                        // ---- quick actions (v1.4 item 9) ----
+                        // v6.7.0 Step C: a ghost's open / install /
+                        // share are disabled UP FRONT (the file is
+                        // probed gone — tapping could only fail).
+                        // v7.5: same discipline for the finalize
+                        // window — the file is not under its final
+                        // name yet; disabled, never silently grey
+                        // (the reasons print under the flow).
                         val ext = displayName.substringAfterLast('.', "").lowercase()
                         if (ext == "apk") {
-                            Button(onClick = onInstall, enabled = !isGhost && !finalizing) { Text("安装") }
-                            OutlinedButton(onClick = onOpen, enabled = !isGhost && !finalizing) { Text("打开") }
-                        } else if (kind == "video" || kind == "audio") {
-                            Button(onClick = onOpen, enabled = !isGhost && !finalizing) { Text("播放") }
-                            OutlinedButton(onClick = onShare, enabled = !isGhost && !finalizing) { Text("分享") }
-                        } else {
-                            OutlinedButton(onClick = onOpen, enabled = !isGhost && !finalizing) { Text("打开") }
-                            OutlinedButton(onClick = onShare, enabled = !isGhost && !finalizing) { Text("分享") }
-                        }
-                        if (ext == "apk") {
-                            OutlinedButton(onClick = onShare, enabled = !isGhost && !finalizing) { Text("分享") }
-                        }
-                    }
-                    if (isGhost) {
-                        Text(
-                            "文件已不在，没法打开、分享或安装；不需要这条记录时可以删掉它（只删记录）。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    if (finalizing) {
-                        Text(
-                            "正在收尾（校验、改名或解压），完成后就能打开、分享或安装。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    // v4.5: export the retained speed curve as
-                    // CSV into the download folder (same door as
-                    // the sniff-list export). A task that kept no
-                    // samples gets a plain explanation, never an
-                    // empty file; a write failure is shown, never
-                    // swallowed.
-                    Spacer(Modifier.height(6.dp))
-                    OutlinedButton(onClick = {
-                        val ctx = context
-                        val csv = SpeedCurveExport.buildCsv(
-                            task, System.currentTimeMillis(),
-                        )
-                        if (csv == null) {
-                            Toast.makeText(
-                                ctx,
-                                "这个任务没有留下速度曲线，没法导出",
-                                Toast.LENGTH_SHORT,
-                            ).show()
-                        } else {
-                            val name = SpeedCurveExport.exportFileName(
-                                task.savedName.ifBlank { task.fileName },
+                            CompactActionButton(
+                                "安装", onInstall,
+                                enabled = !isGhost && !finalizing, filled = true,
                             )
-                            Thread {
-                                val saved = runCatching {
-                                    PublicStorage.saveTextFile(ctx, name, csv)
-                                }
-                                android.os.Handler(
-                                    android.os.Looper.getMainLooper(),
-                                ).post {
-                                    saved.onSuccess { usedName ->
+                            CompactActionButton(
+                                "打开", onOpen, enabled = !isGhost && !finalizing,
+                            )
+                            CompactActionButton(
+                                "分享", onShare, enabled = !isGhost && !finalizing,
+                            )
+                        } else if (kind == "video" || kind == "audio") {
+                            CompactActionButton(
+                                "播放", onOpen,
+                                enabled = !isGhost && !finalizing, filled = true,
+                            )
+                            CompactActionButton(
+                                "分享", onShare, enabled = !isGhost && !finalizing,
+                            )
+                        } else {
+                            CompactActionButton(
+                                "打开", onOpen, enabled = !isGhost && !finalizing,
+                            )
+                            CompactActionButton(
+                                "分享", onShare, enabled = !isGhost && !finalizing,
+                            )
+                        }
+                        // v4.5: export the retained speed curve
+                        // as CSV into the download folder (same
+                        // door as the sniff-list export). A task
+                        // that kept no samples gets a plain
+                        // explanation, never an empty file; a
+                        // write failure is shown, never swallowed.
+                        CompactActionButton("导出速度曲线（CSV）", {
+                            val ctx = context
+                            val csv = SpeedCurveExport.buildCsv(
+                                task, System.currentTimeMillis(),
+                            )
+                            if (csv == null) {
+                                Toast.makeText(
+                                    ctx,
+                                    "这个任务没有留下速度曲线，没法导出",
+                                    Toast.LENGTH_SHORT,
+                                ).show()
+                            } else {
+                                val name = SpeedCurveExport.exportFileName(
+                                    task.savedName.ifBlank { task.fileName },
+                                )
+                                Thread {
+                                    val saved = runCatching {
+                                        PublicStorage.saveTextFile(ctx, name, csv)
+                                    }
+                                    android.os.Handler(
+                                        android.os.Looper.getMainLooper(),
+                                    ).post {
+                                        saved.onSuccess { usedName ->
+                                            Toast.makeText(
+                                                ctx,
+                                                "已导出 $usedName 到下载目录",
+                                                Toast.LENGTH_LONG,
+                                            ).show()
+                                        }.onFailure {
+                                            Toast.makeText(
+                                                ctx,
+                                                "导出失败：${Errors.human(it)}",
+                                                Toast.LENGTH_SHORT,
+                                            ).show()
+                                        }
+                                    }
+                                }.start()
+                            }
+                        })
+                        // v7.7.0 Step C2: 删除文件 — the FILE
+                        // only, in the card's danger red. A ghost
+                        // has no file left to delete, so the
+                        // button is gone there (the ghost note
+                        // below says what remains possible). A
+                        // busy file (verifying / claimed /
+                        // finalizing) stops with its reason
+                        // instead of opening the confirmation.
+                        if (!isGhost) {
+                            CompactActionButton(
+                                "删除文件",
+                                red = true,
+                                onClick = {
+                                    val decision = DeleteFile.decide(
+                                        status = task.status,
+                                        savedUri = task.savedUri,
+                                        finalizing = finalizing,
+                                        verifying = ChecksumVerifier.isVerifying(task.id) ||
+                                            task.checksumState == Checksum.STATE_VERIFYING,
+                                        claimed = DownloadCenter.isClaimed(task.id),
+                                        verdict = GhostSnapshot
+                                            .verdictsByUri[task.savedUri]?.verdict,
+                                    )
+                                    if (decision.allowed) {
+                                        deleteFileConfirm = true
+                                    } else {
                                         Toast.makeText(
-                                            ctx,
-                                            "已导出 $usedName 到下载目录",
+                                            context,
+                                            DeleteFile.blockText(
+                                                decision.block ?: DeleteFile.Block.BUSY,
+                                            ),
                                             Toast.LENGTH_LONG,
                                         ).show()
-                                    }.onFailure {
-                                        Toast.makeText(
-                                            ctx,
-                                            "导出失败：${Errors.human(it)}",
-                                            Toast.LENGTH_SHORT,
-                                        ).show()
                                     }
-                                }
-                            }.start()
+                                },
+                            )
                         }
-                    }) {
-                        Text("导出速度曲线（CSV）")
+                    }
+                    // Rename is only safe before any byte/target exists.
+                    if (task.status != TaskStatus.DONE && task.status != TaskStatus.RUNNING &&
+                        task.targetUri.isBlank() && task.downloaded == 0L
+                    ) {
+                        CompactActionButton("改保存文件名", onRename)
                     }
                 }
-                // Rename is only safe before any byte/target exists.
-                if (task.status != TaskStatus.DONE && task.status != TaskStatus.RUNNING &&
-                    task.targetUri.isBlank() && task.downloaded == 0L
-                ) {
+                if (task.status == TaskStatus.DONE && isGhost) {
                     Spacer(Modifier.height(6.dp))
-                    OutlinedButton(onClick = onRename) { Text("改保存文件名") }
+                    Text(
+                        "文件已不在，没法打开、分享或安装；不需要这条记录时可以删掉它（只删记录）。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (task.status == TaskStatus.DONE && finalizing) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "正在收尾（校验、改名或解压），完成后就能打开、分享或安装。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
 
@@ -10160,6 +10260,66 @@ fun TaskCard(
                     )
             }
         }
+    }
+    // v7.7.0 Step C2: 「删除文件」 confirmation — names the
+    // file, says it cannot be undone, and keeps the two
+    // actions unmistakably apart: this deletes the FILE and
+    // keeps the record (ghost-marked at once via
+    // GhostSnapshot.markMissing); 删除任务 is the separate
+    // record action. Confirm wording rides the existing
+    // AlertDialog + TextButton pattern; the destructive
+    // confirm text carries the card's danger red.
+    if (deleteFileConfirm) {
+        val fileName = task.savedName.ifBlank { task.fileName }.ifBlank { displayName }
+        AlertDialog(
+            onDismissRequest = { deleteFileConfirm = false },
+            title = { Text("删除这个文件？") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text(
+                        "将删除文件「$fileName」，删了不能恢复。\n" +
+                            "任务记录会保留下来，并标成「文件已不在」。" +
+                            "如果想删记录，请用卡片上的删除任务——那是另一个动作，只删记录时文件会保留。",
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    deleteFileConfirm = false
+                    val ctx = context
+                    Thread {
+                        val outcome = runCatching {
+                            PublicStorage.deleteSavedFile(ctx, task)
+                        }.getOrDefault(DeleteFile.Outcome.FAILED)
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            if (outcome != DeleteFile.Outcome.FAILED) {
+                                GhostSnapshot.markMissing(
+                                    Reconcile.RecordSnap(
+                                        id = task.id,
+                                        savedUri = task.savedUri,
+                                        savedName = task.savedName
+                                            .ifBlank { task.fileName },
+                                        size = if (task.totalSize > 0) {
+                                            task.totalSize
+                                        } else {
+                                            task.downloaded
+                                        },
+                                    ),
+                                )
+                            }
+                            Toast.makeText(
+                                ctx,
+                                DeleteFile.outcomeText(outcome, fileName),
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        }
+                    }.start()
+                }) { Text("删除文件", color = WinPalette.Red) }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteFileConfirm = false }) { Text("取消") }
+            },
+        )
     }
     } // v1.8: swipe Box
 }

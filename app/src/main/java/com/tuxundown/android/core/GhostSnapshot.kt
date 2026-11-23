@@ -16,8 +16,11 @@ import androidx.compose.runtime.setValue
  * lands. Keeping it separate also keeps DownloadCenter free
  * of Compose imports.
  *
- * Refresh timing — ONLY these three, all on background
- * threads, all batched over every DONE record at once:
+ * Refresh timing — the three batched probes below, plus
+ * (v7.7.0 Step C2) an immediate single-record markMissing
+ * when the app itself deletes a DONE task's file. The
+ * batched probes are all on background threads, all over
+ * every DONE record at once:
  *  1. the task-list screen is entered (DownApp LaunchedEffect
  *     on the home screen);
  *  2. the files page loads (its existing background load
@@ -49,6 +52,21 @@ object GhostSnapshot {
         private set
 
     fun isGhost(taskId: String): Boolean = taskId in ghostIds
+
+    /**
+     * v7.7.0 Step C2: mark ONE record MISSING right now — its
+     * file was just deleted from inside the app (or found gone
+     * by that delete attempt), so waiting for the next batched
+     * probe would leave the card unmarked until a page revisit
+     * or a restart. Same caliber as a probe verdict: the id
+     * joins [ghostIds] (Compose state — surfaces recompose at
+     * once) and the verdict map gains the MISSING entry.
+     */
+    fun markMissing(record: Reconcile.RecordSnap) {
+        verdictsByUri = verdictsByUri +
+            (record.savedUri to Reconcile.Probe(Reconcile.Verdict.MISSING))
+        ghostIds = ghostIds + record.id
+    }
 
     /** Feed one batched probe result in (any refresh source). */
     fun update(
