@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/liyuzhou79-star/TuxunDown/releases/tag/v7.9.0"><img src="https://img.shields.io/badge/版本-7.9.0-blue" alt="当前版本 7.9.0"></a>
+  <a href="https://github.com/liyuzhou79-star/TuxunDown/releases/tag/v8.0.0"><img src="https://img.shields.io/badge/版本-8.0.0-blue" alt="当前版本 8.0.0"></a>
   <a href="https://github.com/liyuzhou79-star/TuxunDown/releases"><img src="https://img.shields.io/github/downloads/liyuzhou79-star/TuxunDown/total" alt="下载量"></a>
   <img src="https://img.shields.io/badge/平台-Android-3DDC84" alt="平台 Android">
   <img src="https://img.shields.io/badge/Android-10%2B-3DDC84" alt="Android 10+">
@@ -29,10 +29,10 @@
 
 ## 下载
 
-当前最新正式版：**v7.9.0**
+当前最新正式版：**v8.0.0**
 
-- 发布页：[v7.9.0](https://github.com/liyuzhou79-star/TuxunDown/releases/tag/v7.9.0)
-- 安装包直达：[TuxunDown-v7.9.0.apk](https://github.com/liyuzhou79-star/TuxunDown/releases/download/v7.9.0/TuxunDown-v7.9.0.apk)（约 1.4 MB）
+- 发布页：[v8.0.0](https://github.com/liyuzhou79-star/TuxunDown/releases/tag/v8.0.0)
+- 安装包直达：[TuxunDown-v8.0.0.apk](https://github.com/liyuzhou79-star/TuxunDown/releases/download/v8.0.0/TuxunDown-v8.0.0.apk)（约 1.4 MB）
 - 全部历史版本：[Releases](https://github.com/liyuzhou79-star/TuxunDown/releases)
 
 系统要求：Android 10 及以上。所有正式版都用同一把固定签名钥匙签署，新版可直接覆盖安装，不用卸载旧版。
@@ -82,7 +82,7 @@
 
 一共申请 10 项系统权限，每项都有明确用途：联网下载（INTERNET）、判断当前是 WiFi 还是流量（ACCESS_NETWORK_STATE）、在后台继续下载的前台服务（FOREGROUND_SERVICE、FOREGROUND_SERVICE_DATA_SYNC）、发送下载进度与完成通知（POST_NOTIFICATIONS）、完成时震动（VIBRATE）、打开系统的电池白名单页面（REQUEST_IGNORE_BATTERY_OPTIMIZATIONS，App 自己不改任何系统设置）、扫码添加链接时用相机（CAMERA，只在扫码页面打开时用）、开机后恢复未完成任务（RECEIVE_BOOT_COMPLETED，只服务于默认关闭的那个开关）、下载传输期间保持处理器运行做到息屏不降速（WAKE_LOCK，只在真正传输时持有，设置里可关）。
 
-安装包保持小体积：现行正式版为 7.9.0；发布流程带有体积守门，签名包超过 1.5 MB（1,572,864 字节）就直接发布失败。
+安装包保持小体积：现行正式版为 8.0.0；发布流程带有体积守门，签名包超过 1.5 MB（1,572,864 字节）就直接发布失败。
 
 ## 不做的事
 
