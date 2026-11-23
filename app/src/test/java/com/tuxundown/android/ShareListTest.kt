@@ -60,6 +60,28 @@ class ShareListTest {
     }
 
     @Test
+    fun credentialHintAppearsOnlyWhenALinkCarriesQueryOrUserinfo() {
+        // v7.2 (audit round 57): one reminder line, only when a
+        // link actually carries a query string or userinfo —
+        // the links themselves stay whole (re-import needs
+        // them) and the rest of the format is unchanged.
+        val signed = ShareList.build(
+            listOf(task("https://a.example.com/f.zip?sig=fake1", "f.zip"))
+        )
+        assertTrue(signed.contains(ShareList.CREDENTIAL_HINT_LINE))
+        assertTrue(signed.contains("https://a.example.com/f.zip?sig=fake1"))
+        val userinfo = ShareList.build(
+            listOf(task("https://fakeuser:fakepass@a.example.com/f.zip"))
+        )
+        assertTrue(userinfo.contains(ShareList.CREDENTIAL_HINT_LINE))
+        val plain = ShareList.build(
+            listOf(task("https://a.example.com/f.zip", "f.zip"))
+        )
+        assertFalse(plain.contains(ShareList.CREDENTIAL_HINT_LINE))
+        assertTrue(ShareList.credentialHint(listOf("https://a.b/f.zip")) == null)
+    }
+
+    @Test
     fun emptyListIsJustTheHeader() {
         val text = ShareList.build(emptyList())
         assertTrue(text.contains("共 0 个"))

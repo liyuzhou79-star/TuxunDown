@@ -372,6 +372,20 @@ class HealthCheckTest {
     }
 
     @Test
+    fun sanitizeCoversTheNewCorpusShapesViaTheSharedRedactor() {
+        // v7.2: sanitizeForCopy now delegates to the single
+        // Redact — the shapes this page's old private corpus
+        // missed (standalone Bearer, a Cookie: line, api-key
+        // style names) are covered here too. Fake data only.
+        val out = HealthCheck.sanitizeForCopy(
+            "Bearer FAKEHC1 api-key=FAKEHC2 Cookie: session=FAKEHC3"
+        )
+        assertFalse(out.contains("FAKEHC1"))
+        assertFalse(out.contains("FAKEHC2"))
+        assertFalse(out.contains("FAKEHC3"))
+    }
+
+    @Test
     fun sanitizeLeavesPlainValuesUntouched() {
         val plain = "下载目录可用 12.3 GB"
         assertEquals(plain, HealthCheck.sanitizeForCopy(plain))

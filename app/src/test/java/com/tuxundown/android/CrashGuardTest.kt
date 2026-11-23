@@ -53,6 +53,22 @@ class CrashGuardTest {
     }
 
     @Test
+    fun copyTextRedactsSecretShapesFromTheLog() {
+        // v7.2 (audit round 57): the crash page's copy出口 —
+        // a library exception message can carry a full URL.
+        // Fake shapes only.
+        val detail = "异常：java.lang.IllegalStateException: open " +
+            "https://fakeuser:fakepass@cdn.example.com/f.bin?token=FAKECRASH1 failed, " +
+            "Cookie: session=FAKECRASH2"
+        val out = CrashGuard.copyText(detail)
+        assertFalse(out.contains("FAKECRASH1"))
+        assertFalse(out.contains("FAKECRASH2"))
+        assertFalse(out.contains("fakepass"))
+        assertTrue(out.contains("IllegalStateException"))
+        assertTrue(out.contains("cdn.example.com"))
+    }
+
+    @Test
     fun buildLogCarriesVersionAndTrace() {
         val boom = IllegalStateException("kaput")
         val log = CrashGuard.buildLog("2026-11-22 10:00:00", "2.2.0", "main", boom)

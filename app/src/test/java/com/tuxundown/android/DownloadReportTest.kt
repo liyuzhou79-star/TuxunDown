@@ -101,6 +101,25 @@ Regex("""\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \(UTC[+-]\d{2}:\d{2}\)"""),
 }
 
 @Test
+fun namelessBiggestFallsBackToRedactedUrlNotFullUrl() {
+// v7.2 (audit round 57): a DONE task with neither savedName
+// nor fileName used to print its FULL url as the 最大文件
+// name — a signed link's token rode into the report.
+val t = TaskRecord(
+url = "https://fakeuser:fakepass@cdn.example.com/dir/big.bin?token=FAKEREPORT1",
+totalSize = 5000,
+status = TaskStatus.DONE,
+finishedAt = now,
+)
+val text = DownloadReport.build(
+listOf(t), DownloadReport.Counters(0, 0, 0), emptyList(), now,
+)
+assertFalse(text.contains("FAKEREPORT1"))
+assertFalse(text.contains("fakepass"))
+assertTrue(text.contains("最大文件：https://cdn.example.com/dir/big.bin?（参数已隐藏）"))
+}
+
+@Test
 fun countersAndHostsAppearWhenPresent() {
 val text = DownloadReport.build(
 emptyList(),

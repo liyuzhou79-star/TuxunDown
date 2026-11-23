@@ -57,6 +57,32 @@ class TaskHeadersTest {
     }
 
     @Test
+    fun exportStripRemovesCustomCredentialHeadersByNameFeature() {
+        // v7.2 (audit round 57): the strip list is no longer
+        // three fixed names — custom headers carrying a
+        // credential feature in their NAME go too, while
+        // ordinary business headers stay.
+        val headers = mapOf(
+            "X-Api-Key" to "fake-key-1",
+            "X-Auth-Token" to "fake-token-2",
+            "x-secret-key" to "fake-secret-3",
+            "X-Custom-Token" to "fake-token-4",
+            "Referer" to "https://a.b/",
+            "X-Request-Id" to "req-123",
+            "Range" to "bytes=0-",
+        )
+        val stripped = TaskHeaders.strippedForExport(headers)
+        assertEquals(
+            setOf("Referer", "X-Request-Id", "Range"),
+            stripped.keys,
+        )
+        assertTrue(TaskHeaders.isSensitive("X-Api-Key"))
+        assertTrue(TaskHeaders.isSensitive("X-Auth-Token"))
+        assertFalse(TaskHeaders.isSensitive("X-Request-Id"))
+        assertFalse(TaskHeaders.isSensitive("User-Agent"))
+    }
+
+    @Test
     fun exportStripAlsoRemovesAuthorization() {
         // v2.3 audit round 9: a Bearer/Basic token is a credential
         // exactly like a cookie and must not ride into a backup.

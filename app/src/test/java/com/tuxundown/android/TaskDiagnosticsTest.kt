@@ -96,6 +96,26 @@ class TaskDiagnosticsTest {
     }
 
     @Test
+    fun errorLinePassesThroughTheSharedRedactor() {
+        // v7.2 (audit round 57): task.error is NOT filtered on
+        // backup import, so a crafted record could carry a
+        // token URL in it — the diagnostics copy must fold it
+        // like every other出口. Fake shapes only.
+        val task = TaskRecord(
+            url = "https://example.com/f.bin",
+            status = TaskStatus.FAILED,
+        )
+        task.error = "下载失败：https://fakeuser:fakepass@cdn.example.com/f.bin?token=FAKEERR1 " +
+            "password=fakeerr2"
+        val text = TaskDiagnostics.build(task, "7.2.0", null)
+        assertFalse(text.contains("FAKEERR1"))
+        assertFalse(text.contains("fakeerr2"))
+        assertFalse(text.contains("fakepass"))
+        assertTrue(text.contains("错误："))
+        assertTrue(text.contains("cdn.example.com"))
+    }
+
+    @Test
     fun buildHandlesUnknownSizeHlsAndNoHeaders() {
         val task = TaskRecord(
             url = "https://example.com/live/index.m3u8",

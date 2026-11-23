@@ -61,6 +61,25 @@ class SniffExportTest {
     }
 
     @Test
+    fun credentialHintAppearsOnlyForSignedOrUserinfoLinks() {
+        // v7.2 (audit round 57): the same one-line reminder as
+        // the queue share list; the plain fixture list above
+        // carries no query/userinfo, so it stays hint-free and
+        // the round-trip tests above are unaffected.
+        val plain = SniffExport.build(resources)
+        assertFalse(plain.contains("凭据"))
+        val signed = SniffExport.build(
+            listOf(SniffedResource("https://a.b/f.zip?sig=fake1", "f.zip", "archive"))
+        )
+        assertTrue(signed.contains("凭据"))
+        // The hint line is not a link line: the .txt rule and
+        // the paste extractor still recover exactly the link.
+        assertEquals(
+            listOf("https://a.b/f.zip?sig=fake1"), lineLinks(signed),
+        )
+    }
+
+    @Test
     fun emptySessionExportsAValidEmptyList() {
         val text = SniffExport.build(emptyList())
         assertTrue(text.startsWith("TuxunDown 链接清单（共 0 个）\n"))

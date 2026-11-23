@@ -268,6 +268,50 @@ class TaskStoreJsonTest {
     }
 
     @Test
+    fun importGateRejectsUnsupportedSchemesPerRecord() {
+        // v7.2 (audit round 57): the parse door applies the
+        // v2.8 entry gate (LinkSchemes: http/https/ftp only).
+        // A crafted backup's file:// / content:// records are
+        // isolated — skipped alone — while the healthy records
+        // around them and their ftp mirror survive; a planted
+        // file:// MIRROR is dropped without killing its record.
+        // A blank-url (adopted) record stays legal.
+        val hostile = """
+            [
+              {"id":"ok1","url":"https://a.b/good.bin","status":"PAUSED",
+               "sources":["ftp://m.b/good.bin","file:///etc/passwd"]},
+              {"id":"badfile","url":"file:///sdcard/secret.bin","status":"PAUSED"},
+              {"id":"badcontent","url":"content://media/123","status":"PAUSED"},
+              {"id":"adopted","url":"","status":"DONE"}
+            ]
+        """.trimIndent()
+        val back = TaskStore.deserialize(hostile)
+        val byId = back.associateBy { it.id }
+        assertEquals(setOf("ok1", "adopted"), byId.keys)
+        assertEquals(listOf("ftp://m.b/good.bin"), byId["ok1"]!!.sources.toList())
+    }
+
+    @Test
+    fun exportStripsTargetUriButKeepsSavedUriAndDiskKeepsBoth() {
+        // v7.2 (audit round 57): the EXPORT branch
+        // (stripSensitiveHeaders=true) drops targetUri (a SAF
+        // document id encodes a local path) but keeps savedUri
+        // (same-device DONE 打开文件 depends on it); the
+        // on-disk form keeps both.
+        val t = TaskRecord(url = "https://a.b/f.bin", status = TaskStatus.DONE)
+        t.savedUri = "content://media/1"
+        t.targetUri = "content://media/2"
+        val exported = TaskStore.deserialize(
+            TaskStore.serialize(listOf(t), stripSensitiveHeaders = true)
+        )[0]
+        assertEquals("content://media/1", exported.savedUri)
+        assertEquals("", exported.targetUri)
+        val onDisk = TaskStore.deserialize(TaskStore.serialize(listOf(t)))[0]
+        assertEquals("content://media/1", onDisk.savedUri)
+        assertEquals("content://media/2", onDisk.targetUri)
+    }
+
+    @Test
     fun roundTripKeepsUserNoteAndOldRecordsDefaultItEmpty() {
         // v2.8: the user's own note rides the shared serializer —
         // disk persistence AND backup export — and stays distinct
