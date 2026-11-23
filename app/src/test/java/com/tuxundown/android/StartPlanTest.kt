@@ -45,7 +45,7 @@ class StartPlanTest {
         for (badCap in listOf(0, -5, 2, 999)) {
             val fresh = StartPlan.decide(hint = 0, cap = badCap, resuming = false, persistedThreads = 0)
             assertEquals("cap=$badCap", StartPlan.BURST_START, fresh.start)
-            val hinted = StartPlan.decide(hint = 64, cap = badCap, resuming = false, persistedThreads = 0)
+            val hinted = StartPlan.decide(hint = DownloadEngine.MAX_THREADS, cap = badCap, resuming = false, persistedThreads = 0)
             assertEquals("cap=$badCap", DownloadEngine.MAX_THREADS, hinted.start)
         }
     }
@@ -56,9 +56,11 @@ class StartPlanTest {
         assertEquals(16, d.start)
         assertEquals(StartPlan.BURST_START, d.start)
         assertTrue(d.probing)
-        // Out-of-range hints are no hint at all.
+        // Out-of-range hints are no hint at all (v7.7: the legal
+        // band tops out at 128 now, so the over-range example is
+        // 200 — 100 is a legal hint since the raise).
         assertEquals(16, StartPlan.decide(1, 0, false, 0).start)
-        assertEquals(16, StartPlan.decide(100, 0, false, 0).start)
+        assertEquals(16, StartPlan.decide(200, 0, false, 0).start)
     }
 
     @Test
