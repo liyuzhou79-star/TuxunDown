@@ -21,6 +21,7 @@ import android.widget.Toast
 import com.tuxundown.android.core.CreateDedup
 import com.tuxundown.android.core.DownloadCenter
 import com.tuxundown.android.core.Errors
+import com.tuxundown.android.core.LongPressLink
 import com.tuxundown.android.core.TaskRecord
 import com.tuxundown.android.sniff.SniffResult
 import com.tuxundown.android.sniff.Sniffer
@@ -116,7 +117,7 @@ class SniffActivity : Activity() {
             if (!isDownloadableUrl(url)) {
                 Toast.makeText(
                     this,
-                    "抓到的不是能下载的链接（${url.substringBefore(':').lowercase()}），已忽略",
+                    LongPressLink.notDownloadableMessage(url),
                     Toast.LENGTH_LONG,
                 ).show()
             } else {
@@ -154,33 +155,48 @@ class SniffActivity : Activity() {
             val link = hit.extra
             val isLink = hit.type == WebView.HitTestResult.SRC_ANCHOR_TYPE ||
                 hit.type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE
-            if (isLink && !link.isNullOrBlank() && isDownloadableUrl(link)) {
-                AlertDialog.Builder(this)
-                    .setTitle("下载这个链接？")
-                    .setMessage(link)
-                    .setPositiveButton("用 TuxunDown 下载") { _, _ ->
-                        val headers = mutableMapOf<String, String>()
-                        headers["User-Agent"] = web.settings.userAgentString ?: ""
-                        runCatching { CookieManager.getInstance().getCookie(link) }
-                            .getOrNull()?.let { headers["Cookie"] = it }
-                        web.url?.let { headers["Referer"] = it }
-                        createTaskSmart(link, headers) { outcome ->
-                            when (outcome) {
-                                true -> Toast.makeText(
-                                    this, "已新建下载任务", Toast.LENGTH_LONG,
-                                ).show()
-                                false -> Toast.makeText(
-                                    this, "这个链接已经在任务列表里了", Toast.LENGTH_LONG,
-                                ).show()
-                                null -> Unit
+            // v6.5 audit round 50 (A-F1): the verdict lives in
+            // LongPressLink. A hit on a link the engine cannot
+            // fetch used to fall through silently — the press
+            // looked dead. It now gets the SAME explanation the
+            // download listener above shows for the same link.
+            when (LongPressLink.actionFor(isLink, link)) {
+                LongPressLink.Action.CONFIRM_DOWNLOAD -> {
+                    val target = link!!
+                    AlertDialog.Builder(this)
+                        .setTitle("下载这个链接？")
+                        .setMessage(target)
+                        .setPositiveButton("用 TuxunDown 下载") { _, _ ->
+                            val headers = mutableMapOf<String, String>()
+                            headers["User-Agent"] = web.settings.userAgentString ?: ""
+                            runCatching { CookieManager.getInstance().getCookie(target) }
+                                .getOrNull()?.let { headers["Cookie"] = it }
+                            web.url?.let { headers["Referer"] = it }
+                            createTaskSmart(target, headers) { outcome ->
+                                when (outcome) {
+                                    true -> Toast.makeText(
+                                        this, "已新建下载任务", Toast.LENGTH_LONG,
+                                    ).show()
+                                    false -> Toast.makeText(
+                                        this, "这个链接已经在任务列表里了", Toast.LENGTH_LONG,
+                                    ).show()
+                                    null -> Unit
+                                }
                             }
                         }
-                    }
-                    .setNegativeButton("取消", null)
-                    .show()
-                true
-            } else {
-                false
+                        .setNegativeButton("取消", null)
+                        .show()
+                    true
+                }
+                LongPressLink.Action.EXPLAIN_NOT_DOWNLOADABLE -> {
+                    Toast.makeText(
+                        this,
+                        LongPressLink.notDownloadableMessage(link ?: ""),
+                        Toast.LENGTH_LONG,
+                    ).show()
+                    false
+                }
+                LongPressLink.Action.IGNORE -> false
             }
         }
 
@@ -293,10 +309,8 @@ class SniffActivity : Activity() {
     }
 
     /** Only schemes the download engine can actually fetch. */
-    private fun isDownloadableUrl(url: String): Boolean {
-        val scheme = url.substringBefore(':').lowercase()
-        return scheme == "http" || scheme == "https" || scheme == "ftp"
-    }
+    private fun isDownloadableUrl(url: String): Boolean =
+        LongPressLink.isDownloadable(url)
 
     /**
      * v3.8: single-create with the HLS 清晰度 choice, for every
