@@ -421,10 +421,13 @@ class DownloadService : Service() {
     /**
      * v4.4 (audit round 29): release parked tasks whose wait is
      * over. Outage parks ([portal] = false) release on plain
-     * availability, as since v1.5. Portal parks release ONLY on
-     * a validated network — the caller has already established
-     * that signal (the capabilities callback, or the drain
-     * loop's poll of DownloadCenter.hasValidatedNetwork).
+     * availability, as since v1.5 — plus, since v6.6, the drain
+     * loop's validated poll as a backstop for a park that landed
+     * after the availability event (see the drain loop). Portal
+     * parks release ONLY on a validated network — the caller has
+     * already established that signal (the capabilities
+     * callback, or the drain loop's poll of
+     * DownloadCenter.hasValidatedNetwork).
      * Returns true when anything was released.
      */
     private fun clearDeferredParks(portal: Boolean): Boolean {
@@ -759,6 +762,31 @@ class DownloadService : Service() {
                         } && DownloadCenter.hasValidatedNetwork()
                     ) {
                         if (clearDeferredParks(portal = true)) {
+                            store.save()
+                            continue
+                        }
+                    }
+                    // v6.6 (audit round 51): the symmetric
+                    // backstop for NET parks. clearDeferredParks
+                    // is otherwise released ONLY by callback
+                    // events, and a net park can land after the
+                    // replacement network's onAvailable already
+                    // fired (switch scenario — the park is set
+                    // when the failed engine returns, which can
+                    // postdate the event), leaving nobody to
+                    // release it. The poll judges by the same
+                    // validated standard as the portal backstop
+                    // above (NetRetry.pollShouldReleaseNetPark);
+                    // the release itself is the existing
+                    // portal = false path, budget untouched.
+                    if (NetRetry.pollShouldReleaseNetPark(
+                            hasNetParked = store.tasks.any {
+                                it.netDeferred && it.status == TaskStatus.QUEUED
+                            },
+                            hasValidatedNetwork = DownloadCenter.hasValidatedNetwork(),
+                        )
+                    ) {
+                        if (clearDeferredParks(portal = false)) {
                             store.save()
                             continue
                         }

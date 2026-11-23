@@ -159,6 +159,37 @@ class NetRetryTest {
     }
 
     @Test
+    fun drainPollReleasesNetParkOnlyOnValidatedNetwork() {
+        // v6.6 (audit round 51): the drain poll's backstop for a
+        // net park that landed after the replacement network's
+        // onAvailable — full truth table. Parked + validated is
+        // the ONLY release; an unvalidated network (captive
+        // portal not yet logged in, half-up link) must not
+        // release the park into an instant re-failure, and no
+        // park means no release whatever the network looks like.
+        assertTrue(
+            NetRetry.pollShouldReleaseNetPark(
+                hasNetParked = true, hasValidatedNetwork = true
+            )
+        )
+        assertFalse(
+            NetRetry.pollShouldReleaseNetPark(
+                hasNetParked = true, hasValidatedNetwork = false
+            )
+        )
+        assertFalse(
+            NetRetry.pollShouldReleaseNetPark(
+                hasNetParked = false, hasValidatedNetwork = true
+            )
+        )
+        assertFalse(
+            NetRetry.pollShouldReleaseNetPark(
+                hasNetParked = false, hasValidatedNetwork = false
+            )
+        )
+    }
+
+    @Test
     fun deferredWaitTextNetWinsWhenBothParkedAndNullWhenNone() {
         // With the network actually down a login cannot happen
         // anyway — the outage is the first blocker.

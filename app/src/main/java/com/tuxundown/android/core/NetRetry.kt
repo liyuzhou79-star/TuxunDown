@@ -100,6 +100,33 @@ object NetRetry {
     fun shouldDefer(usedAttempts: Int): Boolean = usedAttempts < MAX_ATTEMPTS
 
     /**
+     * v6.6 (audit round 51): the drain loop's poll backstop for
+     * NET parks — should this pass release them? The release
+     * events (the network callback's onAvailable) are
+     * signal-driven, but a net park can land AFTER the new
+     * network's onAvailable already fired (the switch scenario:
+     * the failure that parks the task is judged on the service
+     * side once the engine returns, which can be later than the
+     * callback for the network that replaced the dead one) —
+     * from then on no event owns the release and the task would
+     * sit parked until an unrelated validated-capabilities
+     * event, a manual resume or a service restart. The drain's
+     * 5 s poll is the backstop, held to the same standard the
+     * portal backstop (v4.4) already uses: a VALIDATED network
+     * must exist NOW — plain availability is not enough here
+     * precisely because the event that proves mere availability
+     * was already spent; validation is the signal that cannot
+     * have been missed twice. Pure verdict over the two facts;
+     * the service owns both reads and the release itself
+     * (clearDeferredParks with portal = false, budget and park
+     * semantics untouched).
+     */
+    fun pollShouldReleaseNetPark(
+        hasNetParked: Boolean,
+        hasValidatedNetwork: Boolean,
+    ): Boolean = hasNetParked && hasValidatedNetwork
+
+    /**
      * v5.3 (audit round 38): the drain's idle-wait notification
      * text while it sits on parked tasks — (title, text), or
      * null when nothing is parked. Both deferral families are
