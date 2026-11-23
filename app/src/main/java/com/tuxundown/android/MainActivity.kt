@@ -691,7 +691,7 @@ fun DownApp() {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "5.3.0"
+        }.getOrNull() ?: "5.4.0"
     }
     var showGuide by remember {
         // v2.2 safe mode: after 2+ consecutive crashes, first-
@@ -7061,9 +7061,9 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 开局更稳：多个任务同时开始或中途加入时，连接数平滑爬升，不再短暂冲过全局上限，对服务器也更友好；稳态速度和目标连接数不变，16 条爆发开局照旧\n" +
-            "· 各处说法对齐了：卡片、通知、小部件和磁贴里，失败就叫失败、全在排队时说「排队中」、连接数显示实时条数，等登录的 WiFi 不再误报成等网络恢复，大小未知的任务也不再假装估算剩余时间\n" +
-            "· 处理失败更快：失败任务有两个以上时，「异常」标签顶部会出现批量处理入口，一键打开换招重试（换浏览器标识或改单线程）；停泊中的任务在等条件恢复，不算在里面",
+            "· 不再重复建任务：同一个链接已经在任务列表里（排队、下载中、暂停、失败都算）就不会再建一个；批量粘贴或导入时会明说「跳过了 N 个重复」。已经下完的历史不拦，想再下一份照样可以\n" +
+            "· 镜像状态看得见了：打开任务的「管理镜像源」，每个镜像都会标明已确认、待确认（可能需要登录）、已拒绝还是还没校验；状态来自下载前已有的校验记录，不会为了显示状态额外联网\n" +
+            "· 没能确认的镜像可以手动放行：状态是待确认的镜像，点「仍然使用」就能让它参与多源下载；这个决定只对这个任务有效，随时可以取消。已经证明是别的文件的镜像不能放行",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
             "· 文件直链 → 直接开始多线程下载，还能预先改好保存文件名\n" +
@@ -8190,7 +8190,7 @@ fun TaskCard(
                     val version = runCatching {
                         ctx.packageManager.getPackageInfo(ctx.packageName, 0)
                             .versionName
-                    }.getOrNull() ?: "5.3.0"
+                    }.getOrNull() ?: "5.4.0"
                     val cm = ctx.getSystemService(
                         android.content.Context.CLIPBOARD_SERVICE,
                     ) as android.content.ClipboardManager
