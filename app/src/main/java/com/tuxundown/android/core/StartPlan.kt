@@ -108,9 +108,15 @@ object StartPlan {
         } else {
             DownloadEngine.MAX_THREADS
         }
-        // Remembered optimum: start AT it (pressed by the bound),
-        // no probing — the v1.5 behaviour, unchanged.
-        if (hint in 2..DownloadEngine.MAX_THREADS) {
+        // Remembered optimum, FRESH start: begin AT it (pressed
+        // by the bound), no probing — the v1.5 behaviour,
+        // unchanged. A resume deliberately does NOT take this
+        // branch (v7.7 Step B3): it uses the hint as a floor
+        // below and keeps probing. (Pre-B3 this branch ignored
+        // `resuming`, which is why the old engine gate passed
+        // hint = 0 for resumes; the gate is gone and the branch
+        // order now carries the distinction.)
+        if (!resuming && hint in 2..DownloadEngine.MAX_THREADS) {
             return Decision(start = minOf(hint, bound), probing = false)
         }
         // Resume: restart at the persisted count, bounded, but
