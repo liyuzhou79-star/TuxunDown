@@ -1264,6 +1264,20 @@ object DownloadCenter {
     @Synchronized
     fun consumeCancelled(task: TaskRecord): Boolean = cancelled.remove(task.id)
 
+    /**
+     * v7.4 (audit round 59, C-4): drop a cancelled mark WITHOUT
+     * acting on it. runOne's not-handed-off finally calls this so
+     * exits that never reach a consumeCancelled check (the
+     * loop-head early returns, a backoff sleep interrupted by the
+     * record vanishing) cannot leave the id in the set forever —
+     * the set used to grow by one UUID per such occurrence for
+     * the whole process lifetime.
+     */
+    @Synchronized
+    fun discardCancelled(taskId: String) {
+        cancelled.remove(taskId)
+    }
+
     private fun prefs() = appContext!!.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
     // v1.5 startup-safety audit: a SharedPreferences value stored
@@ -1678,6 +1692,30 @@ object DownloadCenter {
 
     /** Queue a task and kick the foreground service. Returns false if blocked. */
     fun enqueue(task: TaskRecord): Boolean {
+        // v7.4 (audit round 59, C-1): the funnel itself now
+        // guards the transition. A manual (re-)queue accepts
+        // only QUEUED (legal re-entry — multi-select resume and
+        // the wifi-only branch below depend on it), PAUSED and
+        // FAILED. RUNNING already has an owner and DONE's only
+        // re-queue is the daily path, which never comes through
+        // here; both are refused AND counted (see
+        // IllegalTransitions), never thrown into the UI — the
+        // caller just sees "not queued", exactly like a block.
+        if (!StateMachine.canEnqueue(task.status)) {
+            IllegalTransitions.record(
+                task.id, task.status,
+                if (task.status == TaskStatus.DONE) StateEvent.RETRY else StateEvent.RESUME,
+                "enqueue",
+            )
+            return false
+        }
+        // v7.4 (audit round 59, C-3): a manual (re-)queue also
+        // retires wasRunning. It used to be cleared ONLY by
+        // recoverInterrupted, so a task the user resumed and
+        // then hand-paused again could be auto-requeued by a
+        // later same-process recovery call — violating
+        // Recovery's own "a user pause is an order" contract.
+        task.wasRunning = false
         // v7.1 (audit round 56): this funnel head is THE stamp
         // point for every manual (re-)queue — both exits below
         // (the wifi-only branch and the normal one) inherit this
@@ -1843,8 +1881,14 @@ object DownloadCenter {
 
     fun pauseTask(task: TaskRecord) {
         synchronized(this) { engines[task.id] }?.pause()
+        // v7.4 (audit round 59): routed through the state-machine
+        // guard — PAUSE is legal exactly from RUNNING / QUEUED,
+        // the same pair this site always checked by hand. The
+        // hand check stays as the outer gate so pausing an
+        // already-paused / finished card stays the silent no-op
+        // it always was, not a counted illegal transition.
         if (task.status == TaskStatus.RUNNING || task.status == TaskStatus.QUEUED) {
-            task.status = TaskStatus.PAUSED
+            StateMachine.commit(task, StateEvent.PAUSE, "pauseTask")
         }
         store.save()
         refreshWidget()
@@ -1937,7 +1981,10 @@ object DownloadCenter {
             // wait restarts here (the interrupted run's wait
             // ended when the process died with it).
             t.queuedAt = System.currentTimeMillis()
-            t.status = TaskStatus.QUEUED
+            // v7.4 (audit round 59): through the guard —
+            // DEATH_RECOVERY is legal exactly from the PAUSED
+            // status Recovery.interrupted filtered for.
+            StateMachine.commit(t, StateEvent.DEATH_RECOVERY, "recoverInterrupted")
             t.error = ""
             t.note = "上次下载被系统中断（重启或进程被杀），已自动重新排队继续。"
         }

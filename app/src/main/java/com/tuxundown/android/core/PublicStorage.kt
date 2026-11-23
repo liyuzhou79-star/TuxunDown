@@ -634,6 +634,44 @@ object PublicStorage {
         return out
     }
 
+    /**
+     * v7.4 (audit round 59, C-2a): the live display name of the
+     * entry at [uriString], or null when no entry provably
+     * exists there. Same two mechanisms the reconcile probes
+     * above use: a MediaStore row query first (0 rows = gone),
+     * then DocumentFile.exists() for providers the query cannot
+     * speak for (SAF). A name is returned ONLY for an entry that
+     * exists — null is the "cannot prove it" answer, never a
+     * guess. Used by the service's orphaned-finalize rescue to
+     * prove a DONE record's ".part" is really still on disk.
+     */
+    fun entryDisplayName(context: Context, uriString: String): String? {
+        val uri = runCatching { Uri.parse(uriString) }.getOrNull() ?: return null
+        val cursor = runCatching {
+            context.contentResolver.query(
+                uri, arrayOf(MediaStore.Downloads.DISPLAY_NAME), null, null, null,
+            )
+        }.getOrNull()
+        if (cursor != null) {
+            cursor.use {
+                return runCatching {
+                    if (!it.moveToFirst()) null
+                    else {
+                        val idx = it.getColumnIndex(MediaStore.Downloads.DISPLAY_NAME)
+                        if (idx >= 0) it.getString(idx) else null
+                    }
+                }.getOrNull()
+            }
+        }
+        val doc = runCatching { DocumentFile.fromSingleUri(context, uri) }.getOrNull()
+            ?: return null
+        return if (runCatching { doc.exists() }.getOrDefault(false)) {
+            runCatching { doc.name }.getOrNull()
+        } else {
+            null
+        }
+    }
+
     private fun probeMediaStoreUri(context: Context, uriString: String): Reconcile.Probe {
         val uri = runCatching { Uri.parse(uriString) }.getOrNull()
             ?: return Reconcile.Probe(Reconcile.Verdict.UNKNOWN)

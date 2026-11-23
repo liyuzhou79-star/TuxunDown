@@ -544,6 +544,12 @@ class DownloadService : Service() {
         ) {
             DownloadCenter.recoverInterrupted()
         }
+        // v7.4 (audit round 59, C-2a): rescue finalizes orphaned
+        // by a death in the hand-off window (see
+        // rescueOrphanedFinalizes). Every service start is the
+        // detection point; the scan is a no-op for healthy
+        // records and must never break a start.
+        runCatching { rescueOrphanedFinalizes() }
         // v3.5: every service start re-points the scheduled-
         // start backup alarm at the earliest future slot (see
         // ScheduleWake) — the catch-all arm point, since every
@@ -1129,7 +1135,17 @@ class DownloadService : Service() {
         try {
             handedOff = runOneClaimed(task)
         } finally {
-            if (!handedOff) DownloadCenter.releaseEngine(task.id)
+            if (!handedOff) {
+                DownloadCenter.releaseEngine(task.id)
+                // v7.4 (audit round 59, C-4): this run is over
+                // WITHOUT a finalize hand-off, so any cancelled
+                // mark it never consumed (loop-head early exits,
+                // a backoff sleep cut short by the record
+                // vanishing) is dropped here — the one exit every
+                // not-handed-off path funnels through. The set
+                // used to keep those ids for the process lifetime.
+                DownloadCenter.discardCancelled(task.id)
+            }
         }
         return handedOff
     }
@@ -1150,7 +1166,13 @@ class DownloadService : Service() {
             // (the retry loop re-enters through its own QUEUED set
             // below); PAUSED here is the user's intent — honour it.
             if (task.status == TaskStatus.PAUSED) return false
-            task.status = TaskStatus.RUNNING
+            // v7.4 (audit round 59): the run claim goes through
+            // the state-machine guard — START is legal only from
+            // QUEUED, which is exactly what every loop entry
+            // (drain pick, backoff re-queue) guarantees; anything
+            // else means another flow took the task meanwhile and
+            // this run steps aside, counted.
+            if (!StateMachine.commit(task, StateEvent.START, "runOne")) return false
             // v2.8: the real run supersedes any pre-check warning —
             // the engine's own probe is about to give the true
             // answer, so the stale flag must not outlive the start.
@@ -1365,12 +1387,15 @@ class DownloadService : Service() {
                 if (NetRetry.shouldDefer(used)) {
                     portalAttempts[task.id] = used + 1
                     task.portalDeferred = true
+                    // v7.4 (audit round 59): the status write
+                    // below goes through the guard (PORTAL_PARK:
+                    // FAILED -> QUEUED, the branch's own condition).
                     // v7.1: the park IS this wait's queue entry —
                     // stamp it; the parked time itself counts as
                     // waiting (the park never touches the stamp
                     // again, and neither does its release).
                     task.queuedAt = System.currentTimeMillis()
-                    task.status = TaskStatus.QUEUED
+                    StateMachine.commit(task, StateEvent.PORTAL_PARK, "portalPark")
                     task.note = "${PortalDetect.PARK_NOTE_PREFIX}" +
                         "（第 ${used + 1}/${NetRetry.MAX_ATTEMPTS} 次等待）"
                     task.error = ""
@@ -1404,7 +1429,7 @@ class DownloadService : Service() {
                     // outage wait is a queue entry, and the parked
                     // time counts toward aging (see QueueOrder).
                     task.queuedAt = System.currentTimeMillis()
-                    task.status = TaskStatus.QUEUED
+                    StateMachine.commit(task, StateEvent.NET_PARK, "netPark")
                     task.note = "网络好像断了，先排队等网络恢复后自动继续" +
                         "（第 ${used + 1}/${NetRetry.MAX_ATTEMPTS} 次）。原因：${task.error}"
                     task.error = ""
@@ -1476,7 +1501,10 @@ class DownloadService : Service() {
             // retry loop: the task never released its claim (the
             // drain excludes it by id), so its current wait
             // never broke and must not restart (see QueueOrder).
-            task.status = TaskStatus.QUEUED
+            // v7.4 (audit round 59): through the guard
+            // (BACKOFF_REQUEUE: FAILED -> QUEUED — the guard
+            // above already established the FAILED status).
+            StateMachine.commit(task, StateEvent.BACKOFF_REQUEUE, "backoffRequeue")
             task.error = ""
         }
     }
@@ -1554,13 +1582,70 @@ class DownloadService : Service() {
         // max(queuedAt, scheduledAt), so the aging wait only
         // accrues from tomorrow's slot, not from tonight.
         task.queuedAt = System.currentTimeMillis()
-        task.status = TaskStatus.QUEUED
+        // v7.4 (audit round 59): through the guard — the daily
+        // re-queue is the ONE legal DONE -> QUEUED cell (RETRY),
+        // and it never passes the enqueue funnel.
+        StateMachine.commit(task, StateEvent.RETRY, "dailyRequeue")
         task.note = "每天定时：已排到下一次 ${Format.clockTime(next)} 开始。" +
             "上一次的文件已保存在下载目录里（重名时会自动改成带 (1) 的名字）。"
         store.saveNow()
         // v3.5: the slot just moved a day out — re-point the
         // backup alarm at it (see ScheduleWake).
         ScheduleWake.arm(this, store.tasks)
+    }
+
+    /**
+     * v7.4 (audit round 59, C-2a): re-submit orphaned finalizes.
+     *
+     * DONE is persisted BEFORE the finalize lane renames the
+     * .part (the hand-off in runOneClaimed saves the DONE status
+     * with the record, the lane fills savedUri only at the end
+     * of finalizeTarget). A process death inside that window
+     * used to strand the task forever: DONE on the card, no
+     * saved file, bytes sitting under a ".part" name, and no
+     * path that ever re-runs finalize for a DONE record.
+     *
+     * Detection is [FinalizeRescue.needsRescue] over live facts:
+     * the record's status / savedUri / targetUri plus the .part
+     * entry's provable existence and live display name (see
+     * PublicStorage.entryDisplayName — the same query /
+     * DocumentFile mechanisms finalize and reconcile use). A
+     * record whose .part cannot be PROVEN present is left
+     * strictly alone: that is reconcile / ghost territory.
+     *
+     * A rescued task re-enters through the exact discipline of
+     * a normal hand-off: the engine claim is taken first (a
+     * live owner means this is not an orphan at all), then
+     * [submitFinalize] marks the FinalizeGate and queues the
+     * lane, which releases gate + claim at its end. Idempotent:
+     * a second start finds savedUri filled (no longer a
+     * candidate), a claimed / already-pending task is skipped,
+     * and the lane's milestones tolerate the record vanishing.
+     */
+    private fun rescueOrphanedFinalizes() {
+        val store = DownloadCenter.store
+        for (task in store.tasks.toList()) {
+            if (task.status != TaskStatus.DONE || task.savedUri.isNotBlank() ||
+                task.targetUri.isBlank()
+            ) {
+                continue
+            }
+            val partName = PublicStorage.entryDisplayName(this, task.targetUri)
+            if (!FinalizeRescue.needsRescue(
+                    status = task.status,
+                    savedUri = task.savedUri,
+                    targetUri = task.targetUri,
+                    partEntryExists = partName != null,
+                    partDisplayName = partName,
+                )
+            ) {
+                continue
+            }
+            if (!DownloadCenter.claimEngine(task.id)) continue
+            if (!submitFinalize(task)) {
+                DownloadCenter.releaseEngine(task.id)
+            }
+        }
     }
 
     /** Sleep in small slices; false if the task vanished meanwhile. */
