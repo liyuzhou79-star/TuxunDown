@@ -168,6 +168,62 @@ class DownloadEngine(
      *  default network and [extraOpener] when one was supplied. */
     private val openerFlip = AtomicInteger(0)
 
+    /**
+     * v6.6 (audit round 51): this run's in-flight connections
+     * (see InFlightConnections). Every connection registers in
+     * [openFollowingRedirects] — the one opening throat — and
+     * unregisters at its end of life through [dropConnection] /
+     * [settleConnection] / [releaseConnection]; FTP sessions
+     * register where they are created and unregister where they
+     * are closed.
+     */
+    private val inFlight = InFlightConnections()
+
+    /**
+     * v6.6 (audit round 51): cut every connection this run has
+     * in flight — the service calls this when the tracked
+     * DEFAULT network is lost (LostNetworkJudge's verdict).
+     * Each blocked read wakes with a SocketException and takes
+     * the path it always took: a chunk retries from the offset
+     * already written (on whatever network is default then), a
+     * failed run records its usual FailureKind / NetRetry
+     * verdict and parks. This only makes the discovery
+     * immediate instead of waiting out the 30 s read timeout;
+     * it creates no recovery path and changes no verdict.
+     * Best-effort and idempotent: the registry drains first,
+     * so a second call cuts nothing, and a connection the
+     * stall sampler already disconnected is no longer
+     * registered (disconnecting twice would be harmless
+     * anyway). FTP sessions get abortTransfer() — the sampler's
+     * own eviction action: the data socket closes and the
+     * worker wakes, the control channel is left alone.
+     */
+    fun failInFlightOnNetworkLost() {
+        for (c in inFlight.drainHttp()) runCatching { c.disconnect() }
+        for (f in inFlight.drainFtp()) runCatching { f.abortTransfer() }
+    }
+
+    /**
+     * v6.6: end of life for one registered connection that is
+     * NOT reusable — unregister, then disconnect (the action
+     * every call site used to inline as a bare disconnect()).
+     */
+    private fun dropConnection(c: HttpURLConnection) {
+        inFlight.unregister(c)
+        runCatching { c.disconnect() }
+    }
+
+    /**
+     * v6.6: end of life for one registered connection whose
+     * body may have been read to its exact end — consumed means
+     * the stream close already returned the socket to the
+     * keep-alive pool, so only the unregister remains; anything
+     * cut short is dropped like any other dead connection.
+     */
+    private fun settleConnection(c: HttpURLConnection, consumed: Boolean) {
+        if (consumed) inFlight.unregister(c) else dropConnection(c)
+    }
+
     /** v1.6 multi-source: primary + validated mirrors for this run. */
     @Volatile private var activeSources: List<String> = listOf(task.url)
 
@@ -545,7 +601,7 @@ class DownloadEngine(
                     if (c.responseCode == HttpURLConnection.HTTP_PARTIAL) {
                         releaseConnection(c)
                     } else {
-                        runCatching { c.disconnect() }
+                        dropConnection(c)
                     }
                 }
             } finally {
@@ -569,6 +625,11 @@ class DownloadEngine(
      * disconnected as before. Every call is best-effort.
      */
     private fun releaseConnection(c: HttpURLConnection, drainCap: Int = 4096) {
+        // v6.6: the engine is done with this connection either
+        // way (pooled below, or disconnected) — unregister first
+        // so a network-lost fast-fail can never cut a socket the
+        // keep-alive pool may hand to a later request.
+        inFlight.unregister(c)
         val reusable = runCatching {
             val input = c.inputStream
             val buf = ByteArray(1024)
@@ -658,6 +719,14 @@ class DownloadEngine(
             } else {
                 openDefault(hopUrl)
             }
+            // v6.6: every connection this engine opens passes
+            // through here — register it for the network-lost
+            // fast-fail (see InFlightConnections). Redirect hops
+            // and the connect-failure exit below unregister via
+            // dropConnection; a connection that returns to the
+            // caller stays registered until the caller's own
+            // end-of-life call.
+            inFlight.register(c)
             c.connectTimeout = 15_000
             c.readTimeout = 30_000
             c.instanceFollowRedirects = false
@@ -717,7 +786,7 @@ class DownloadEngine(
             val code = try {
                 c.responseCode
             } catch (e: java.io.IOException) {
-                runCatching { c.disconnect() }
+                dropConnection(c)
                 if (proxySettings.active) {
                     throw IllegalStateException(
                         ProxySettings.unreachableMessage(proxySettings, e)
@@ -727,7 +796,7 @@ class DownloadEngine(
             }
             if (code in 301..303 || code == 307 || code == 308) {
                 val loc = c.getHeaderField("Location")
-                c.disconnect()
+                dropConnection(c)
                 if (loc.isNullOrBlank()) {
                     throw IllegalStateException("服务器跳转但没给新地址，已停下")
                 }
@@ -747,7 +816,7 @@ class DownloadEngine(
         val code = c.responseCode
         val contentType = c.getHeaderField("Content-Type") ?: ""
         if (PortalDetect.isHtmlContentType(contentType)) {
-            c.disconnect()
+            dropConnection(c)
             // v4.4 (audit round 29): the shared portal signal —
             // on an unvalidated network the service parks this
             // as a WiFi-login wait; on a validated one it fails
@@ -787,10 +856,10 @@ class DownloadEngine(
                 task.singleThreadOnly = true
                 task.note = "服务器不支持分片下载（Range），已用单线程下载，无法加速。"
                 // The body is the whole file; not drainable.
-                c.disconnect()
+                dropConnection(c)
             }
             else -> {
-                c.disconnect()
+                dropConnection(c)
                 throw HttpFailureException(code)
             }
         }
@@ -869,7 +938,7 @@ class DownloadEngine(
             if (c.responseCode == HttpURLConnection.HTTP_PARTIAL) {
                 releaseConnection(c)
             } else {
-                c.disconnect()
+                dropConnection(c)
             }
         }
     }
@@ -1053,7 +1122,7 @@ class DownloadEngine(
                             }
                         }
                     }
-                    for (conn in stalled) runCatching { conn.disconnect() }
+                    for (conn in stalled) dropConnection(conn)
                 }
                 // Every 2 s the ThreadScaler re-decides the worker
                 // count (v2.3): opening ladder first, then steady
@@ -1461,7 +1530,7 @@ class DownloadEngine(
         } catch (e: Exception) {
             return null
         } finally {
-            if (!consumed) runCatching { c.disconnect() }
+            settleConnection(c, consumed)
         }
     }
 
@@ -1802,7 +1871,7 @@ class DownloadEngine(
         // those bytes are NEVER written; name the cause
         // properly so the service can park instead of failing.
         if (PortalDetect.isHtmlContentType(c.getHeaderField("Content-Type"))) {
-            c.disconnect()
+            dropConnection(c)
             throw PortalBlockedException()
         }
         // v2.8: rate-limit evidence — PRIMARY source only (the
@@ -1820,11 +1889,11 @@ class DownloadEngine(
         }
         if (code == HttpURLConnection.HTTP_OK) {
             // Server ignored Range mid-download: cannot segment safely.
-            c.disconnect()
+            dropConnection(c)
             throw IllegalStateException("服务器不支持 Range")
         }
         if (code != HttpURLConnection.HTTP_PARTIAL) {
-            c.disconnect()
+            dropConnection(c)
             throw HttpFailureException(code)
         }
         // A redirect chain that lands on a different byte range than
@@ -1838,7 +1907,7 @@ class DownloadEngine(
         // those, and -1 != from condemns, exactly how the
         // single-stream path has always judged its own 206.
         if (contentRangeStart(cr) != from) {
-            c.disconnect()
+            dropConnection(c)
             throw IllegalStateException("服务器返回的分片位置不对，已重试")
         }
         // v2.4 audit round 10: bind this response to the file the
@@ -1852,7 +1921,7 @@ class DownloadEngine(
         // totals were validated equal before use.
         val crTotal = contentRangeTotal(cr)
         if (crTotal > 0 && task.totalSize > 0 && crTotal != task.totalSize) {
-            c.disconnect()
+            dropConnection(c)
             throw IllegalStateException("服务器上的文件在下载途中变了（大小对不上），已停下重试")
         }
         // Same binding via a strong ETag — PRIMARY source only.
@@ -1865,7 +1934,7 @@ class DownloadEngine(
         if (sourceUrl == task.url) {
             val respEtag = c.getHeaderField("ETag") ?: ""
             if (etagChanged(task.etag, respEtag)) {
-                c.disconnect()
+                dropConnection(c)
                 throw IllegalStateException("服务器上的文件在下载途中变了（校验标记对不上），已停下重试")
             }
         }
@@ -1927,7 +1996,7 @@ class DownloadEngine(
             // leak discipline); only the disconnect is now
             // conditional on the body not having been consumed.
             runCatching { input?.close() }
-            if (!consumed) runCatching { c.disconnect() }
+            settleConnection(c, consumed)
             if (ac.connection == c) ac.connection = null
         }
     }
@@ -2000,7 +2069,7 @@ class DownloadEngine(
             }
             return text
         } finally {
-            if (!consumed) runCatching { c.disconnect() }
+            settleConnection(c, consumed)
         }
     }
 
@@ -2062,7 +2131,7 @@ class DownloadEngine(
             }
             return data
         } finally {
-            if (!consumed) runCatching { c.disconnect() }
+            settleConnection(c, consumed)
         }
     }
 
@@ -2583,6 +2652,10 @@ class DownloadEngine(
             task.fileName = fileNameFrom(null, task.url)
         }
         val probe = FtpClient()
+        // v6.6: registered for the network-lost fast-fail like
+        // every other live session (unregistered in the finally
+        // below, where it is closed).
+        inFlight.registerFtp(probe)
         try {
             probe.connect(ftp.host, ftp.port)
             probe.login(ftp.user, ftp.password)
@@ -2635,6 +2708,11 @@ class DownloadEngine(
             // v4.8 ruling: the probe session closes BEFORE the
             // workers start — it must not hold one of the server's
             // sessions while the run tries to open its own.
+            // v6.6: unregistered at the same moment, so it is
+            // never in the fast-fail registry while the workers'
+            // own sessions run (the finally's unregister is the
+            // idempotent backstop for the early-return paths).
+            inFlight.unregisterFtp(probe)
             runCatching { probe.close() }
             if (block == null) {
                 return runFtpSegmented(ftp, total, serverChanged)
@@ -2658,6 +2736,7 @@ class DownloadEngine(
             // Idempotent: the explicit close above already ran on
             // the decide path; this covers the guard early-returns
             // and probe failures.
+            inFlight.unregisterFtp(probe)
             runCatching { probe.close() }
         }
     }
@@ -2679,6 +2758,9 @@ class DownloadEngine(
     ): TaskStatus {
         task.singleThreadOnly = true
         val client = FtpClient()
+        // v6.6: registered for the network-lost fast-fail
+        // (unregistered in the finally below, where it closes).
+        inFlight.registerFtp(client)
         // Speed sampler on the same fixed 1 s grid as the other
         // paths (single source for card, chart and notification).
         val stopSampler = AtomicInteger(0)
@@ -2787,6 +2869,7 @@ class DownloadEngine(
         } finally {
             stopSampler.set(1)
             runCatching { sampler.join(1500) }
+            inFlight.unregisterFtp(client)
             runCatching { client.close() }
             if (::target.isInitialized) runCatching { target.close() }
             task.speedBps = 0
@@ -3093,6 +3176,11 @@ class DownloadEngine(
             runCatching { c.close() }
             throw e
         }
+        // v6.6: registered for the network-lost fast-fail once
+        // the session is live; the owning worker unregisters it
+        // where it closes the session (its finally, or the
+        // controlDead drop in the attempt loop).
+        inFlight.registerFtp(c)
         return c
     }
 
@@ -3187,6 +3275,7 @@ class DownloadEngine(
                                 // The control channel desynced —
                                 // drop the session; the next
                                 // attempt reconnects.
+                                inFlight.unregisterFtp(c)
                                 runCatching { c.close() }
                                 if (client === c) client = null
                                 part.client = null
@@ -3216,6 +3305,7 @@ class DownloadEngine(
                 if (retired) break
             }
         } finally {
+            client?.let { inFlight.unregisterFtp(it) }
             runCatching { client?.close() }
         }
     }
@@ -3288,7 +3378,7 @@ class DownloadEngine(
             // first block when the total is unknown (a portal
             // that lies about its Content-Type too).
             if (PortalDetect.isHtmlContentType(c.getHeaderField("Content-Type"))) {
-                c.disconnect()
+                dropConnection(c)
                 throw PortalBlockedException()
             }
             // v2.4 audit round 10: this GET is a SECOND request —
@@ -3304,13 +3394,13 @@ class DownloadEngine(
             if (code == HttpURLConnection.HTTP_PARTIAL) {
                 val cr = c.getHeaderField("Content-Range") ?: ""
                 if (contentRangeStart(cr) != 0L) {
-                    c.disconnect()
+                    dropConnection(c)
                     throw IllegalStateException("服务器返回的分片位置不对，已停下")
                 }
                 val crTotal = contentRangeTotal(cr)
                 if (crTotal > 0) {
                     if (task.totalSize > 0 && crTotal != task.totalSize) {
-                        c.disconnect()
+                        dropConnection(c)
                         throw IllegalStateException(Notes.fileChangedSize())
                     }
                     task.totalSize = crTotal
@@ -3319,14 +3409,14 @@ class DownloadEngine(
                 val len = c.contentLengthLong
                 if (len > 0) {
                     if (task.totalSize > 0 && len != task.totalSize) {
-                        c.disconnect()
+                        dropConnection(c)
                         throw IllegalStateException(Notes.fileChangedSize())
                     }
                     task.totalSize = len
                 }
                 val respEtag = c.getHeaderField("ETag") ?: ""
                 if (etagChanged(task.etag, respEtag)) {
-                    c.disconnect()
+                    dropConnection(c)
                     throw IllegalStateException(Notes.fileChangedValidator())
                 }
             }
@@ -3355,7 +3445,7 @@ class DownloadEngine(
                             if (task.totalSize <= 0 &&
                                 PortalDetect.looksLikeHtml(buf, n)
                             ) {
-                                c.disconnect()
+                                dropConnection(c)
                                 throw PortalBlockedException()
                             }
                         }
@@ -3380,7 +3470,7 @@ class DownloadEngine(
             }
             // v1.8: the stream ran to its end unstopped — seal it.
             if (!stopped()) runCatching { target.sync() }
-            if (!eof) c.disconnect()
+            settleConnection(c, eof)
         } finally {
             stopSampler.set(1)
             sampler.join(1500)

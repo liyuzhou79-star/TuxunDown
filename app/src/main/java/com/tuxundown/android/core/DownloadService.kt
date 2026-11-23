@@ -370,11 +370,47 @@ class DownloadService : Service() {
         setDualActive(false)
     }
 
+    /**
+     * v6.6 (audit round 51): the main callback's default-network
+     * tracking for its onLost fast-fail. The judge itself is
+     * pure (see LostNetworkJudge); the service only maps each
+     * Network to an opaque key and resolves WHICH network is
+     * the default. Keys are assigned per distinct Network for
+     * this service instance's lifetime (a handful of networks —
+     * the map stays tiny). Network equality is netId-based; if
+     * two objects for one network ever keyed differently, the
+     * failure direction is conservative (the loss does not
+     * match the tracked key, so no fast-fail), never a misfire.
+     */
+    private val lostNetworkJudge = LostNetworkJudge()
+    private val networkKeys = java.util.HashMap<Network, String>()
+    private var networkKeySeq = 0
+
+    private fun networkKey(network: Network): String =
+        synchronized(networkKeys) {
+            networkKeys.getOrPut(network) { "net${++networkKeySeq}" }
+        }
+
+    /**
+     * v6.6: remember the CURRENT default network. Resolved via
+     * activeNetwork, never from a callback's own argument —
+     * this callback is registered with an empty request, so it
+     * fires for EVERY network (cellular and VPN included), and
+     * only the default's identity may arm the fast-fail.
+     */
+    private fun noteDefaultNetwork(cm: ConnectivityManager) {
+        val active = runCatching { cm.activeNetwork }.getOrNull() ?: return
+        lostNetworkJudge.noteDefault(networkKey(active))
+    }
+
     private fun registerNetworkCallback() {
         runCatching {
             val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
             val cb = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
+                    // v6.6: track the default network's identity
+                    // for onLost (see noteDefaultNetwork).
+                    noteDefaultNetwork(cm)
                     // Connectivity is back: un-park every task that
                     // was deferred by an outage and make sure the
                     // drain loop is running to pick them up.
@@ -402,6 +438,10 @@ class DownloadService : Service() {
                     network: Network,
                     caps: android.net.NetworkCapabilities,
                 ) {
+                    // v6.6: same default tracking as onAvailable
+                    // (identity does not depend on validation, so
+                    // this runs before the VALIDATED gate below).
+                    noteDefaultNetwork(cm)
                     if (!caps.hasCapability(
                             android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED
                         )
@@ -410,6 +450,33 @@ class DownloadService : Service() {
                         DownloadCenter.store.save()
                         drainWake.signal()
                         ensureWorker()
+                    }
+                }
+
+                // v6.6 (audit round 51): fast-fail on default
+                // network loss. Until now this callback had NO
+                // onLost: a connection whose network died
+                // mid-read was discovered passively — the 30 s
+                // read timeout, or the stall sampler's eviction
+                // on the chunked path (which never evicts a lone
+                // connection, and does not exist at all on the
+                // single-stream / HLS / FTP-single paths). Now,
+                // when the lost network IS the tracked default
+                // (LostNetworkJudge's conservative verdict —
+                // cellular-leg, VPN and unknown losses never
+                // fire; the cellular leg has its own callback
+                // above), every running engine cuts its
+                // in-flight connections at once. The blocked
+                // reads wake with a SocketException and flow
+                // through the EXISTING machinery unchanged —
+                // chunk retry from the written offset (rebinding
+                // whatever network is default then), or the
+                // run's FailureKind / NetRetry verdict into a
+                // park. No new recovery path is created here.
+                override fun onLost(network: Network) {
+                    if (!lostNetworkJudge.onLost(networkKey(network))) return
+                    for (engine in DownloadCenter.runningEngines()) {
+                        runCatching { engine.failInFlightOnNetworkLost() }
                     }
                 }
             }

@@ -1659,6 +1659,16 @@ object DownloadCenter {
         engines.remove(task.id)
     }
 
+    /**
+     * v6.6 (audit round 51): a snapshot of the engines running
+     * right now — the service's default-network-lost fast-fail
+     * walks it (see DownloadService's main network callback).
+     * A copy, so the caller iterates without holding this
+     * object's monitor while it cuts connections.
+     */
+    @Synchronized
+    fun runningEngines(): List<DownloadEngine> = engines.values.toList()
+
     fun pauseTask(task: TaskRecord) {
         synchronized(this) { engines[task.id] }?.pause()
         if (task.status == TaskStatus.RUNNING || task.status == TaskStatus.QUEUED) {
