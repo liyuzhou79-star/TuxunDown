@@ -30,13 +30,14 @@ class QueuePreheatTest {
         onWifi: Boolean = true,
         dualActive: Boolean = false,
         trafficProtectionOn: Boolean = false,
+        chargeParked: Boolean = false,
         proxyActive: Boolean = false,
         alreadyWarmed: Set<String> = emptySet(),
         inFlightKey: String? = null,
         now: Long = 1_000,
     ) = QueuePreheat.decide(
         tasks, now, onWifi, dualActive, trafficProtectionOn,
-        proxyActive, alreadyWarmed, inFlightKey,
+        chargeParked, proxyActive, alreadyWarmed, inFlightKey,
     )
 
     // ---- happy path & target selection ----
@@ -137,6 +138,45 @@ class QueuePreheatTest {
         assertNull(
             decide(tasks, onWifi = false, dualActive = true, trafficProtectionOn = true),
         )
+    }
+
+    // ---- guard: charge park vetoes outright (v5.0, round 35) ----
+
+    @Test
+    fun chargeParkedVetoesEvenOnWifi() {
+        // While the 充电时才下载 gate is closed no queued task
+        // can start at all, so a warmed connection could only
+        // expire unused — the live service-side condition
+        // vetoes, whatever the network, whatever the flags on
+        // the individual tasks.
+        val tasks = listOf(task(TaskStatus.RUNNING), task(TaskStatus.QUEUED))
+        assertNull(decide(tasks, onWifi = true, chargeParked = true))
+        assertNull(
+            decide(tasks, onWifi = false, dualActive = true, chargeParked = true),
+        )
+        // Power back (gate open): preheat resumes judging the
+        // queue exactly as before.
+        assertTrue(decide(tasks, onWifi = true, chargeParked = false) != null)
+    }
+
+    @Test
+    fun netAndPortalParkedTasksAreNotPreheatTargets() {
+        // Round 35, other half of the park family: net /
+        // portal parks are excluded by QueueOrder.nextEligible
+        // itself, so the preheat target skips straight past a
+        // parked task to the next one actually in line.
+        val running = task(TaskStatus.RUNNING)
+        val netParked = task(TaskStatus.QUEUED, "https://np.example.com/f")
+            .apply { netDeferred = true }
+        val portalParked = task(TaskStatus.QUEUED, "https://pp.example.com/f")
+            .apply { portalDeferred = true }
+        val waiting = task(TaskStatus.QUEUED, "https://w.example.com/f")
+        assertEquals(
+            waiting.id,
+            decide(listOf(running, netParked, portalParked, waiting))!!.taskId,
+        )
+        // And when ONLY parked tasks wait, there is no target.
+        assertNull(decide(listOf(running, netParked, portalParked)))
     }
 
     // ---- guard: proxy skips ----

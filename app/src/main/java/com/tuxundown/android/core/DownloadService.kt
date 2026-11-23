@@ -844,6 +844,14 @@ class DownloadService : Service() {
             // Traffic protection is ON exactly when a threshold
             // is set (DownloadCenter.trafficThresholdMB: 0 = off).
             trafficProtectionOn = DownloadCenter.trafficThresholdMB > 0,
+            // v5.0 (audit round 35): the charge park as a LIVE
+            // condition (same pair the drain's charge gate
+            // judges) — while it holds, no queued task can
+            // start, so warming one would only waste battery.
+            chargeParked = ChargeGuard.shouldPark(
+                DownloadCenter.chargeOnlyDownload,
+                runCatching { DownloadCenter.isCharging() }.getOrDefault(true),
+            ),
             proxyActive = DownloadCenter.proxySettings().active,
             alreadyWarmed = warmedKeys,
             inFlightKey = preheatInFlight,

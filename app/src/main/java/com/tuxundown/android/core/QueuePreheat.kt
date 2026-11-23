@@ -22,13 +22,17 @@ package com.tuxundown.android.core
  *   and integrity checks are never skipped or pre-answered.
  * - It is NOT a start decision. The target task's own gates
  *   （仅 WiFi switch, its per-task traffic-guard verdict,
- *   charge / schedule gates) are deliberately NOT inputs here:
+ *   schedule gates) are deliberately NOT inputs here:
  *   preheating spends no file bytes, and when the task really
  *   starts every gate judges again as usual. Queue ELIGIBILITY
  *   is the one queue-side input, and only because it defines
  *   WHICH task is "first in line" ([QueueOrder.nextEligible]
  *   order — priority first, FIFO within a tier, deferred /
- *   not-yet-due tasks are not in line at all).
+ *   not-yet-due tasks are not in line at all). The one global
+ *   gate that IS an input is the charge park (see the guard
+ *   list below): it vetoes preheating altogether, not because
+ *   it judges the task, but because while it is closed NO
+ *   queued task can start at all (v5.0, audit round 35).
  *
  * Guards (each one is a parameter, each one vetoes):
  * - No RUNNING task -> no preheat. With nobody downloading,
@@ -42,6 +46,20 @@ package com.tuxundown.android.core
  *   outright, whatever the network: the user asked for mobile
  *   data to be guarded, and an optimisation does not get to
  *   spend any of it on a task that has not started.
+ * - Charge park ACTIVE (v5.0, audit round 35): the 充电时才下载
+ *   gate is currently closed (switch on, no power) -> never.
+ *   No queued task can start while the gate is closed — the
+ *   drain marks the picked task chargeDeferred and breaks —
+ *   so a warm connection could only sit in the pool until it
+ *   expires, spending exactly the battery the switch exists
+ *   to save. This is a LIVE service-side condition, not the
+ *   task's chargeDeferred flag: the flag can be stale-true
+ *   after power returns (it clears only when the drain next
+ *   picks the task), and a queued task the drain never got to
+ *   pick (slots full) carries no flag at all while the gate
+ *   is just as closed. Net / portal parks need no such
+ *   parameter: QueueOrder.nextEligible already excludes
+ *   netDeferred / portalDeferred candidates outright.
  * - Proxy active -> never (Warmup's standing rule: behind a
  *   proxy, resolution happens on the proxy side, and a direct
  *   warm connection would break the v1.9 never-go-direct rule).
@@ -91,6 +109,7 @@ object QueuePreheat {
         onWifi: Boolean,
         dualActive: Boolean,
         trafficProtectionOn: Boolean,
+        chargeParked: Boolean,
         proxyActive: Boolean,
         alreadyWarmed: Set<String>,
         inFlightKey: String?,
@@ -101,6 +120,10 @@ object QueuePreheat {
         if (!onWifi && !dualActive) return null
         // Traffic protection vetoes outright.
         if (trafficProtectionOn) return null
+        // Charge park vetoes outright (see class doc): while
+        // the gate is closed no queued task can start, so a
+        // warmed connection would only expire unused.
+        if (chargeParked) return null
         // Proxy guard (also enforced again by hostToPreResolve).
         if (proxyActive) return null
         // Exactly one preheat at a time.
