@@ -124,4 +124,33 @@ class FailureNotifyTest {
             FailureNotify.singleBody(item),
         )
     }
+
+    // ---- v7.5 (audit round 60, Step C): prune on record deletion ----
+
+    @Test
+    fun pruneRemovesOnlyTheDeletedTasksEntry() {
+        var list = emptyList<FailureNotify.Failed>()
+        list = FailureNotify.add(list, failed("a.zip", 0), 0)
+        list = FailureNotify.add(list, failed("b.zip", 1_000), 1_000)
+        list = FailureNotify.add(list, failed("c.zip", 2_000), 2_000)
+        val pruned = FailureNotify.prune(list, setOf("id-b.zip"))
+        assertEquals(listOf("a.zip", "c.zip"), pruned.map { it.name })
+    }
+
+    @Test
+    fun pruneCanEmptyTheListSoTheNotificationCanBeCancelled() {
+        // The service cancels the failure notification exactly
+        // when this prune leaves nothing behind.
+        var list = emptyList<FailureNotify.Failed>()
+        list = FailureNotify.add(list, failed("a.zip", 0), 0)
+        assertTrue(FailureNotify.prune(list, setOf("id-a.zip")).isEmpty())
+    }
+
+    @Test
+    fun pruneWithUnknownIdsIsANoOp() {
+        var list = emptyList<FailureNotify.Failed>()
+        list = FailureNotify.add(list, failed("a.zip", 0), 0)
+        assertEquals(list, FailureNotify.prune(list, setOf("id-zzz")))
+        assertEquals(list, FailureNotify.prune(list, emptySet()))
+    }
 }

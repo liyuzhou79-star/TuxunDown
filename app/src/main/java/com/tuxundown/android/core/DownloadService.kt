@@ -52,18 +52,10 @@ class DownloadService : Service() {
      *  callbacks when they release parked tasks. */
     private val drainWake = DrainWakeSignal()
 
-    /** v2.5: recent completions, for the merge window (see
-     *  CompletionMerge). Guarded by [completionLock]. */
-    private val completionLock = Object()
-    private var recentCompletions: List<CompletionMerge.Done> = emptyList()
-
-    /** v6.8: recent FINAL failures, for the merge window (see
-     *  FailureNotify). Its own list + lock, mirroring the
-     *  completions pair above — failures and completions merge
-     *  separately and post under separate notification ids, so
-     *  neither summary can erase the other. */
-    private val failureLock = Object()
-    private var recentFailures: List<FailureNotify.Failed> = emptyList()
+    // v2.5 / v6.8: the recent-completions and recent-failures
+    // merge lists live in the companion object (see there) —
+    // v7.5 moved them so a record deletion elsewhere in this
+    // process can prune them through onRecordsDeleted.
 
     /**
      * v2.1 audit (round 7, C1): start the ONE drain loop, atomically.
@@ -2012,7 +2004,9 @@ class DownloadService : Service() {
             synchronized(completionLock) {
                 recentCompletions = CompletionMerge.add(
                     recentCompletions,
-                    CompletionMerge.Done(displayName, task.savedUri, now, sizeBytes),
+                    CompletionMerge.Done(
+                        displayName, task.savedUri, now, sizeBytes, task.id,
+                    ),
                     now,
                 )
                 merged = recentCompletions
@@ -2417,6 +2411,70 @@ class DownloadService : Service() {
         // code 3 in actionPendingIntent — 1 pause / 2 cancel /
         // 101 / 102 completion actions are the codes in use).
         const val ACTION_RETRY = "com.tuxundown.android.action.RETRY_TASK"
+
+        /** v2.5: recent completions, for the merge window (see
+         *  CompletionMerge). Guarded by [completionLock].
+         *  v7.5: held on the companion (process scope, like the
+         *  service's own lifetime in practice) so
+         *  [onRecordsDeleted] can prune entries whose record
+         *  was deleted from the UI side of this same process —
+         *  no IPC, just the one in-process list. */
+        private val completionLock = Object()
+        private var recentCompletions: List<CompletionMerge.Done> = emptyList()
+
+        /** v6.8: recent FINAL failures, for the merge window
+         *  (see FailureNotify). Its own list + lock, mirroring
+         *  the completions pair — failures and completions
+         *  merge separately and post under separate
+         *  notification ids, so neither summary can erase the
+         *  other. Guarded by [failureLock]. */
+        private val failureLock = Object()
+        private var recentFailures: List<FailureNotify.Failed> = emptyList()
+
+        /**
+         * v7.5 (audit round 60, Step C): the notification-
+         * residue收口 for record deletion. Called (through
+         * DownloadCenter.onRecordsRemoved) by every UI path
+         * that removes task records in this process:
+         *
+         * - entries for the deleted ids are pruned from both
+         *   merge lists, so a later merged summary never names
+         *   a task the user already removed;
+         * - when the prune empties the failure list, the
+         *   failure notification (FAIL_NOTIF_ID) is cancelled
+         *   outright — before this, deleting the last FAILED
+         *   record left the notification standing with a 重试
+         *   action whose byId lookup found nothing (a silent
+         *   dead button). The completion notification is NOT
+         *   cancelled: deleting a DONE record keeps the file,
+         *   and the completion card's 打开/分享 still work —
+         *   only its merge-list entry goes.
+         *
+         * Best-effort by design (runCatching): a notification
+         * bookkeeping failure must never fail the deletion
+         * itself, which has already happened by the time this
+         * runs.
+         */
+        fun onRecordsDeleted(context: Context, taskIds: Set<String>) {
+            if (taskIds.isEmpty()) return
+            runCatching {
+                var failureEmptied = false
+                synchronized(failureLock) {
+                    val pruned = FailureNotify.prune(recentFailures, taskIds)
+                    failureEmptied =
+                        pruned.size < recentFailures.size && pruned.isEmpty()
+                    recentFailures = pruned
+                }
+                synchronized(completionLock) {
+                    recentCompletions =
+                        CompletionMerge.prune(recentCompletions, taskIds)
+                }
+                if (failureEmptied) {
+                    context.getSystemService(NotificationManager::class.java)
+                        ?.cancel(FAIL_NOTIF_ID)
+                }
+            }
+        }
         // v2.6: explicit start from BootReceiver (setting-gated there
         // and re-checked in onStartCommand).
         const val ACTION_BOOT_RESUME = "com.tuxundown.android.action.BOOT_RESUME"

@@ -26,12 +26,28 @@ object CompletionMerge {
          *  Only used for the summary's total — see
          *  [totalSizeBytes] for the honesty rule. */
         val sizeBytes: Long = -1,
+        /** v7.5: the finished task's record id, so deleting
+         *  that record can prune this entry (see [prune]).
+         *  Blank for entries built without one — those are
+         *  never pruned by id. */
+        val taskId: String = "",
     )
 
     /** Append [item], dropping entries that fell out of the
      *  window. Order is completion order. */
     fun add(list: List<Done>, item: Done, nowMs: Long): List<Done> =
         list.filter { nowMs - it.atMs <= WINDOW_MS } + item
+
+    /**
+     * v7.5 (audit round 60, Step C): drop the entries whose
+     * task record was just deleted. A merged summary built
+     * from this list must never name a task the user already
+     * removed. Entries with a blank [Done.taskId] predate the
+     * id and are kept — pruning them by name would risk
+     * removing a different task's entry.
+     */
+    fun prune(list: List<Done>, taskIds: Set<String>): List<Done> =
+        list.filter { it.taskId.isEmpty() || it.taskId !in taskIds }
 
     fun isMerged(list: List<Done>): Boolean = list.size >= 2
 

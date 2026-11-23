@@ -781,7 +781,26 @@ object DownloadCenter {
             ctx, "tuxundown-backup-before-cleanup-$stamp.json", backupText,
         )
         store.removeAll(victims)
+        onRecordsRemoved(victims)
         return victims.size to backupName
+    }
+
+    /**
+     * v7.5 (audit round 60, Step C): the ONE funnel every UI
+     * record-deletion path reports through AFTER the records
+     * are gone (MainActivity.deleteTask, this cleanup, the
+     * downloaded-files page, duplicate deletion, reconcile
+     * dispositions). It hands the removed ids to
+     * [DownloadService.onRecordsDeleted], which prunes the
+     * notification merge lists and cancels the failure
+     * notification when its last entry goes — same process,
+     * direct call, no new IPC. No-ops until [init] has run
+     * (no context, nothing to cancel through).
+     */
+    fun onRecordsRemoved(removed: List<TaskRecord>) {
+        if (removed.isEmpty()) return
+        val ctx = appContext ?: return
+        DownloadService.onRecordsDeleted(ctx, removed.map { it.id }.toSet())
     }
 
     // ---- v1.9: download proxy (engine + sniffer; ProxySettings) ----

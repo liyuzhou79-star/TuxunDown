@@ -63,7 +63,20 @@ class DownloadTileService : TileService() {
                 }
                 BulkControl.Action.NONE -> {
                     tile.state = Tile.STATE_INACTIVE
-                    tile.subtitle = "没有进行中的任务"
+                    // v7.5 (audit round 60, Step C): the
+                    // finalize window is not "nothing in
+                    // progress" — a DONE record whose savedUri
+                    // has not landed is still being renamed /
+                    // verified / extracted (see Finalizing,
+                    // the same derivation the widget uses).
+                    // The tile reads the store snapshot it
+                    // already took above; refresh triggers are
+                    // unchanged (panel open / tap).
+                    tile.subtitle = if (Finalizing.anyFinalizing(tasks)) {
+                        "正在收尾…"
+                    } else {
+                        "没有进行中的任务"
+                    }
                 }
             }
             tile.updateTile()

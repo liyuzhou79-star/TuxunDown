@@ -186,6 +186,30 @@ class WidgetStateTest {
     }
 
     @Test
+    fun etaDenominatorIsExactlyTheRunningSpeedSum() {
+        // v7.5 (audit round 60, Step C) caliber pin: the
+        // aggregate ETA divides by the RUNNING tasks'
+        // speedBps sum — the same EMA values the cards show —
+        // and by nothing else. Running speeds 300 + 200 = 500;
+        // remaining spans the whole active set:
+        // 1500 + 2500 + 1000 (queued) = 5000; 5000 / 500 = 10.
+        // The QUEUED task carries a stale speedBps of 9999 on
+        // purpose: if a queued speed leaked into the
+        // denominator the verdict would collapse to 0, and if
+        // only one running speed counted it would be 16 or 25.
+        assertEquals(
+            10L,
+            WidgetState.etaSeconds(
+                listOf(
+                    task(TaskStatus.RUNNING, total = 1500, downloaded = 0, speed = 300),
+                    task(TaskStatus.RUNNING, total = 2500, downloaded = 0, speed = 200),
+                    task(TaskStatus.QUEUED, total = 1000, downloaded = 0, speed = 9999),
+                )
+            ),
+        )
+    }
+
+    @Test
     fun etaNothingRemainingIsMinusOne() {
         assertEquals(
             -1L,

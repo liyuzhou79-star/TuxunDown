@@ -244,6 +244,13 @@ class DownloadEngine(
          *  per-connection speed in the details view is this
          *  tick's delta over it (see the sampler). */
         @Volatile var lastSamplePos: Long = start
+        /** v7.5: this connection's previous SpeedSmoothing
+         *  value — the per-connection speed published in
+         *  ConnInfo is the same EMA caliber as the task's
+         *  headline speed, not a single-tick delta. 0 = no
+         *  sample yet (the first tick publishes its raw
+         *  delta, exactly like the task-level rule). */
+        @Volatile var lastSpeedBps: Long = 0
         /** Live connection, so the sampler can evict a stalled worker. */
         @Volatile var connection: HttpURLConnection? = null
         @Volatile var lastAdvanceMs: Long = System.currentTimeMillis()
@@ -278,6 +285,9 @@ class DownloadEngine(
         val start: Long = start
         val end: Long = end // exclusive
         @Volatile var lastSamplePos: Long = start
+        /** v7.5: this part's previous SpeedSmoothing value
+         *  (see ActiveChunk.lastSpeedBps). */
+        @Volatile var lastSpeedBps: Long = 0
         @Volatile var lastAdvanceMs: Long = System.currentTimeMillis()
         /** The session currently transferring this part. */
         @Volatile var client: FtpClient? = null
@@ -1054,7 +1064,7 @@ class DownloadEngine(
                 val bytes = downloadedBytes.get()
                 val dt = max(1L, now - lastTime)
                 val speed = (bytes - lastBytes) * 1000 / dt
-                task.speedBps = if (task.speedBps == 0L) speed else (task.speedBps * 3 + speed) / 4
+                task.speedBps = SpeedSmoothing.next(task.speedBps, speed)
                 recordSpeed(task.speedBps)
                 // v4.6 (server profile): the peak worker count
                 // this task ever ran at once. The sampler is the
@@ -1077,11 +1087,18 @@ class DownloadEngine(
                     task.connInfos = active.map { ac ->
                         val sp = (ac.pos - ac.lastSamplePos) * 1000 / dt
                         ac.lastSamplePos = ac.pos
+                        // v7.5: the published per-connection
+                        // speed goes through SpeedSmoothing —
+                        // the same EMA as the task headline —
+                        // instead of the raw single-tick delta.
+                        ac.lastSpeedBps = SpeedSmoothing.next(
+                            ac.lastSpeedBps, sp.coerceAtLeast(0),
+                        )
                         ConnInfo(
                             chunkIndex = ac.index,
                             downloaded = (ac.pos - ac.start).coerceAtLeast(0),
                             total = (ac.end - ac.start).coerceAtLeast(0),
-                            speedBps = sp.coerceAtLeast(0),
+                            speedBps = ac.lastSpeedBps,
                         )
                     }.sortedBy { it.chunkIndex }
                 }
@@ -2345,7 +2362,7 @@ class DownloadEngine(
                 val bytes = downloadedBytes.get()
                 val dt = max(1L, now - lastTime)
                 val speed = (bytes - lastBytes) * 1000 / dt
-                task.speedBps = if (task.speedBps == 0L) speed else (task.speedBps * 3 + speed) / 4
+                task.speedBps = SpeedSmoothing.next(task.speedBps, speed)
                 recordSpeed(task.speedBps)
                 task.downloaded = bytes
                 // v4.3: re-read the global allowance and re-judge
@@ -2794,7 +2811,7 @@ class DownloadEngine(
                 val bytes = downloadedBytes.get()
                 val dt = max(1L, now - lastTime)
                 val speed = (bytes - lastBytes) * 1000 / dt
-                task.speedBps = if (task.speedBps == 0L) speed else (task.speedBps * 3 + speed) / 4
+                task.speedBps = SpeedSmoothing.next(task.speedBps, speed)
                 recordSpeed(task.speedBps)
                 task.downloaded = bytes
                 // v3.5: one whole-file data connection — the
@@ -3072,7 +3089,7 @@ class DownloadEngine(
                 val bytes = downloadedBytes.get()
                 val dt = max(1L, now - lastTime)
                 val speed = (bytes - lastBytes) * 1000 / dt
-                task.speedBps = if (task.speedBps == 0L) speed else (task.speedBps * 3 + speed) / 4
+                task.speedBps = SpeedSmoothing.next(task.speedBps, speed)
                 recordSpeed(task.speedBps)
                 val aw = liveWorkers.get()
                 if (aw > task.peakConns) task.peakConns = aw
@@ -3083,11 +3100,16 @@ class DownloadEngine(
                 task.connInfos = snapshot.map { p ->
                     val sp = (p.pos - p.lastSamplePos) * 1000 / dt
                     p.lastSamplePos = p.pos
+                    // v7.5: same SpeedSmoothing EMA as the
+                    // HTTP segmented path (see there).
+                    p.lastSpeedBps = SpeedSmoothing.next(
+                        p.lastSpeedBps, sp.coerceAtLeast(0),
+                    )
                     ConnInfo(
                         chunkIndex = p.index,
                         downloaded = (p.pos - p.start).coerceAtLeast(0),
                         total = (p.end - p.start).coerceAtLeast(0),
-                        speedBps = sp.coerceAtLeast(0),
+                        speedBps = p.lastSpeedBps,
                     )
                 }.sortedBy { it.chunkIndex }
                 // Stall eviction (StallPolicy, same inputs as the
@@ -3350,7 +3372,7 @@ class DownloadEngine(
                 val bytes = downloadedBytes.get()
                 val dt = max(1L, now - lastTime)
                 val speed = (bytes - lastBytes) * 1000 / dt
-                task.speedBps = if (task.speedBps == 0L) speed else (task.speedBps * 3 + speed) / 4
+                task.speedBps = SpeedSmoothing.next(task.speedBps, speed)
                 recordSpeed(task.speedBps)
                 task.downloaded = bytes
                 // v3.5: one whole-file connection — the

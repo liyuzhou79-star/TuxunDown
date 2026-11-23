@@ -61,6 +61,18 @@ object FailureNotify {
     fun add(list: List<Failed>, item: Failed, nowMs: Long): List<Failed> =
         list.filter { nowMs - it.atMs <= WINDOW_MS } + item
 
+    /**
+     * v7.5 (audit round 60, Step C): drop the entries whose
+     * task record was just deleted. The failure notification
+     * built from this list (single or merged) must not keep
+     * pointing at a record that no longer exists — its 重试
+     * action resolves the task by id and would land on
+     * nothing. The caller cancels the failure notification
+     * when this leaves the list empty.
+     */
+    fun prune(list: List<Failed>, taskIds: Set<String>): List<Failed> =
+        list.filter { it.taskId !in taskIds }
+
     fun isMerged(list: List<Failed>): Boolean = list.size >= 2
 
     fun title(list: List<Failed>): String = "${list.size} 个文件下载失败"

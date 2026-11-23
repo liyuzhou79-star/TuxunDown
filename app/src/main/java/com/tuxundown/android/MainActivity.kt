@@ -1774,6 +1774,10 @@ fun DownApp() {
             PublicStorage.deleteTarget(context, task)
         }
         store.remove(task)
+        // v7.5: prune the notification merge lists (and cancel
+        // the failure notification when this was its last
+        // entry) — see DownloadCenter.onRecordsRemoved.
+        DownloadCenter.onRecordsRemoved(listOf(task))
         // v2.1: a deleted queued task may never wake the service —
         // refresh the home-screen widget from here too.
         com.tuxundown.android.widget.WidgetUpdater.refresh(context)
@@ -5174,7 +5178,10 @@ fun FilesScreen(onBack: () -> Unit) {
             confirmButton = {
                 TextButton(onClick = {
                     recGhostDelete = null
-                    DownloadCenter.store.byId(g.id)?.let { DownloadCenter.store.remove(it) }
+                    DownloadCenter.store.byId(g.id)?.let {
+                        DownloadCenter.store.remove(it)
+                        DownloadCenter.onRecordsRemoved(listOf(it))
+                    }
                     recDismissed = recDismissed + "ghost:${g.id}"
                     reloadKey++
                     Toast.makeText(context, "记录已删除", Toast.LENGTH_SHORT).show()
@@ -5230,6 +5237,7 @@ fun FilesScreen(onBack: () -> Unit) {
                     DownloadCenter.store.insertBypass(Reconcile.buildAdopted(p.scan))
                     DownloadCenter.store.byId(p.ghost.id)?.let {
                         DownloadCenter.store.remove(it)
+                        DownloadCenter.onRecordsRemoved(listOf(it))
                     }
                     recDismissed = recDismissed +
                         "pair:${p.ghost.id}:${p.scan.uri}" + "ghost:${p.ghost.id}"
@@ -5307,6 +5315,7 @@ fun FilesScreen(onBack: () -> Unit) {
                             if (e.taskId.isNotBlank()) {
                                 DownloadCenter.store.byId(e.taskId)?.let {
                                     DownloadCenter.store.remove(it)
+                                    DownloadCenter.onRecordsRemoved(listOf(it))
                                 }
                             }
                         }
@@ -5368,6 +5377,7 @@ fun FilesScreen(onBack: () -> Unit) {
                     TextButton(onClick = {
                         ChecksumVerifier.requestCancel(task!!.id)
                         DownloadCenter.store.remove(task)
+                        DownloadCenter.onRecordsRemoved(listOf(task))
                         deleteEntry = null
                         reloadKey++
                         Toast.makeText(
@@ -5382,6 +5392,7 @@ fun FilesScreen(onBack: () -> Unit) {
                             if (task != null) {
                                 ChecksumVerifier.requestCancel(task.id)
                                 DownloadCenter.store.remove(task)
+                                DownloadCenter.onRecordsRemoved(listOf(task))
                             }
                             android.os.Handler(android.os.Looper.getMainLooper()).post {
                                 Toast.makeText(
@@ -5401,6 +5412,7 @@ fun FilesScreen(onBack: () -> Unit) {
                         TextButton(onClick = {
                             ChecksumVerifier.requestCancel(task.id)
                             DownloadCenter.store.remove(task)
+                            DownloadCenter.onRecordsRemoved(listOf(task))
                             deleteEntry = null
                             reloadKey++
                             Toast.makeText(
