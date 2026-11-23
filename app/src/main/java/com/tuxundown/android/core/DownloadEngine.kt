@@ -330,7 +330,36 @@ class DownloadEngine(
             task.speedHistory.add(bps)
             while (task.speedHistory.size > 90) task.speedHistory.removeAt(0)
         }
+        // v8.1: the FULL-RUN curve (see FullSpeedHistory) is
+        // fed from this same tick — every sampler path already
+        // calls recordSpeed once per second with the smoothed
+        // total (task.speedBps), so counting ticks here gives
+        // one full-run point per interval with no new timer
+        // and no second measurement. Samplers only run while
+        // bytes move: paused / parked tasks tick nothing, and
+        // a finished or failed run stops sampling while its
+        // points stay on the record. The points ride the
+        // store's existing coalesced save (1.5 s window) via
+        // the shared serializer — no new disk writes.
+        fullSpeedTicks++
+        if (FullSpeedHistory.shouldSample(fullSpeedTicks, task.fullSpeedIntervalSec)) {
+            fullSpeedTicks = 0
+            synchronized(task.fullSpeedHistory) {
+                val (pts, iv) = FullSpeedHistory.append(
+                    task.fullSpeedHistory, task.fullSpeedIntervalSec, bps,
+                )
+                task.fullSpeedHistory.clear()
+                task.fullSpeedHistory.addAll(pts)
+                task.fullSpeedIntervalSec = iv
+            }
+        }
     }
+
+    /** v8.1: sampler ticks since this run's last full-run
+     *  point (see [recordSpeed]). Per engine instance, so a
+     *  resumed run restarts its cadence — the first point of
+     *  the new run lands one interval in. */
+    private var fullSpeedTicks: Int = 0
 
     /**
      * v6.1 (A46-2): the sampler ticks' progress emission — all

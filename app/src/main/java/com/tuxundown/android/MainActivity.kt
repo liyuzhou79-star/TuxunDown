@@ -131,6 +131,7 @@ import com.tuxundown.android.core.DuplicateFinder
 import com.tuxundown.android.core.TaskPriority
 import com.tuxundown.android.core.Finalizing
 import com.tuxundown.android.core.Format
+import com.tuxundown.android.core.FullSpeedHistory
 import com.tuxundown.android.core.GhostMark
 import com.tuxundown.android.core.GhostSnapshot
 import com.tuxundown.android.core.HealthCheck
@@ -9550,6 +9551,39 @@ fun TaskCard(
                         modifier = Modifier.fillMaxWidth().height(110.dp),
                     )
                 }
+                // v8.1: the FULL-RUN curve, below the 90-second
+                // window — one point every few seconds from the
+                // task's start to now (see FullSpeedHistory).
+                // Rendered ONLY when real samples exist: an old
+                // task (or one that never ran 10 s) has none and
+                // the whole section — heading included — stays
+                // absent; nothing is backfilled or invented.
+                val fullSnapshot = synchronized(task.fullSpeedHistory) { task.fullSpeedHistory.toList() }
+                val showFullChart = fullSnapshot.size >= 2 &&
+                    (task.status == TaskStatus.RUNNING || task.status == TaskStatus.PAUSED ||
+                        task.status == TaskStatus.DONE)
+                if (showFullChart) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        "全程速度曲线",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    FullSpeedChart(
+                        points = fullSnapshot,
+                        modifier = Modifier.fillMaxWidth().height(110.dp),
+                    )
+                    Text(
+                        "每 ${task.fullSpeedIntervalSec} 秒一个采样点，共 ${fullSnapshot.size} 个，" +
+                            "覆盖约 ${Format.duration(FullSpeedHistory.spanSeconds(fullSnapshot.size, task.fullSpeedIntervalSec) * 1000)} 的下载过程" +
+                            if (task.fullSpeedIntervalSec > FullSpeedHistory.BASE_INTERVAL_SEC)
+                                "；下载超过 1 小时后，早期采样已合并抽稀，间隔随之变大。"
+                            else
+                                "；下载超过 1 小时后，采样会合并抽稀，间隔随之变大。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 Spacer(Modifier.height(8.dp))
                 when (task.status) {
                     TaskStatus.RUNNING -> {
@@ -10545,6 +10579,69 @@ fun SpeedChart(history: List<Long>, modifier: Modifier = Modifier) {
         fill.addPath(line)
         fill.lineTo(w, plotTop + plotH)
         fill.lineTo(startX, plotTop + plotH)
+        fill.close()
+        drawPath(fill, lineColor.copy(alpha = 0.25f))
+        drawPath(line, lineColor, style = Stroke(width = 2.dp.toPx()))
+    }
+}
+
+/**
+ * v8.1: the FULL-RUN speed curve (see FullSpeedHistory) —
+ * same hand-drawn visual language as [SpeedChart], but the
+ * x-axis spans the whole series from the task's first
+ * sample to its latest instead of a fixed 90-second window,
+ * so the points stretch across the full width however many
+ * there are. Pure display: it reads a snapshot and draws.
+ */
+@androidx.compose.runtime.Composable
+fun FullSpeedChart(points: List<Long>, modifier: Modifier = Modifier) {
+    val dark = isSystemInDarkTheme()
+    val lineColor = WinPalette.ChartGreen
+    val gridColor = if (dark) Color(0xFF3A3A3A) else Color(0xFFDDDDDD)
+    val borderColor = if (dark) Color(0xFF4A4A4A) else Color(0xFFBDBDBD)
+    val bg = if (dark) Color(0xFF202020) else Color(0xFFFCFEFC)
+    val ceiling = Format.chartCeiling(points.maxOrNull() ?: 0)
+    val topLabel = Format.speed(ceiling) + " 峰值刻度"
+    val labelColor = if (dark) 0xFFAAAAAA.toInt() else 0xFF767676.toInt()
+    Canvas(modifier.background(bg)) {
+        val w = size.width
+        val h = size.height
+        val labelH = 14.dp.toPx()
+        val bottomH = 12.dp.toPx()
+        val plotTop = labelH
+        val plotH = h - labelH - bottomH
+        for (i in 0..4) {
+            val y = plotTop + plotH * i / 4f
+            drawLine(gridColor, Offset(0f, y), Offset(w, y), strokeWidth = 1f)
+        }
+        for (i in 1..5) {
+            val x = w * i / 6f
+            drawLine(gridColor, Offset(x, plotTop), Offset(x, plotTop + plotH), strokeWidth = 1f)
+        }
+        drawRect(borderColor, topLeft = Offset(0f, plotTop), size = Size(w, plotH), style = Stroke(width = 1f))
+        val paint = android.graphics.Paint().apply {
+            color = labelColor
+            textSize = ChartText.labelPx(density, fontScale)
+            isAntiAlias = true
+        }
+        drawContext.canvas.nativeCanvas.drawText(topLabel, 4.dp.toPx(), 11.dp.toPx(), paint)
+        drawContext.canvas.nativeCanvas.drawText("开始", 4.dp.toPx(), h - 2.dp.toPx(), paint)
+        val nowText = "现在"
+        val nowW = paint.measureText(nowText)
+        drawContext.canvas.nativeCanvas.drawText(nowText, w - nowW - 4.dp.toPx(), h - 2.dp.toPx(), paint)
+        if (points.size < 2) return@Canvas
+        val maxF = ceiling.toFloat().coerceAtLeast(1f)
+        val stepX = w / (points.size - 1).toFloat()
+        val line = Path()
+        points.forEachIndexed { i, v ->
+            val x = stepX * i
+            val y = plotTop + plotH - (v / maxF) * (plotH - 4f) - 2f
+            if (i == 0) line.moveTo(x, y) else line.lineTo(x, y)
+        }
+        val fill = Path()
+        fill.addPath(line)
+        fill.lineTo(w, plotTop + plotH)
+        fill.lineTo(0f, plotTop + plotH)
         fill.close()
         drawPath(fill, lineColor.copy(alpha = 0.25f))
         drawPath(line, lineColor, style = Stroke(width = 2.dp.toPx()))

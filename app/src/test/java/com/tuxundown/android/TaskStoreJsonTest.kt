@@ -166,6 +166,57 @@ class TaskStoreJsonTest {
     }
 
     @Test
+    fun roundTripKeepsFullSpeedHistoryAndOldRecordsDefaultEmpty() {
+        // v8.1: the full-run curve rides the shared serializer
+        // (disk + backup, exactly like speedHistory).
+        val t = TaskRecord(url = "https://a.b/f.bin", status = TaskStatus.DONE)
+        synchronized(t.fullSpeedHistory) {
+            t.fullSpeedHistory.addAll(listOf(1000L, 2000L, 3000L))
+        }
+        t.fullSpeedIntervalSec = 20
+        val back = TaskStore.deserialize(TaskStore.serialize(listOf(t)))
+        assertEquals(1, back.size)
+        assertEquals(listOf(1000L, 2000L, 3000L), back[0].fullSpeedHistory.toList())
+        assertEquals(20, back[0].fullSpeedIntervalSec)
+        // The EXPORT form keeps it too — the same caliber as
+        // speedHistory, which backups have always carried.
+        val exported = TaskStore.deserialize(
+            TaskStore.serialize(listOf(t), stripSensitiveHeaders = true)
+        )
+        assertEquals(listOf(1000L, 2000L, 3000L), exported[0].fullSpeedHistory.toList())
+        assertEquals(20, exported[0].fullSpeedIntervalSec)
+        // A pre-v8.1 record has neither key: empty series and
+        // the base interval — "no data", chart section absent.
+        val legacy = TaskStore.deserialize(
+            """[{"id":"x","url":"https://e.com/f","status":"DONE"}]"""
+        )
+        assertEquals(1, legacy.size)
+        assertTrue(legacy[0].fullSpeedHistory.isEmpty())
+        assertEquals(5, legacy[0].fullSpeedIntervalSec)
+        // A corrupt interval (not 5 x 2^k) sanitizes to the
+        // base; a negative sample clamps to 0.
+        val hostile = TaskStore.deserialize(
+            """[{"id":"y","url":"https://e.com/f","status":"PAUSED","fullSpeedIntervalSec":15,"fullSpeedHistory":[-9,42]}]"""
+        )
+        assertEquals(1, hostile.size)
+        assertEquals(5, hostile[0].fullSpeedIntervalSec)
+        assertEquals(listOf(0L, 42L), hostile[0].fullSpeedHistory.toList())
+    }
+
+    @Test
+    fun fullSpeedHistoryParseCapsAtMaxPointsKeepingNewest() {
+        // v8.1: a hostile backup cannot inflate the series past
+        // the cap — only the newest MAX_POINTS entries are read.
+        val many = (0 until 900).joinToString(",")
+        val text = """[{"id":"big","url":"https://e.com/f","status":"PAUSED","fullSpeedHistory":[$many]}]"""
+        val back = TaskStore.deserialize(text)
+        assertEquals(1, back.size)
+        assertEquals(720, back[0].fullSpeedHistory.size)
+        assertEquals(180L, back[0].fullSpeedHistory.first())
+        assertEquals(899L, back[0].fullSpeedHistory.last())
+    }
+
+    @Test
     fun roundTripKeepsV16Fields() {
         val t = TaskRecord(
             url = "https://example.com/live/index.m3u8",

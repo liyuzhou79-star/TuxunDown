@@ -357,6 +357,25 @@ class TaskRecord(
      *  the existing reset deliberately keeps both peak stats
      *  (and the speed history), so this one is kept too. */
     var peakConns: Int = 0
+    /** v8.1: the FULL-RUN speed curve — one smoothed-total-speed
+     *  sample every [FullSpeedHistory.BASE_INTERVAL_SEC] seconds
+     *  of active transfer, decimated (never unbounded) past one
+     *  hour; see FullSpeedHistory for the caliber. Persisted
+     *  additively like [peakBps]: a finished task keeps its whole
+     *  curve for the detail page. Records written before v8.1
+     *  parse as empty = no data and the chart section stays
+     *  absent. Guarded by synchronized(this list) like
+     *  speedHistory: the engine sampler appends, the serializer
+     *  and the UI snapshot. Kept wherever speedHistory is kept
+     *  (e.g. the daily-reschedule reset keeps both). */
+    val fullSpeedHistory: MutableList<Long> = mutableListOf()
+    /** v8.1: seconds between [fullSpeedHistory] points right
+     *  now — starts at FullSpeedHistory.BASE_INTERVAL_SEC and
+     *  doubles at every decimation. Persisted with the points:
+     *  without it the series' time span would be unknowable
+     *  after a restart. Sanitized at the parse door by
+     *  FullSpeedHistory.sanitizeInterval. */
+    var fullSpeedIntervalSec: Int = FullSpeedHistory.BASE_INTERVAL_SEC
     /** Bytes ACTUALLY WRITTEN to the file per source URL (the
      *  primary is a key like any mirror), counted by the
      *  segmented engine from each attempt's ActiveChunk.pos
@@ -921,6 +940,13 @@ class TaskStore(context: Context) {
                 val hist = JSONArray()
                 synchronized(t.speedHistory) { for (v in t.speedHistory) hist.put(v) }
                 o.put("speedHistory", hist)
+                // v8.1: the full-run curve rides this same
+                // serializer, so it is on disk AND in backups
+                // exactly like speedHistory above — one caliber.
+                val fh = JSONArray()
+                synchronized(t.fullSpeedHistory) { for (v in t.fullSpeedHistory) fh.put(v) }
+                o.put("fullSpeedHistory", fh)
+                o.put("fullSpeedIntervalSec", t.fullSpeedIntervalSec)
                 val h = JSONObject()
                 val headersOut = if (stripSensitiveHeaders) {
                     TaskHeaders.strippedForExport(t.headers)
@@ -1171,6 +1197,29 @@ class TaskStore(context: Context) {
                             }
                         }
                     }
+                    // v8.1: the full-run curve. A pre-v8.1
+                    // record has neither key: empty series +
+                    // base interval = "no data", the detail
+                    // page's section stays absent. Same
+                    // hostile-input discipline as speedHistory:
+                    // only the newest MAX_POINTS entries are
+                    // ever read, negatives clamp to 0, and the
+                    // interval is sanitized to 5 x 2^k.
+                    val fh = o.optJSONArray("fullSpeedHistory")
+                    if (fh != null) {
+                        synchronized(t.fullSpeedHistory) {
+                            val from = maxOf(0, fh.length() - FullSpeedHistory.MAX_POINTS)
+                            for (j in from until fh.length()) {
+                                t.fullSpeedHistory.add(fh.optLong(j, 0).coerceAtLeast(0))
+                            }
+                        }
+                    }
+                    t.fullSpeedIntervalSec = FullSpeedHistory.sanitizeInterval(
+                        o.optInt(
+                            "fullSpeedIntervalSec",
+                            FullSpeedHistory.BASE_INTERVAL_SEC,
+                        )
+                    )
                     if (t.chunkSize > 0 && t.totalSize > 0) {
                         // v4.2: recompute against the task's own
                         // grid (uniform for every pre-v4.2 record).
