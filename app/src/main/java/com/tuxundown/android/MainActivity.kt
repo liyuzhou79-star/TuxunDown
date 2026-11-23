@@ -692,7 +692,7 @@ fun DownApp() {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "5.4.0"
+        }.getOrNull() ?: "5.5.0"
     }
     var showGuide by remember {
         // v2.2 safe mode: after 2+ consecutive crashes, first-
@@ -5496,7 +5496,7 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
             // ---- proxy reachability (only when configured) ----
             val ps = DownloadCenter.proxySettings()
             out += "代理" to if (!ps.active) {
-                "未开启（直连）"
+                "未开启（直连；没配代理时上面的一键体检不列代理这一项，说的是同一件事）"
             } else {
                 val reachable = runCatching {
                     java.net.Socket().use { s ->
@@ -5620,8 +5620,9 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
         }
         item(key = "d-intro") {
             Text(
-                "一键给 App 做个本地体检：存储、网络、代理、版本和任务状态。" +
-                    "结果只显示在这台手机上，不上传；下载出了问题要找人看时，" +
+                "这一页有两套检查：上面的「一键体检」是汇总速览，把九项状态一页看全；" +
+                    "下面「开始自检」是更细的逐项检查，会实测写盘速度、逐项列出结果。" +
+                    "两边结果都只显示在这台手机上，不上传；下载出了问题要找人看时，" +
                     "把结果复制全文发过去就行。",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -7348,9 +7349,9 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 不再重复建任务：同一个链接已经在任务列表里（排队、下载中、暂停、失败都算）就不会再建一个；批量粘贴或导入时会明说「跳过了 N 个重复」。已经下完的历史不拦，想再下一份照样可以\n" +
-            "· 镜像状态看得见了：打开任务的「管理镜像源」，每个镜像都会标明已确认、待确认（可能需要登录）、已拒绝还是还没校验；状态来自下载前已有的校验记录，不会为了显示状态额外联网\n" +
-            "· 没能确认的镜像可以手动放行：状态是待确认的镜像，点「仍然使用」就能让它参与多源下载；这个决定只对这个任务有效，随时可以取消。已经证明是别的文件的镜像不能放行",
+            "· 诊断页新增一键体检：版本与签名、内存、启动耗时、下载空间、网络、域名解析、学习数据和任务状态九项汇成一页，每项都标明正常、注意还是异常；进了页面不会自动跑，点「开始体检」才查，结果可以复制发给人看\n" +
+            "· 这一版还给下载核心打了底：把关键判断都补上了自动检查，拆掉了没用的旧代码，跑起来更稳\n" +
+            "· 诊断页的说法对齐了：一键体检和下面更细的自检分工写清楚了，没配代理、空间读不到这些情况两边说法一致，不再让人对着两处猜",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
             "· 文件直链 → 直接开始多线程下载，还能预先改好保存文件名\n" +
@@ -8477,7 +8478,7 @@ fun TaskCard(
                     val version = runCatching {
                         ctx.packageManager.getPackageInfo(ctx.packageName, 0)
                             .versionName
-                    }.getOrNull() ?: "5.4.0"
+                    }.getOrNull() ?: "5.5.0"
                     val cm = ctx.getSystemService(
                         android.content.Context.CLIPBOARD_SERVICE,
                     ) as android.content.ClipboardManager
