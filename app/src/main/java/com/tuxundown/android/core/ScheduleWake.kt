@@ -46,20 +46,28 @@ import android.content.Intent
  * loop that is already waiting, which is harmless.
  *
  * v4.6 (audit round 31, time & plans): scheduledAt is an
- * ABSOLUTE epoch, and there is deliberately no
- * TIMEZONE_CHANGED / TIME_SET listener. The alarm and the
- * drain judge the same stored epoch, so the two never
- * disagree with each other: a time-zone change silently
- * re-reads a one-shot's wall-clock meaning (it still fires
- * exactly once, at the stored instant), and a daily slot
- * self-corrects at its next advanceDaily, which is computed
- * in the then-current local calendar. A clock set FORWARD
- * past a slot makes the task due, never lost — it starts
- * late at the next drain pass / alarm fire, and
- * advanceDaily lands strictly in the future, so missed
- * days never burst. A clock set BACKWARD returns the slot
- * to the future and it is simply re-armed; a task that
- * already started has left QUEUED, so nothing double-fires.
+ * ABSOLUTE epoch. The alarm and the drain judge the same
+ * stored epoch, so the two never disagree with each other:
+ * a time-zone change silently re-reads a one-shot's
+ * wall-clock meaning (it still fires exactly once, at the
+ * stored instant). A clock set FORWARD past a slot makes
+ * the task due, never lost — it starts late at the next
+ * drain pass / alarm fire, and the daily re-anchor lands
+ * strictly in the future, so missed days never burst. A
+ * clock set BACKWARD returns the slot to the future and
+ * it is simply re-armed; a task that already started has
+ * left QUEUED, so nothing double-fires.
+ *
+ * v6.4 (audit round 49, steps A + C) refines the daily half
+ * of that caliber: a daily task's picked HH:MM is now stored
+ * on the record, reschedule re-anchors from the pick (step
+ * A, ScheduleTime.nextDailyAt), and BootReceiver DOES now
+ * listen for TIMEZONE_CHANGED / TIME_SET — but only to
+ * re-anchor QUEUED daily slots that carry a pick, at the
+ * moment of the change (step C, ScheduleTime
+ * .reanchorQueuedDaily). Nothing here changed: this alarm
+ * still judges plain epochs, and one-shot tasks still keep
+ * pure epoch semantics.
  */
 object ScheduleWake {
 

@@ -84,13 +84,19 @@
         </service>
         <!-- v2.6: boot entry for the 开机恢复 switch (default off).
              exported=false: only the system may deliver the boot
-             broadcast to it. -->
+             broadcast to it. v6.4: the same receiver also takes
+             the system's TIMEZONE_CHANGED / TIME_SET broadcasts
+             (protected system broadcasts, still exported=false,
+             no new permission) to re-anchor queued daily slots
+             to the zone now in force — see BootReceiver. -->
         <receiver
             android:name=".core.BootReceiver"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                <action android:name="android.intent.action.TIME_SET" />
             </intent-filter>
         </receiver>
         <!-- v3.5: landing spot for the scheduled-start backup

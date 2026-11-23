@@ -21,11 +21,25 @@ import androidx.core.content.ContextCompat
  * Everything is runCatching: a boot receiver must never be able
  * to crash, and a failed kick simply means the tasks wait for
  * the user's next open, like they always did.
+ *
+ * v6.4 step C: the same receiver also takes the system's
+ * TIMEZONE_CHANGED and TIME_SET broadcasts (system broadcasts
+ * only — exported=false, no new permission). Those take the
+ * light path in [reanchorAfterClockChange]: re-anchor QUEUED
+ * daily tasks to their stored wall-clock pick in the zone now
+ * in force, then re-arm the backup alarm. The boot path below
+ * is untouched by them, and they never kick the service.
  */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         runCatching {
             val action = intent?.action ?: return
+            if (action == Intent.ACTION_TIMEZONE_CHANGED ||
+                action == Intent.ACTION_TIME_CHANGED
+            ) {
+                reanchorAfterClockChange(context)
+                return
+            }
             if (action != Intent.ACTION_BOOT_COMPLETED &&
                 action != ACTION_QUICKBOOT
             ) {
@@ -48,6 +62,36 @@ class BootReceiver : BroadcastReceiver() {
                 .setAction(DownloadService.ACTION_BOOT_RESUME)
             ContextCompat.startForegroundService(context, svc)
         }
+    }
+
+    /**
+     * v6.4 step C light path for TIMEZONE_CHANGED / TIME_SET:
+     * the wall clock (or the zone it is read in) just changed,
+     * so a QUEUED daily task's already-computed slot may now
+     * read as the wrong local time. Re-anchor those slots from
+     * their stored picks in the CURRENT zone (the pure
+     * ScheduleTime.reanchorQueuedDaily decides what moves —
+     * one-shot tasks and pick-less legacy daily tasks are not
+     * touched), persist only when something actually changed,
+     * and re-arm the backup alarm at the new earliest slot.
+     *
+     * The service is deliberately NOT kicked: nothing here is
+     * due yet by construction (re-anchored slots are strictly
+     * in the future), and due-ness stays with the existing
+     * paths — the drain loop and ScheduleWake's alarm. If a
+     * clock set FORWARD left some OTHER task (a one-shot, say)
+     * already due, the re-armed alarm and the next app open
+     * pick it up exactly as they did before this path existed;
+     * this path changes no due semantics.
+     */
+    private fun reanchorAfterClockChange(context: Context) {
+        DownloadCenter.init(context)
+        val tasks = DownloadCenter.store.tasks
+        val changed = ScheduleTime.reanchorQueuedDaily(
+            tasks, System.currentTimeMillis(),
+        )
+        if (changed > 0) DownloadCenter.store.saveNow()
+        ScheduleWake.arm(context, tasks)
     }
 
     companion object {

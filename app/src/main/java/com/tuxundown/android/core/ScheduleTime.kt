@@ -111,4 +111,56 @@ object ScheduleTime {
         hour: Int, minute: Int, nowMs: Long,
         zone: TimeZone = TimeZone.getDefault(),
     ): Long = nextOccurrence(hour, minute, nowMs, zone)
+
+    /**
+     * v6.4 step C: re-anchor, IN PLACE, every QUEUED daily task
+     * that carries a stored HH:MM pick to that same wall-clock
+     * time in [zone] — the fix for the gap step A left open:
+     * step A re-anchors at the next RESCHEDULE, but a slot that
+     * was already computed in the old zone keeps its drifted
+     * epoch until then, so the first fire after a zone change
+     * would land at the wrong local time. Called by
+     * BootReceiver the moment the system reports a zone or
+     * wall-clock change. Returns how many tasks changed, so
+     * the caller persists only when something actually moved.
+     *
+     * The caliber is deliberately narrow — everything else is
+     * left exactly as stored:
+     * - only QUEUED tasks: a task that already started, is
+     *   paused, or is finished has its own lifecycle, and a
+     *   paused daily task re-anchors when it is resumed and
+     *   rescheduled through the step-A path;
+     * - only daily tasks WITH a valid stored pick
+     *   (scheduleHour in 0..23, scheduleMinute in 0..59):
+     *   one-shot tasks are pure epoch semantics — they fire
+     *   exactly once at the stored instant whatever the zone
+     *   says — and a legacy daily task without a pick has no
+     *   recoverable intent to re-anchor FROM (its epoch's
+     *   reading in the new zone is all that survives; see
+     *   [advanceDaily]);
+     * - a task whose stored slot already equals the re-anchored
+     *   value is not counted and not touched.
+     *
+     * Because [nextDailyAt] is strictly after [nowMs], a clock
+     * set FORWARD past the old slot lands on the next future
+     * slot (the task is not dragged into the past to misfire
+     * at once), and a clock set BACKWARD likewise yields a
+     * future slot — never a past one.
+     */
+    fun reanchorQueuedDaily(
+        tasks: List<TaskRecord>, nowMs: Long,
+        zone: TimeZone = TimeZone.getDefault(),
+    ): Int {
+        var changed = 0
+        for (t in tasks) {
+            if (t.status != TaskStatus.QUEUED || !t.scheduleDaily) continue
+            if (t.scheduleHour !in 0..23 || t.scheduleMinute !in 0..59) continue
+            val next = nextDailyAt(t.scheduleHour, t.scheduleMinute, nowMs, zone)
+            if (next != t.scheduledAt) {
+                t.scheduledAt = next
+                changed++
+            }
+        }
+        return changed
+    }
 }

@@ -1,6 +1,8 @@
 package com.tuxundown.android
 
 import com.tuxundown.android.core.ScheduleTime
+import com.tuxundown.android.core.TaskRecord
+import com.tuxundown.android.core.TaskStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -193,6 +195,110 @@ class ScheduleTimeTest {
         val next = ScheduleTime.nextDailyAt(1, 30, now, newYork)
         assertEquals(1_793_511_000_000L, next) // 2026-11-01 01:30 EDT
         assertEquals("01:30", ScheduleTime.formatHhMm(next, newYork))
+    }
+
+    // ---- v6.4 step C: the runtime zone-change re-anchor
+    // (ScheduleTime.reanchorQueuedDaily). Same independently
+    // computed epochs as the step-A tests above: the Taipei
+    // 23:30 slot is 1_795_361_400_000 (2026-11-22 23:30
+    // +08:00); "now" after the move is 1_795_435_200_000
+    // (2026-11-23 12:00 UTC). ----
+
+    private fun record(
+        status: TaskStatus, daily: Boolean,
+        hour: Int, minute: Int, scheduledAt: Long,
+    ): TaskRecord = TaskRecord(
+        url = "https://example.com/f.bin",
+        status = status,
+        scheduledAt = scheduledAt,
+        scheduleDaily = daily,
+        scheduleHour = hour,
+        scheduleMinute = minute,
+    )
+
+    @Test
+    fun reanchorQueuedDailyMovesSlotToSameWallClockInNewZone() {
+        val taipeiSlot = 1_795_361_400_000L
+        val task = record(TaskStatus.QUEUED, true, 23, 30, taipeiSlot)
+        val changed = ScheduleTime.reanchorQueuedDaily(
+            listOf(task), 1_795_435_200_000L, utc,
+        )
+        assertEquals(1, changed)
+        // 2026-11-23 23:30 UTC — the same wall-clock time the
+        // user picked, read in the zone now in force.
+        assertEquals(1_795_476_600_000L, task.scheduledAt)
+        assertEquals("23:30", ScheduleTime.formatHhMm(task.scheduledAt, utc))
+    }
+
+    @Test
+    fun reanchorQueuedDailyLeavesNonQueuedDailyUntouched() {
+        val taipeiSlot = 1_795_361_400_000L
+        val tasks = listOf(
+            TaskStatus.RUNNING, TaskStatus.PAUSED,
+            TaskStatus.DONE, TaskStatus.FAILED,
+        ).map { record(it, true, 23, 30, taipeiSlot) }
+        val changed = ScheduleTime.reanchorQueuedDaily(
+            tasks, 1_795_435_200_000L, utc,
+        )
+        assertEquals(0, changed)
+        tasks.forEach { assertEquals(taipeiSlot, it.scheduledAt) }
+    }
+
+    @Test
+    fun reanchorQueuedDailyLeavesOneShotAndPicklessDailyUntouched() {
+        val slot = 1_795_361_400_000L
+        val oneShot = record(TaskStatus.QUEUED, false, 23, 30, slot)
+        val pickless = record(TaskStatus.QUEUED, true, -1, -1, slot)
+        val halfPick = record(TaskStatus.QUEUED, true, 23, -1, slot)
+        val changed = ScheduleTime.reanchorQueuedDaily(
+            listOf(oneShot, pickless, halfPick),
+            1_795_435_200_000L, utc,
+        )
+        assertEquals(0, changed)
+        assertEquals(slot, oneShot.scheduledAt)
+        assertEquals(slot, pickless.scheduledAt)
+        assertEquals(slot, halfPick.scheduledAt)
+    }
+
+    @Test
+    fun reanchorQueuedDailyReturnsZeroWhenAlreadyAnchored() {
+        val already = 1_795_476_600_000L // 2026-11-23 23:30 UTC
+        val task = record(TaskStatus.QUEUED, true, 23, 30, already)
+        val changed = ScheduleTime.reanchorQueuedDaily(
+            listOf(task), 1_795_435_200_000L, utc,
+        )
+        assertEquals(0, changed)
+        assertEquals(already, task.scheduledAt)
+    }
+
+    @Test
+    fun reanchorQueuedDailyPastOldSlotLandsOnFutureSlot() {
+        // now (2026-11-23 12:00 UTC) is already past today's
+        // 09:00 slot: the re-anchor must land on TOMORROW's
+        // 09:00 UTC, strictly in the future — a zone change or
+        // a clock set forward must never drag a daily task
+        // into the past to misfire at once.
+        val now = 1_795_435_200_000L
+        val task = record(TaskStatus.QUEUED, true, 9, 0, 1_795_424_400_000L)
+        val changed = ScheduleTime.reanchorQueuedDaily(listOf(task), now, utc)
+        assertEquals(1, changed)
+        assertEquals(1_795_510_800_000L, task.scheduledAt) // 2026-11-24 09:00 UTC
+        assertTrue(task.scheduledAt > now)
+    }
+
+    @Test
+    fun reanchorQueuedDailyAfterClockSetBackStaysInFuture() {
+        // TIME_SET backward: it is suddenly 2026-11-23 08:00
+        // UTC. The 09:00 daily slot re-anchors to TODAY's
+        // 09:00 UTC — still strictly after now, so the task
+        // waits for its wall-clock time instead of firing
+        // early or being lost.
+        val now = 1_795_420_800_000L // 2026-11-23 08:00 UTC
+        val task = record(TaskStatus.QUEUED, true, 9, 0, 1_795_510_800_000L)
+        val changed = ScheduleTime.reanchorQueuedDaily(listOf(task), now, utc)
+        assertEquals(1, changed)
+        assertEquals(1_795_424_400_000L, task.scheduledAt) // 2026-11-23 09:00 UTC
+        assertTrue(task.scheduledAt > now)
     }
 
     @Test
