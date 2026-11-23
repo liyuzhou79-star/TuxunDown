@@ -171,6 +171,11 @@ class DownloadService : Service() {
         // process entry (idempotent — see CrashGuard.install).
         CrashGuard.install(this)
         DownloadCenter.init(this)
+        // v7.7 (Step B3): creation-moment preheat — while this
+        // service lives, a task created through the store funnel
+        // is judged for a warm host at once (see
+        // DownloadCenter.creationPreheatHook / maybeQueuePreheat).
+        DownloadCenter.creationPreheatHook = { id -> maybeQueuePreheat(id) }
         // v4.9 (audit round 34): hand WakeGuard its context so
         // DownloadEngine.run() can hold a partial wake lock for
         // the length of a transfer (idempotent — see WakeGuard).
@@ -201,6 +206,9 @@ class DownloadService : Service() {
     }
 
     override fun onDestroy() {
+        // v7.7 (Step B3): the creation-preheat hook is this
+        // service's; a dead service must not be called back.
+        DownloadCenter.creationPreheatHook = null
         precheckRunning = false
         precheckThread?.interrupt()
         precheckThread = null
@@ -1028,8 +1036,15 @@ class DownloadService : Service() {
      * task field is ever written, no slot / limiter / budget is
      * touched, and every failure is silent — the real start
      * re-does everything for itself regardless.
+     *
+     * v7.7 (Step B3): a second judgement moment rides the same
+     * body — [createdTaskId] non-null means the call came from
+     * the creation funnel (DownloadCenter.creationPreheatHook,
+     * fired by TaskStore.add) and the target must be that
+     * newcomer itself ([QueuePreheat.decideAtCreation], same
+     * guards). The drain-beat judgement is unchanged.
      */
-    private fun maybeQueuePreheat() {
+    private fun maybeQueuePreheat(createdTaskId: String? = null) {
         val store = DownloadCenter.store
         // Prune marks whose wait is over (deleted / paused /
         // finished tasks): a mark only has meaning while its
@@ -1047,26 +1062,50 @@ class DownloadService : Service() {
         val warmedKeys = synchronized(preheatLock) {
             preheatWarmed.map { (id, host) -> QueuePreheat.keyFor(id, host) }.toSet()
         }
-        val target = QueuePreheat.decide(
-            tasks = store.tasks,
-            now = System.currentTimeMillis(),
-            onWifi = runCatching { DownloadCenter.isOnWifi() }.getOrDefault(false),
-            dualActive = dualActive,
-            // Traffic protection is ON exactly when a threshold
-            // is set (DownloadCenter.trafficThresholdMB: 0 = off).
-            trafficProtectionOn = DownloadCenter.trafficThresholdMB > 0,
-            // v5.0 (audit round 35): the charge park as a LIVE
-            // condition (same pair the drain's charge gate
-            // judges) — while it holds, no queued task can
-            // start, so warming one would only waste battery.
-            chargeParked = ChargeGuard.shouldPark(
-                DownloadCenter.chargeOnlyDownload,
-                runCatching { DownloadCenter.isCharging() }.getOrDefault(true),
-            ),
-            proxyActive = DownloadCenter.proxySettings().active,
-            alreadyWarmed = warmedKeys,
-            inFlightKey = preheatInFlight,
-        ) ?: return
+        // v7.7 (Step B3): two judgement moments share this body
+        // and the FULL guard set — the drain's beat (createdTaskId
+        // == null -> QueuePreheat.decide, any first-in-line task)
+        // and the creation instant (createdTaskId != null ->
+        // decideAtCreation, the newcomer only, judged the moment
+        // TaskStore.add fires DownloadCenter's hook).
+        val target = if (createdTaskId == null) {
+            QueuePreheat.decide(
+                tasks = store.tasks,
+                now = System.currentTimeMillis(),
+                onWifi = runCatching { DownloadCenter.isOnWifi() }.getOrDefault(false),
+                dualActive = dualActive,
+                // Traffic protection is ON exactly when a threshold
+                // is set (DownloadCenter.trafficThresholdMB: 0 = off).
+                trafficProtectionOn = DownloadCenter.trafficThresholdMB > 0,
+                // v5.0 (audit round 35): the charge park as a LIVE
+                // condition (same pair the drain's charge gate
+                // judges) — while it holds, no queued task can
+                // start, so warming one would only waste battery.
+                chargeParked = ChargeGuard.shouldPark(
+                    DownloadCenter.chargeOnlyDownload,
+                    runCatching { DownloadCenter.isCharging() }.getOrDefault(true),
+                ),
+                proxyActive = DownloadCenter.proxySettings().active,
+                alreadyWarmed = warmedKeys,
+                inFlightKey = preheatInFlight,
+            )
+        } else {
+            QueuePreheat.decideAtCreation(
+                tasks = store.tasks,
+                createdTaskId = createdTaskId,
+                now = System.currentTimeMillis(),
+                onWifi = runCatching { DownloadCenter.isOnWifi() }.getOrDefault(false),
+                dualActive = dualActive,
+                trafficProtectionOn = DownloadCenter.trafficThresholdMB > 0,
+                chargeParked = ChargeGuard.shouldPark(
+                    DownloadCenter.chargeOnlyDownload,
+                    runCatching { DownloadCenter.isCharging() }.getOrDefault(true),
+                ),
+                proxyActive = DownloadCenter.proxySettings().active,
+                alreadyWarmed = warmedKeys,
+                inFlightKey = preheatInFlight,
+            )
+        } ?: return
         // Claim the one-at-a-time slot and the once-only mark
         // BEFORE spawning, so the next drain pass (400 ms later)
         // already sees both and cannot double-fire.

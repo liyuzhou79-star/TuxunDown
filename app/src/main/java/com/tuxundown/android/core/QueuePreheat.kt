@@ -8,7 +8,10 @@ package com.tuxundown.android.core
  * TLS round trips. The execution lives in DownloadService (a
  * daemon side thread on the drain loop's own beat); this object
  * is only the pure guard decision, so every guard is pinned by
- * unit tests without a service or a network.
+ * unit tests without a service or a network. v7.7 (Step B3)
+ * adds a second judgement moment — the instant a task is
+ * created ([decideAtCreation]) — under the exact same guards;
+ * the drain-beat judgement is unchanged and still runs.
  *
  * Preheat is INVISIBLE and DISPOSABLE by design:
  * - It never occupies a download slot, never touches the
@@ -139,6 +142,43 @@ object QueuePreheat {
         // Once per task+host while it waits.
         if (key in alreadyWarmed) return null
         return Target(candidate.id, candidate.url, host, key)
+    }
+
+    /**
+     * v7.7 (Step B3): the creation-moment trigger. Before B3 the
+     * only preheat judgement ran on the drain loop's beat, so a
+     * task created while another was downloading waited for the
+     * next drain pass (and its 400 ms reap cadence) before its
+     * host was even judged. The creation funnel (TaskStore.add
+     * -> DownloadCenter.onTaskAdded) now judges IMMEDIATELY —
+     * through this function, which is [decide] with EVERY guard
+     * unchanged (a RUNNING task must exist, pure-cellular veto,
+     * traffic-protection veto even on WiFi, charge-park veto,
+     * proxy skip, one-at-a-time, once-per-task+host, primary
+     * host only, non-http(s) excluded via Warmup) — plus one
+     * narrowing of its own: the target must be the CREATED task
+     * itself. Warming some OTHER queued task is the drain's
+     * standing job on its own beat; the creation moment only
+     * earns the newcomer its own head start, and only when it
+     * really is first in line.
+     */
+    fun decideAtCreation(
+        tasks: List<TaskRecord>,
+        createdTaskId: String,
+        now: Long,
+        onWifi: Boolean,
+        dualActive: Boolean,
+        trafficProtectionOn: Boolean,
+        chargeParked: Boolean,
+        proxyActive: Boolean,
+        alreadyWarmed: Set<String>,
+        inFlightKey: String?,
+    ): Target? {
+        val target = decide(
+            tasks, now, onWifi, dualActive, trafficProtectionOn,
+            chargeParked, proxyActive, alreadyWarmed, inFlightKey,
+        ) ?: return null
+        return if (target.taskId == createdTaskId) target else null
     }
 
     /**

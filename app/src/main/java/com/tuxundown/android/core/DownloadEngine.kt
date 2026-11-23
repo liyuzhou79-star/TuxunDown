@@ -1117,8 +1117,9 @@ class DownloadEngine(
                 // the part on a fresh connection, resuming from
                 // the part's current offset.
                 // v4.6: the patience is speed-aware (StallPolicy):
-                // it shrinks from the old flat 12 s toward a 4 s
-                // floor as the task's aggregate speed rises, and
+                // it shrinks from the old flat 12 s toward a 3 s
+                // floor (v7.7 Step B3: was 4 s) as the task's
+                // aggregate speed rises, and
                 // the verdict is judged on task.speedBps — the
                 // EMA this same tick just updated above (and the
                 // number ThreadScaler reads), NOT the tick's
@@ -1155,10 +1156,15 @@ class DownloadEngine(
                     }
                     for (conn in stalled) dropConnection(conn)
                 }
-                // Every 2 s the ThreadScaler re-decides the worker
-                // count (v2.3): opening ladder first, then steady
+                // The ThreadScaler re-decides the worker count
+                // (v2.3): opening ladder first, then steady
                 // grow/shrink with verdicts and learned bounds.
-                if (ticks % 2 == 0) {
+                // v7.7 (Step B3): the cadence is ThreadScaler
+                // .evalDue — every tick (1 s) while the opening
+                // ladder is still probing, every 2 s once it
+                // settles, so the steady-state hysteresis keeps
+                // its tuned wall-clock meaning (see evalDue).
+                if (ThreadScaler.evalDue(ticks, scaler?.probing == true)) {
                     val sc = scaler
                     if (sc != null) {
                         // v3.9: re-read the global-cap allowance
@@ -1265,15 +1271,17 @@ class DownloadEngine(
             0
         }
         // v4.2: the start count is decided by the pure StartPlan
-        // (see StartPlan for the full rule table). The v1.5 hint
-        // gate stays HERE: the caller passes the remembered
-        // optimum unconditionally, and only a FRESH start may use
-        // it — a resume never sees the hint today. StartPlan's
-        // hint branch itself does not check `resuming`, so if a
-        // future caller passes a hint for a resume it will be
-        // honoured there too.
+        // (see StartPlan for the full rule table). v7.7 (Step
+        // B3): the remembered optimum is now passed for resumes
+        // too — StartPlan's fresh branch starts AT it with no
+        // probing, its resume branch uses it only as a floor
+        // under the persisted restart count and keeps probing.
+        // (Pre-B3 the gate lived here and a resume never saw the
+        // hint at all.) The note below still keys on the FRESH
+        // hint only: its text says probing was skipped, which is
+        // only true on the fresh branch.
         val plan = StartPlan.decide(
-            hint = if (!resuming) initialThreadsHint else 0,
+            hint = initialThreadsHint,
             cap = initialThreadsCap,
             resuming = resuming,
             persistedThreads = task.threads,
@@ -1312,10 +1320,26 @@ class DownloadEngine(
         // v5.3: this run's growth ramp starts from the same
         // allowance-pressed target. Its initial grant is the
         // target itself whenever that is at or below the burst
-        // width (16) — the v4.2 burst opening is never smoothed —
-        // and 16 for anything larger; the sampler's ticks then
-        // adjudicate further growth through it (see GrowthRamp).
-        val ramp = GrowthRamp(minOf(sc.target, connAllowance))
+        // width (32 since v7.7 Step B3) — the burst opening is
+        // never smoothed — and the burst width for anything
+        // larger; the sampler's ticks then adjudicate further
+        // growth through it (see GrowthRamp). v7.7 (Step B3):
+        // a remembered-optimum start (hint > 0 — the fresh
+        // branch above, probing off) passes its whole target as
+        // the base grant, so a host whose optimum is already
+        // known opens AT that count full width instead of
+        // re-climbing from the burst width; the target was
+        // already pressed by the cap (StartPlan's bound and the
+        // scaler's max) and by the allowance read just above,
+        // so the exception widens nothing past either bound.
+        val ramp = GrowthRamp(
+            minOf(sc.target, connAllowance),
+            baseGrant = if (hint > 0) {
+                minOf(sc.target, connAllowance)
+            } else {
+                GrowthRamp.BASE_GRANT
+            },
+        )
         growthRamp = ramp
         repeat(ramp.granted) { spawnWorker(count) }
 
@@ -1654,6 +1678,26 @@ class DownloadEngine(
                 val tail = pollPendingTail()
                 if (tail != null) {
                     downloadActive(tail)
+                    continue
+                }
+            }
+            // v7.7 (Step B3): the early endgame zone (see
+            // Endgame.shouldAttemptSplit). Once the unclaimed
+            // fresh chunks can no longer keep every live worker
+            // busy, a worker that comes back for work first tries
+            // to split the largest in-flight remainder — the tail
+            // starts shrinking while the last fresh chunks are
+            // still being claimed, instead of only after the
+            // cursor runs dry. Nothing worth splitting (or no
+            // tail waiting) falls through to the fresh claim
+            // below, unchanged.
+            if (Endgame.shouldAttemptSplit(
+                    chunkCount - nextChunk.get(), activeWorkers.get()
+                )
+            ) {
+                val early = stealTail()
+                if (early != null) {
+                    downloadActive(early)
                     continue
                 }
             }
@@ -3609,7 +3653,11 @@ class DownloadEngine(
          *  this alias exists so DownloadCenter's desire table
          *  reads in engine constants like the other branches. */
         const val FTP_MAX_CONNECTIONS = FtpSegmented.MAX_CONNECTIONS
-        const val MIN_SPLIT = 256L * 1024
+        /** v2.2: smallest in-flight remainder worth splitting.
+         *  v7.7 (Step B3): halved 256 KB -> 128 KB (so the
+         *  smallest tail piece halves to 64 KB — see Endgame)
+         *  so the tail can be cut finer for idle workers. */
+        const val MIN_SPLIT = 128L * 1024
         const val BUFFER_SIZE = 128 * 1024
         /** v1.7: was 6 — long CDN redirect chains hit it; loops are
          *  detected separately, so a higher budget is safe. */

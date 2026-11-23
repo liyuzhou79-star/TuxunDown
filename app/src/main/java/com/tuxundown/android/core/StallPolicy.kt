@@ -48,22 +48,32 @@ object StallPolicy {
     const val MAX_THRESHOLD_MS = 12_000L
 
     /**
-     * The floor, at (and above) [HIGH_SPEED_BPS]. 4 s is four
-     * sampler ticks: a verdict needs more than one tick of
-     * evidence by construction (the stall age itself must exceed
-     * this), and 4 s sits safely above the jitter it must not
-     * punish — a fresh connection's TCP+TLS handshake is a few
-     * round trips (well under 1 s even on a 300 ms RTT link),
-     * TCP slow start ramps over a similar span, and the 1 s tick
+     * The floor, at (and above) [HIGH_SPEED_BPS]. v7.7 (Step
+     * B3): lowered 4 s -> 3 s on the user's speed-first ruling,
+     * so a dead connection at full speed is taken over one
+     * second sooner. The anti-thrash argument still holds at
+     * 3 s: a verdict needs more than one tick of evidence by
+     * construction (the stall age itself must exceed this),
+     * and 3 s sits safely above the jitter it must not punish —
+     * a fresh connection's TCP+TLS handshake is a few round
+     * trips (well under 1 s even on a 300 ms RTT link), TCP
+     * slow start ramps over a similar span, and the 1 s tick
      * quantises the measured stall age by up to a full second.
-     * Below ~4 s a slow-but-alive connection could be killed
-     * before its first bytes land, and its replacement would face
-     * the same clock — a thrash loop. (A connection that is
-     * truly dead is still bounded independently: every engine
-     * connection carries a 30 s read timeout, set in
-     * openFollowingRedirects.)
+     * Below ~3 s a slow-but-alive connection could be killed
+     * before its first bytes land, and its replacement would
+     * face the same clock — a thrash loop. (A connection that
+     * is truly dead is still bounded independently: every
+     * engine connection carries a 30 s read timeout, set in
+     * openFollowingRedirects.) The low-speed end is UNCHANGED:
+     * [MAX_THRESHOLD_MS] stays 12 s, so slow tasks keep the
+     * pre-v4.6 patience exactly; only the high-speed portion
+     * of the curve steepens (the interpolation span widens
+     * from 8 s to 9 s of drop). The guards in [shouldEvict]
+     * are untouched — a lone active connection is still never
+     * evicted, and a task that is not moving at all still
+     * evicts nobody.
      */
-    const val MIN_THRESHOLD_MS = 4_000L
+    const val MIN_THRESHOLD_MS = 3_000L
 
     /** At or below this aggregate speed the threshold is the max:
      *  256 KiB/s. Below it, per-connection shares are so small

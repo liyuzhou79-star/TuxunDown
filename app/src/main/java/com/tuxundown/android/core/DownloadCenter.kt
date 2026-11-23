@@ -245,6 +245,21 @@ object DownloadCenter {
      * SidecarChecksum.applyTo) and persists via the coalesced
      * save. Every failure is silent by design.
      */
+    /**
+     * v7.7 (Step B3): creation-moment queue-preheat hook,
+     * registered by DownloadService while it lives (the preheat
+     * machinery — its warmed marks, its one-at-a-time slot, the
+     * warm thread — is the service's). Invoked from the
+     * onTaskAdded funnel above with the created task's id; the
+     * service judges it through QueuePreheat.decideAtCreation
+     * under the FULL v4.5 guard set. Null while no service is
+     * running — in that case nobody can be RUNNING either, so
+     * the guard would veto anyway, and the drain's standing
+     * beat judges the task when the service next runs.
+     */
+    @Volatile
+    var creationPreheatHook: ((String) -> Unit)? = null
+
     internal fun maybeFetchSidecarChecksum(task: TaskRecord) {
         if (!SidecarChecksum.shouldFetch(autoReadChecksumFile, task)) return
         val targetName = SidecarChecksum.targetFileName(task)
@@ -1529,7 +1544,14 @@ object DownloadCenter {
         store.lastLoadOutcome?.let { recordTasksRecovery(it) }
         // v5.8: creation funnel for sidecar checksums (see
         // maybeFetchSidecarChecksum / TaskStore.onTaskAdded).
-        store.onTaskAdded = { t -> maybeFetchSidecarChecksum(t) }
+        // v7.7 (Step B3): the same funnel also fires the
+        // creation-moment preheat hook (see creationPreheatHook)
+        // — the newcomer is judged for a warm host at the
+        // instant it is created, not only on the drain's beat.
+        store.onTaskAdded = { t ->
+            maybeFetchSidecarChecksum(t)
+            runCatching { creationPreheatHook?.invoke(t.id) }
+        }
         syncProxyState()
         refreshScheduleAlarm()
         // v5.1: fix the memory tier for this process now that a

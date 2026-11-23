@@ -1,7 +1,9 @@
 package com.tuxundown.android
 
+import com.tuxundown.android.core.DownloadEngine
 import com.tuxundown.android.core.Endgame
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -88,6 +90,48 @@ class EndgameTest {
         var sum = 0L
         for (i in 0 until bounds.size - 1) sum += bounds[i + 1] - bounds[i]
         assertEquals(9_876_543L - 123_456L, sum)
+    }
+
+    // ---- v7.7 (Step B3): the early endgame-zone trigger ----
+
+    @Test
+    fun earlySplitZoneOpensWhenUnclaimedDropsBelowTheFleet() {
+        // The pre-B3 trigger was unclaimed == 0 only; the zone
+        // now opens as soon as fresh chunks cannot keep every
+        // live worker busy.
+        assertTrue(Endgame.shouldAttemptSplit(0, 8))
+        assertTrue(Endgame.shouldAttemptSplit(7, 8))
+        assertTrue(Endgame.shouldAttemptSplit(1, 2))
+        // At/above the fleet size every worker still has fresh
+        // work: no splitting.
+        assertFalse(Endgame.shouldAttemptSplit(8, 8))
+        assertFalse(Endgame.shouldAttemptSplit(100, 8))
+        // No live workers: nobody to hand a piece to.
+        assertFalse(Endgame.shouldAttemptSplit(0, 0))
+        assertFalse(Endgame.shouldAttemptSplit(0, -1))
+    }
+
+    // ---- v7.7 (Step B3): finer tail granularity ----
+
+    @Test
+    fun engineMinSplitIs128KbAndSplitsWhat256KbCouldNot() {
+        assertEquals(128L * 1024, DownloadEngine.MIN_SPLIT)
+        val finer = DownloadEngine.MIN_SPLIT
+        // A 200 KB remainder: below the old 256 KB floor (no
+        // split then), above the new one — it splits, and its
+        // two 100 KB pieces respect the new 64 KB piece floor.
+        assertNull(Endgame.planSplit(listOf(range(0, 0, 200_000)), 1, minSplit))
+        val split = Endgame.planSplit(listOf(range(0, 0, 200_000)), 1, finer)!!
+        assertEquals(listOf(100_000L), split.cuts)
+        // At/below the new floor nothing splits, as before.
+        assertNull(Endgame.planSplit(listOf(range(0, 0, finer)), 4, finer))
+        assertNull(Endgame.planSplit(listOf(range(0, 0, finer - 1)), 4, finer))
+        // Pieces never go below half the floor (64 KB): a
+        // 150 KB remainder with many idle workers still cuts
+        // into just two pieces of 75 KB.
+        val capped = Endgame.planSplit(listOf(range(0, 0, 150_000)), 8, finer)!!
+        assertEquals(1, capped.cuts.size)
+        assertEquals(75_000L, capped.cuts[0])
     }
 
     @Test

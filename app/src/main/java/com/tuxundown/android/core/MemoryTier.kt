@@ -71,6 +71,17 @@ package com.tuxundown.android.core
  *     tick, so the old ~250 burst no longer stacks); formal
  *     stacked peak < ~550 — ~21% of the ~1000-thread 32-bit
  *     pthread_create trouble zone, >= 4.7x headroom.
+ *     v7.7 Step B3 addendum (delta arithmetic, not a new
+ *     audit): the initial grant is now <= 32 (burst 32) and a
+ *     remembered-optimum start may open at its allowance-
+ *     pressed target at once, so the staggered-join overshoot
+ *     grows by at most the grant delta per concurrent joiner
+ *     (5 x 16 = 80 threads / connections worst case): formal
+ *     stacked peak < ~630, still ~1.6x under the trouble zone;
+ *     the steady figures and every other line of this ledger
+ *     are unmoved (the global budget still caps the steady
+ *     total at 128, and full-width hint starts are pressed by
+ *     that same allowance before they spawn).
  *   file descriptors: realistic ~210-260, formal stacked
  *     ~490 — >= 4x / >= 2x under the 1024 soft limit.
  *   memory: the three tier totals above are the whole-process

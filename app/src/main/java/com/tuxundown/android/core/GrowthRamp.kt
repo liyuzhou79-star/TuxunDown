@@ -20,14 +20,25 @@ package com.tuxundown.android.core
  * cap + one step instead of cap x 1.8.
  *
  * The rule, per adjudication (the engine calls [allow] exactly
- * once per scaler tick — every 2 s on the segmented path, every
- * 1 s on the HLS path):
+ * once per scaler evaluation — on the segmented path every 1 s
+ * while the opening ladder is probing and every 2 s in steady
+ * state since v7.7 Step B3, every 1 s on the HLS path):
  *
- * - The initial grant is min(initialDesired, [BASE_GRANT]).
- *   [BASE_GRANT] is StartPlan.BURST_START (16): the v4.2 burst
- *   opening is NEVER smoothed — a fresh task still bursts in at
- *   16 exactly as before, and an HLS start width (<= 16) passes
- *   through whole.
+ * - The initial grant is min(initialDesired, baseGrant), where
+ *   baseGrant defaults to [BASE_GRANT]. [BASE_GRANT] is
+ *   StartPlan.BURST_START (32 since v7.7 Step B3): the burst
+ *   opening is NEVER smoothed — a fresh task still bursts in
+ *   at the full burst width exactly as before, and an HLS
+ *   start width (<= 16) passes through whole.
+ * - v7.7 (Step B3) full-width exception: when the start count
+ *   IS a remembered per-host optimum (StartPlan's hint branch,
+ *   probing off), the engine passes baseGrant = the start
+ *   target itself, so the initial grant is the whole learned
+ *   count — a known server no longer re-climbs from the burst
+ *   width to a count it already proved. The global allowance
+ *   and the rate-limit cap have already pressed that target
+ *   before the ramp sees it, so the exception can never widen
+ *   a start past either bound.
  * - desired <= granted: granted follows desired DOWN (or holds)
  *   immediately and is returned as-is. Decreases are never
  *   smoothed: a falling global cap or a learned host cap takes
@@ -37,21 +48,19 @@ package com.tuxundown.android.core
  *   max([STEP_FLOOR], desired / [STEP_DIVISOR]) — and the new
  *   granted is returned.
  *
- * Slope rationale: at least +8 per adjudication means the
- * segmented path (2 s ticks) gains at least 4 connections per
- * second, so small targets are reached in one or two steps; at
- * most about +25% of the target per adjudication means the
- * climb from the 16 baseline to any target up to 64 completes
- * in at most 4 adjudications (~8 s) — the same overall pace as
- * the old doubling ladder, except it starts at 16 instead of 4.
- * v7.7 (per-task top raised to 128): the same rule reaches 128
- * in exactly 4 adjudications too — stepFor(128) = 32, so the
- * grant walks 16 -> 48 -> 80 -> 112 -> 128 (~8 s on the
- * segmented path). No constant changed: the step is defined
- * from the target, so it scales with the new top on its own.
- * (Most targets take 3 or fewer; 59, 62 and 63 take 4, because
- * [stepFor] uses integer division and falls one short there —
- * the true counts are pinned by GrowthRampTest.)
+ * Slope rationale: at least +8 per adjudication, so small
+ * targets are reached in one or two steps; at most about +25%
+ * of the target per adjudication means the climb completes in
+ * a bounded number of adjudications. v7.7 history: with the
+ * burst at 16 the climb to 64 took at most 4 adjudications and
+ * to 128 exactly 4 (16 -> 48 -> 80 -> 112 -> 128). Step B3
+ * raised the burst to 32 (StartPlan.BURST_START; the step
+ * constants did NOT change — the step is defined from the
+ * target, so it scales on its own, exactly as Step B2 found):
+ * the grant now walks 32 -> 64 -> 96 -> 128 (3 adjudications)
+ * and 32 -> 48 -> 64 (2). A few near-top targets (e.g. 127)
+ * still take 4, because [stepFor] uses integer division — the
+ * true counts are pinned by GrowthRampTest.
  *
  * Spawn-side ONLY: [allow] decides how many workers may be
  * spawned, never how many must die. Workers above the granted
@@ -67,13 +76,21 @@ package com.tuxundown.android.core
  * One instance per task run. Pure and deterministic — no
  * clock, no threads, no I/O.
  */
-class GrowthRamp(initialDesired: Int) {
+class GrowthRamp(
+    initialDesired: Int,
+    baseGrant: Int = BASE_GRANT,
+) {
 
     /** The count currently granted: what the spawn side may
      *  have open as a result of adjudications so far. Starts at
-     *  min(initialDesired, [BASE_GRANT]); a negative initial
-     *  desire is treated as 0. */
-    var granted: Int = minOf(initialDesired.coerceAtLeast(0), BASE_GRANT)
+     *  min(initialDesired, baseGrant); a negative initial
+     *  desire (or base grant) is treated as 0. [baseGrant] is
+     *  [BASE_GRANT] for every start except a remembered-optimum
+     *  start, where the engine passes the start target itself
+     *  so the learned count opens full width (see class doc). */
+    var granted: Int = minOf(
+        initialDesired.coerceAtLeast(0), baseGrant.coerceAtLeast(0)
+    )
         private set
 
     /**

@@ -251,6 +251,83 @@ class QueuePreheatTest {
         assertNull(decide(listOf(running, blank)))
     }
 
+    // ---- v7.7 (Step B3): the creation-moment trigger ----
+    // decideAtCreation is decide() plus "the target must be
+    // the created task itself" — every v4.5 guard must veto at
+    // the new trigger point exactly as on the drain's beat.
+
+    private fun decideCreated(
+        tasks: List<TaskRecord>,
+        createdTaskId: String,
+        onWifi: Boolean = true,
+        dualActive: Boolean = false,
+        trafficProtectionOn: Boolean = false,
+        chargeParked: Boolean = false,
+        proxyActive: Boolean = false,
+        alreadyWarmed: Set<String> = emptySet(),
+        inFlightKey: String? = null,
+        now: Long = 1_000,
+    ) = QueuePreheat.decideAtCreation(
+        tasks, createdTaskId, now, onWifi, dualActive,
+        trafficProtectionOn, chargeParked, proxyActive,
+        alreadyWarmed, inFlightKey,
+    )
+
+    @Test
+    fun creationTriggerWarmsTheNewcomerWhenItIsFirstInLine() {
+        val running = task(TaskStatus.RUNNING, "https://r.example.com/x.bin")
+        val created = task(TaskStatus.QUEUED)
+        val target = decideCreated(listOf(running, created), created.id)!!
+        assertEquals(created.id, target.taskId)
+        assertEquals("a.example.com", target.host)
+    }
+
+    @Test
+    fun creationTriggerIgnoresANewcomerThatIsNotFirstInLine() {
+        // Another queued task is ahead (higher priority): the
+        // creation moment earns the NEWCOMER nothing — warming
+        // the task ahead stays the drain beat's standing job.
+        val running = task(TaskStatus.RUNNING)
+        val ahead = task(TaskStatus.QUEUED, "https://h.example.com/f", priority = 1)
+        val created = task(TaskStatus.QUEUED, "https://a.example.com/f")
+        assertNull(decideCreated(listOf(running, ahead, created), created.id))
+        // ...while creating the task that IS first in line works.
+        assertEquals(
+            ahead.id,
+            decideCreated(listOf(running, ahead, created), ahead.id)!!.taskId,
+        )
+    }
+
+    @Test
+    fun creationTriggerKeepsEveryGuard() {
+        val running = task(TaskStatus.RUNNING)
+        val created = task(TaskStatus.QUEUED)
+        val tasks = listOf(running, created)
+        // No RUNNING task (the created task alone) -> nothing.
+        assertNull(decideCreated(listOf(created), created.id))
+        // Pure cellular -> veto; dual channel still counts.
+        assertNull(decideCreated(tasks, created.id, onWifi = false, dualActive = false))
+        assertTrue(decideCreated(tasks, created.id, onWifi = false, dualActive = true) != null)
+        // Traffic protection vetoes even on WiFi.
+        assertNull(decideCreated(tasks, created.id, trafficProtectionOn = true))
+        // Charge park vetoes.
+        assertNull(decideCreated(tasks, created.id, chargeParked = true))
+        // Proxy skips.
+        assertNull(decideCreated(tasks, created.id, proxyActive = true))
+        // One preheat already in flight -> no second one.
+        assertNull(decideCreated(tasks, created.id, inFlightKey = "x\ny.example.com"))
+        // This task+host already warmed while waiting -> no re-warm.
+        assertNull(
+            decideCreated(
+                tasks, created.id,
+                alreadyWarmed = setOf(QueuePreheat.keyFor(created.id, "a.example.com")),
+            ),
+        )
+        // An FTP primary warms nothing (FTP excluded).
+        val ftp = task(TaskStatus.QUEUED, "ftp://a.example.com/file.zip")
+        assertNull(decideCreated(listOf(running, ftp), ftp.id))
+    }
+
     // ---- stale-target discard (stillTarget) ----
 
     @Test

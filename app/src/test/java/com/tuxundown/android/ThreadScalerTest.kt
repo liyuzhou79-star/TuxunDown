@@ -148,6 +148,27 @@ class ThreadScalerTest {
     }
 
     @Test
+    fun evalCadenceIsEveryTickWhileProbingAndEveryTwoInSteadyState() {
+        // v7.7 (Step B3): the opening ladder is judged on every
+        // 1 s sampler tick, so each doubling waits ~1 s instead
+        // of ~2 s; steady state keeps the tuned 2 s cadence the
+        // hysteresis constants were built against.
+        for (tick in 1..6) {
+            assertTrue("probing tick $tick", ThreadScaler.evalDue(tick, probing = true))
+        }
+        assertTrue(ThreadScaler.evalDue(2, probing = false))
+        assertTrue(ThreadScaler.evalDue(4, probing = false))
+        assertFalse(ThreadScaler.evalDue(1, probing = false))
+        assertFalse(ThreadScaler.evalDue(3, probing = false))
+        // From the v7.7 burst (32) at the probing cadence the
+        // ladder reaches the 128 top in two evaluations.
+        val s = ThreadScaler(32, probing = true)
+        assertEquals(64, s.onEval(100, canGrow = true, active = true))
+        assertEquals(128, s.onEval(130, canGrow = true, active = true))
+        assertFalse(s.probing)
+    }
+
+    @Test
     fun boundsAreRespected() {
         assertEquals(ThreadScaler.MIN_TARGET, ThreadScaler(1, false).target)
         // v7.7: the default ceiling is the raised MAX_THREADS (128).

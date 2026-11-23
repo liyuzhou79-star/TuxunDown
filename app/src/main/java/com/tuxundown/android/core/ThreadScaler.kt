@@ -211,6 +211,27 @@ class ThreadScaler(
     }
 
     companion object {
+        /**
+         * v7.7 (Step B3): which sampler ticks (1 s grid) run an
+         * evaluation. While the opening ladder is PROBING, every
+         * tick evaluates — the ladder has no cooldown and arms
+         * no verdicts (see changeTo), so a 1 s cadence simply
+         * halves the time each doubling waits: from the v7.7
+         * burst of 32 the top is two evaluations away (~2 s
+         * instead of ~4 s). Once probing settles, evaluations
+         * return to every second tick (2 s): every steady-state
+         * hysteresis constant in this class (CONFIRMATIONS,
+         * VERDICT_EVALS, FLAT_EVALS_TO_SHRINK,
+         * MIN_EVALS_BETWEEN_CHANGES) was tuned against that
+         * 2 s wall-clock cadence and keeps its meaning exactly.
+         * The misjudgement risk of the faster opening cadence
+         * is bounded by the ladder's own rule — it still stops
+         * at the first plateau; it only reaches the plateau
+         * sooner.
+         */
+        fun evalDue(tick: Int, probing: Boolean): Boolean =
+            probing || tick % 2 == 0
+
         const val MIN_TARGET = 2
         /** "Long ago" — the first change never waits on a cooldown. */
         private const val BIG = 1_000_000
