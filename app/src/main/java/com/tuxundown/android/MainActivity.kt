@@ -7518,7 +7518,20 @@ fun TaskCard(
                         if (task.avgBps > 0 && DownloadCenter.cardFieldShown(CardFields.AVG_SPEED)) InfoRow("平均速度：", Format.speed(task.avgBps))
                         if (task.peakBps > 0) InfoRow("峰值速度：", Format.speed(task.peakBps))
                         val eta = Format.eta(task.etaSeconds)
-                        InfoRow("剩余时间：", eta.ifBlank { "计算中…" })
+                        InfoRow(
+                            "剩余时间：",
+                            // v5.3 (audit round 38): etaSeconds is
+                            // -1 both for "speed not sampled yet"
+                            // and for "size unknown" (every HLS
+                            // task, every chunked response) — the
+                            // old blanket 计算中… promised a number
+                            // that can never come for the second
+                            // kind, while every other surface just
+                            // hides its ETA there. Say which it is.
+                            eta.ifBlank {
+                                if (task.totalSize <= 0) "还不知道大小，没法估算" else "计算中…"
+                            },
+                        )
                         InfoRow(
                             "已下载：",
                             "${Format.size(task.downloaded)} / ${Format.size(task.totalSize)}",
@@ -7642,7 +7655,15 @@ fun TaskCard(
                     )
                     InfoRow(
                         "分片：",
-                        "已完成 ${task.chunkDone.count { it }}/$total 块 · ${task.threads} 条连接",
+                        // v5.3 (audit round 38): the count is
+                        // TaskRecord.displayConnections — while
+                        // RUNNING it is the sampler's live count,
+                        // not the scaler target threads holds
+                        // (the connCapHeld line below calls
+                        // threads 想要 N 条； printing it here as
+                        // the live count contradicted that line
+                        // on the same card).
+                        "已完成 ${task.chunkDone.count { it }}/$total 块 · ${task.displayConnections} 条连接",
                     )
                     // v3.5: the chunk progress map. ACTIVE
                     // cells come from the engine's per-second

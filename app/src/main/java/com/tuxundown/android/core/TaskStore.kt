@@ -295,6 +295,29 @@ class TaskRecord(
         get() = if (totalSize > 0 && speedBps > 0 && downloaded < totalSize)
             (totalSize - downloaded) / speedBps else -1
 
+    /**
+     * v5.3 (audit round 38): the connection count a surface may
+     * print as a present-tense fact ("N 条连接"). [threads] is
+     * the count the engine is AIMING for (the scaler target —
+     * the connCapHeld card line says exactly that: 想要
+     * threads 条）, so printing it bare as the live count
+     * contradicted that same line whenever the global cap held
+     * the task down, and overstates during the v5.3 GrowthRamp
+     * climb. While RUNNING, the sampler's per-second snapshot
+     * ([connInfos]) IS the live count — use it. In every other
+     * state there is no live snapshot (it is cleared when a run
+     * ends), so the target is the only honest number left and
+     * is what surfaces printed before; callers that need the
+     * distinction (the cap line) still read [threads] and
+     * [connInfos] directly.
+     */
+    val displayConnections: Int
+        get() = if (status == TaskStatus.RUNNING && connInfos.isNotEmpty()) {
+            connInfos.size
+        } else {
+            threads
+        }
+
     /** Average transfer speed over the accumulated running time. */
     val avgBps: Long
         get() = if (elapsedMs > 0 && downloaded > 0) downloaded * 1000 / elapsedMs else 0

@@ -81,7 +81,11 @@ object TaskDiagnostics {
             when {
                 task.isHls -> "流媒体分片并行下载（HLS）"
                 task.singleThreadOnly -> "单线程（单条连接）"
-                else -> "${task.threads} 条连接"
+                // v5.3 (audit round 38): same single source as
+                // the card's 分片 row — the live count while
+                // RUNNING, the target otherwise (see
+                // TaskRecord.displayConnections).
+                else -> "${task.displayConnections} 条连接"
             }
         ).append('\n')
         if (task.error.isNotBlank()) {
