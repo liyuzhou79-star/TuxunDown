@@ -1219,6 +1219,7 @@ class DownloadEngine(
         ) { r -> Thread(r).apply { isDaemon = true } }
         val valid = mutableListOf(task.url)
         var rejected = 0
+        var unconfirmed = 0
         try {
             val primarySampleF = pool.submit(java.util.concurrent.Callable {
                 if (sampleLen > 0) fetchSample(task.url, sampleOffset, sampleLen) else null
@@ -1236,10 +1237,16 @@ class DownloadEngine(
             for ((src, f) in mirrorFs) {
                 val (total, sample) = runCatching { f.get() }
                     .getOrDefault(-1L to null)
-                if (SourceCheck.isSameFile(task.totalSize, total, primarySample, sample)) {
-                    valid.add(src)
-                } else {
-                    rejected++
+                // v5.0 (audit round 35): a probe that could not
+                // judge (UNKNOWN — e.g. the mirror would not
+                // answer a request that may not carry the task's
+                // session, see SessionScope) is not a proven
+                // fake: the source is still never used, but it
+                // is counted and reported separately below.
+                when (SourceCheck.verdict(task.totalSize, total, primarySample, sample)) {
+                    SourceCheck.Verdict.SAME -> valid.add(src)
+                    SourceCheck.Verdict.DIFFERENT -> rejected++
+                    SourceCheck.Verdict.UNKNOWN -> unconfirmed++
                 }
             }
         } finally {
@@ -1251,10 +1258,16 @@ class DownloadEngine(
                     "已拒绝使用，只用对得上的源下载。"
             )
         }
+        if (unconfirmed > 0) {
+            appendNote(
+                "有 $unconfirmed 个镜像源没能确认是不是同一个文件" +
+                    "（服务器没给出大小，可能需要登录），已先不用，只用确认过的源下载。"
+            )
+        }
         if (valid.size > 1 && !task.note.contains("多源下载")) {
             appendNote("多源下载：${valid.size} 个地址一起下同一个文件。")
         }
-        if (rejected > 0 || valid.size > 1) onSave()
+        if (rejected > 0 || unconfirmed > 0 || valid.size > 1) onSave()
         return valid
     }
 

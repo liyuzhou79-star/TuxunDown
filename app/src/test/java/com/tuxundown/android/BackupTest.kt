@@ -1,6 +1,7 @@
 package com.tuxundown.android
 
 import com.tuxundown.android.core.Backup
+import com.tuxundown.android.core.FailureKind
 import com.tuxundown.android.core.TaskRecord
 import com.tuxundown.android.core.TaskStatus
 import com.tuxundown.android.core.TaskStore
@@ -48,6 +49,45 @@ class BackupTest {
         assertNotNull(parsed.tasksJson)
         assertNull(parsed.settings)
         assertEquals(1, TaskStore.deserialize(parsed.tasksJson!!).size)
+    }
+
+    @Test
+    fun failureKindSurvivesEveryBackupShape() {
+        // v5.0 (audit round 35): the v4.5 verdict field must
+        // round-trip through BOTH backup shapes (v1 object and
+        // v2 migration pack), not just through TaskStore alone.
+        val task = TaskRecord(
+            url = "https://example.com/c.bin",
+            fileName = "c.bin",
+            status = TaskStatus.FAILED,
+        ).apply {
+            failureKind = FailureKind.HTTP_GONE
+            failureHttpCode = 410
+        }
+        val tasksJson = TaskStore.serialize(listOf(task))
+        val settings = JSONObject()
+        for (text in listOf(
+            Backup.build(tasksJson, settings, 1_700_000_000_000),
+            Backup.buildMigration(tasksJson, settings, null, null, 1_700_000_000_000),
+        )) {
+            val restored = TaskStore.deserialize(Backup.parse(text).tasksJson!!).single()
+            assertEquals(FailureKind.HTTP_GONE, restored.failureKind)
+            assertEquals(410, restored.failureHttpCode)
+        }
+    }
+
+    @Test
+    fun failureKindMissingInOldShapesDefaultsSafely() {
+        // A pre-v4.5 record (no failureKind field at all),
+        // carried by the bare v1.4 array shape: the field must
+        // come back as the safe UNKNOWN default, never a crash
+        // and never a guessed verdict.
+        val oldJson = """[{"id":"old1","url":"https://e.com/f","status":"FAILED"}]"""
+        val parsed = Backup.parse(oldJson)
+        assertNotNull(parsed.tasksJson)
+        val restored = TaskStore.deserialize(parsed.tasksJson!!).single()
+        assertEquals(FailureKind.UNKNOWN, restored.failureKind)
+        assertEquals(0, restored.failureHttpCode)
     }
 
     @Test
