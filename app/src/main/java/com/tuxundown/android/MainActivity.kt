@@ -4560,6 +4560,15 @@ fun SpeedTestScreen(onBack: () -> Unit) {
         mutableStateOf<List<SpeedCompare.PointResult>>(emptyList())
     }
     var showCompareConfirm by remember { mutableStateOf(false) }
+    // v5.9 audit round 44: RUNNING tasks at the moment a
+    // quick test or multi-point run STARTED (read once in
+    // startTest / startCompare) — the same start-moment
+    // snapshot the connection comparison has shown since
+    // v4.3 (see ConnCompare.runningTasksNote). Neither test
+    // pauses or budget-shares running downloads; they contend
+    // for the same network, so a run started mid-download
+    // reads low and the results must say so.
+    var stRunningAtStart by remember { mutableStateOf(0) }
     // ---- v4.1: quick-test history (last 10, local only) ----
     // Held as Compose state and RE-READ from the store when a
     // test finishes (see startTest's final post): the fresh list
@@ -4577,6 +4586,11 @@ fun SpeedTestScreen(onBack: () -> Unit) {
     }
     fun startTest() {
         if (running) return
+        // Audit round 44: snapshot the contention at the start
+        // moment only (see ConnCompare.runningTasksNote).
+        stRunningAtStart = DownloadCenter.store.tasks.count {
+            it.status == TaskStatus.RUNNING
+        }
         running = true
         phase = "准备测速…"
         endpointLabel = ""
@@ -4655,6 +4669,11 @@ fun SpeedTestScreen(onBack: () -> Unit) {
     // appended live so the chart grows point by point.
     fun startCompare() {
         if (running || compareRunning) return
+        // Audit round 44: same start-moment snapshot as the
+        // quick test (see stRunningAtStart).
+        stRunningAtStart = DownloadCenter.store.tasks.count {
+            it.status == TaskStatus.RUNNING
+        }
         compareRunning = true
         compareResults = emptyList()
         comparePhase = "准备多点对比…"
@@ -4745,6 +4764,22 @@ fun SpeedTestScreen(onBack: () -> Unit) {
                         "这里的数字是网络本身的上限参考，不是承诺。",
                     style = MaterialTheme.typography.bodyMedium,
                 )
+                // Audit round 44: the start-moment contention
+                // snapshot, shown while a run is going and with
+                // its results (the wording lives in ConnCompare
+                // so it is tested — the same sentence the
+                // connection comparison uses).
+                val stNote = ConnCompare.runningTasksNote(stRunningAtStart)
+                if (stNote.isNotBlank() &&
+                    (running || compareRunning || singleBps >= 0 || compareResults.isNotEmpty())
+                ) {
+                    Text(
+                        stNote,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                }
                 if (endpointLabel.isNotBlank()) {
                     Text(
                         "测速点：$endpointLabel",

@@ -157,7 +157,20 @@ class SpeedTest {
                 // leaves bytes unread and keeps the disconnect.
                 var eof = false
                 try {
-                    conn = URL(url).openConnection() as HttpURLConnection
+                    // v5.9 audit round 44: open through
+                    // ProxyState like every other auxiliary
+                    // path in the app (sniffer, SizeProbe,
+                    // LinkPrecheck, HlsProbe, sidecar) — this
+                    // was the one raw openConnection left, so
+                    // with a proxy configured the test silently
+                    // measured the DIRECT path (and a link only
+                    // reachable through the proxy measured 0)
+                    // while the screen calls the result the
+                    // speed "under the current network". With
+                    // no proxy configured ProxyState.open is
+                    // exactly openConnection, so nothing else
+                    // changes.
+                    conn = ProxyState.open(URL(url))
                     conn.connectTimeout = 10_000
                     conn.readTimeout = 5_000
                     conn.setRequestProperty("User-Agent", DownloadEngine.DEFAULT_UA)

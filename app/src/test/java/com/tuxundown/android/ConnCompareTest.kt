@@ -96,6 +96,21 @@ class ConnCompareTest {
     }
 
     @Test
+    fun runningTasksNotePromisesContentionNotPause() {
+        // v5.9 audit round 44: the note is the copy the speed
+        // test page now shows too, and it must stay aligned
+        // with the implementation — the tests do NOT pause
+        // running downloads and do NOT share the bandwidth
+        // budget with them; both sides contend for the same
+        // network, which is exactly what the note says （抢带宽，
+        // 结果偏低） and nothing stronger.
+        val note = ConnCompare.runningTasksNote(2)
+        assertTrue(note.contains("抢带宽"))
+        assertTrue(!note.contains("暂停"))
+        assertTrue(!note.contains("让路"))
+    }
+
+    @Test
     fun consentTextMatchesTheConstants() {
         val text = ConnCompare.consentText()
         // The numbers the user consents to are the numbers the
