@@ -14,6 +14,19 @@ android {
         targetSdk = 35
         versionCode = 46
         versionName = "5.5.0"
+        // v5.6.0 slimming (audit round 41, lever L1): keep only the
+        // default resources plus English and Chinese variants. The
+        // AndroidX libraries ship accessibility strings (Tab / Dialog /
+        // Switch / "%1$d percent." / "Invalid input" ...) translated
+        // into dozens of locales; measured on the v5.5.0 release APK,
+        // resources.arsc carried 719 non-CJK library translation
+        // strings (fa/ja/ka/pa/it/sw/...) that this app can never show
+        // — its own UI is hardcoded Chinese and its own strings.xml
+        // exists only in the default configuration. Filtering the
+        // packaged locales to default + en + zh variants strips those
+        // dead translations from the arsc while keeping every string
+        // a Chinese or English system can actually resolve.
+        resConfigs += listOf("en", "zh", "zh-rCN", "zh-rTW", "zh-rHK")
     }
 
     // Release signing is injected by CI from repository secrets (the
@@ -80,6 +93,21 @@ android {
     packaging {
         resources {
             excludes += "DebugProbesKt.bin"
+            // v5.6.0 slimming (audit round 41, lever L2): the
+            // kotlin/*.kotlin_builtins files (~10.5 KB compressed in
+            // v5.5.0) hold serialized metadata for the Kotlin standard
+            // library's built-in classes. Their ONLY runtime reader is
+            // kotlin-reflect's built-in class metadata loader
+            // (kotlin.reflect.jvm.internal.impl.builtins
+            // .KotlinBuiltIns / BuiltInsLoader), which loads them when
+            // reflection materializes stdlib classes. This project has
+            // NO kotlin-reflect dependency anywhere in its build files
+            // (grep-verified: no "kotlin-reflect" in any *.kts /
+            // *.toml), and compiled Kotlin code never reads these
+            // resources — calls into the stdlib are plain bytecode.
+            // Excluding them is therefore dead-weight removal, not a
+            // behaviour change.
+            excludes += "**/*.kotlin_builtins"
         }
         // v2.0.0 slimming, the big lever: since AGP 7 the default
         // packaging stores classes.dex UNCOMPRESSED in the APK
