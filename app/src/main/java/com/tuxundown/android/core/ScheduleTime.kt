@@ -46,12 +46,14 @@ object ScheduleTime {
      * tomorrow. [zone] decides which wall clock — the fields are
      * set on a Calendar in that zone.
      *
-     * DST caliber (Calendar's lenient field resolution, pinned
-     * by ScheduleTimeTest): a wall time that does not exist
-     * (spring-forward gap, e.g. 02:30 on the day clocks jump
-     * 02:00 -> 03:00) resolves FORWARD by the gap (02:30 lands
-     * at 03:30 local); a wall time that occurs twice (fall-back)
-     * resolves to its FIRST occurrence (the daylight-saving one).
+     * DST caliber (java.util.Calendar's lenient field
+     * resolution, pinned by ScheduleTimeTest from CI evidence):
+     * a wall time that does not exist (spring-forward gap, e.g.
+     * 02:30 on the day clocks jump 02:00 -> 03:00) resolves
+     * BACKWARD by the gap (02:30 lands at 01:30 local standard
+     * time — the slot fires an hour early that one day only);
+     * a wall time that occurs twice (fall-back) resolves to
+     * its FIRST occurrence (the daylight-saving one).
      */
     fun nextOccurrence(
         hour: Int, minute: Int, nowMs: Long,

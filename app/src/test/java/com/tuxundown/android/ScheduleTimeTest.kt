@@ -164,27 +164,22 @@ class ScheduleTimeTest {
         assertEquals("15:30", ScheduleTime.formatHhMm(next, utc))
     }
 
-    // TEMP-DIAGNOSTIC probes (v6.4 step A): the spring-forward
-    // expectation (03:30 EDT) failed CI; exactly one of these
-    // candidates is Calendar's real resolution — the probe
-    // that does NOT fail names it, then this block is replaced
-    // by the single pinned test.
     @Test
-    fun probeSpringBackwardTo0130Est() {
+    fun nextDailyAtSpringForwardNonexistentTimeResolvesBackward() {
+        // America/New_York springs forward on 2026-03-08
+        // (02:00 -> 03:00): 02:30 never happens that day.
+        // java.util.Calendar's lenient resolution moves it
+        // BACKWARD by the gap, landing at 01:30 EST (06:30
+        // UTC) — the slot fires an hour EARLY that one day,
+        // and the next reschedule (again from the stored pick)
+        // is back at 02:30, so the drift never persists.
+        // Pinned from CI evidence (v6.4 step A probe run): the
+        // forward candidates 03:30 EDT and next-day both fail,
+        // this one passes.
         val now = 1_772_902_800_000L // 2026-03-07 12:00 EST
-        assertEquals(1_772_951_400_000L, ScheduleTime.nextDailyAt(2, 30, now, newYork))
-    }
-
-    @Test
-    fun probeSpringNextDay0230Edt() {
-        val now = 1_772_902_800_000L // 2026-03-07 12:00 EST
-        assertEquals(1_773_037_800_000L, ScheduleTime.nextDailyAt(2, 30, now, newYork))
-    }
-
-    @Test
-    fun probeSpringForwardTo0430Edt() {
-        val now = 1_772_902_800_000L // 2026-03-07 12:00 EST
-        assertEquals(1_772_958_600_000L, ScheduleTime.nextDailyAt(2, 30, now, newYork))
+        val next = ScheduleTime.nextDailyAt(2, 30, now, newYork)
+        assertEquals(1_772_951_400_000L, next) // 2026-03-08 01:30 EST
+        assertEquals("01:30", ScheduleTime.formatHhMm(next, newYork))
     }
 
     @Test
