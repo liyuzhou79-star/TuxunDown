@@ -14,6 +14,18 @@ import org.junit.Test
 class TaskDiagnosticsTest {
 
     @Test
+    fun statusLabelCoversEveryTaskStatus() {
+        // v5.6 (R5 closure): every enum value pinned directly —
+        // build() only ever showed FAILED / RUNNING in passing.
+        assertEquals(5, TaskStatus.values().size)
+        assertEquals("排队中", TaskDiagnostics.statusLabel(TaskStatus.QUEUED))
+        assertEquals("下载中", TaskDiagnostics.statusLabel(TaskStatus.RUNNING))
+        assertEquals("已暂停", TaskDiagnostics.statusLabel(TaskStatus.PAUSED))
+        assertEquals("已完成", TaskDiagnostics.statusLabel(TaskStatus.DONE))
+        assertEquals("失败", TaskDiagnostics.statusLabel(TaskStatus.FAILED))
+    }
+
+    @Test
     fun redactedUrlDropsUserinfoQueryAndFragment() {
         assertEquals(
             "https://example.com:8443/a/b.zip?（参数已隐藏）",

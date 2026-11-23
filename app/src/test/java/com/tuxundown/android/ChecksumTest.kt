@@ -207,6 +207,24 @@ class ChecksumTest {
     }
 
     @Test
+    fun stateLabelCoversEveryStateAndFallsBackToNotChecked() {
+        // v5.6 (R5 closure): the card wording for each persisted
+        // state, pinned verbatim — a wrong word here is the whole
+        // failure mode of this function.
+        assertEquals("✓ 对上（文件完整）", Checksum.stateLabel(Checksum.STATE_MATCHED))
+        assertEquals(
+            "✗ 对不上（文件可能损坏或不对）",
+            Checksum.stateLabel(Checksum.STATE_MISMATCHED),
+        )
+        assertEquals("校验中…", Checksum.stateLabel(Checksum.STATE_VERIFYING))
+        // STATE_NONE and any out-of-band stored value (corrupt /
+        // future state read by this build) fall to the else arm.
+        assertEquals("还没校验", Checksum.stateLabel(Checksum.STATE_NONE))
+        assertEquals("还没校验", Checksum.stateLabel(99))
+        assertEquals("还没校验", Checksum.stateLabel(-1))
+    }
+
+    @Test
     fun expectedPrefersSha256() {
         val t = TaskRecord(url = "https://x/f")
         assertNull(Checksum.expectedOf(t))

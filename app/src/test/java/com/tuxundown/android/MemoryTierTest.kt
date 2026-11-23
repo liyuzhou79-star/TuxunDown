@@ -45,6 +45,26 @@ class MemoryTierTest {
         assertEquals(MemoryTier.STANDARD, MemoryTiers.tierFor(-1, false))
     }
 
+    // ---------- tier label ----------
+
+    @Test
+    fun tierLabelNamesEveryTier() {
+        // v5.6 (R5 closure): the diagnostics page wording, pinned
+        // verbatim like the other label tests in this repo.
+        assertEquals(
+            "低（这台设备内存较小，缓冲已自动收紧）",
+            MemoryTiers.tierLabel(MemoryTier.LOW),
+        )
+        assertEquals(
+            "标准（按这台设备的内存用的默认缓冲）",
+            MemoryTiers.tierLabel(MemoryTier.STANDARD),
+        )
+        assertEquals(
+            "高（这台设备内存充足，缓冲已适当放宽）",
+            MemoryTiers.tierLabel(MemoryTier.HIGH),
+        )
+    }
+
     // ---------- budget table ----------
 
     @Test
@@ -160,6 +180,26 @@ class MemoryTierTest {
         l.releaseCursorClaim()
         l.releaseCursorClaim()
         assertEquals(0, l.cursorClaims())
+    }
+
+    @Test
+    fun forceClaimCursorPassesTheCapButStillCountsAndReleases() {
+        // v5.6 re-audit find: forceClaimCursor (the engine's
+        // last-resort so a writer never starves behind another
+        // run's stuck cursor) had no test at all, unlike every
+        // other ledger operation above.
+        val l = ledger(MemoryTier.LOW) // exactly 1 claim under the cap
+        assertTrue(l.tryClaimCursor())
+        assertFalse(l.tryClaimCursor())
+        l.forceClaimCursor()
+        assertEquals(2, l.cursorClaims())
+        // Still counted, still must be released — and once back
+        // at the cap, ordinary claims wait again.
+        l.releaseCursorClaim()
+        assertEquals(1, l.cursorClaims())
+        assertFalse(l.tryClaimCursor())
+        l.releaseCursorClaim()
+        assertTrue(l.tryClaimCursor())
     }
 
     @Test

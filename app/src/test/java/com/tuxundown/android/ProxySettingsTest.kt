@@ -27,6 +27,24 @@ class ProxySettingsTest {
     }
 
     @Test
+    fun typeLabelNamesSocksAndDefaultsEverythingElseToHttp() {
+        // v5.6 (R5 closure): direct pins — before this, only the
+        // SOCKS arm was reached indirectly via unreachableMessage.
+        assertEquals(
+            "SOCKS5",
+            ProxySettings(type = ProxySettings.TYPE_SOCKS).typeLabel(),
+        )
+        assertEquals(
+            "HTTP",
+            ProxySettings(type = ProxySettings.TYPE_HTTP).typeLabel(),
+        )
+        assertEquals("HTTP", ProxySettings().typeLabel())
+        // Out-of-band stored type reads as HTTP (the else arm),
+        // matching javaProxy()'s own fall-through.
+        assertEquals("HTTP", ProxySettings(type = 99).typeLabel())
+    }
+
+    @Test
     fun authHeaderOnlyForHttpWithUsername() {
         val base = ProxySettings(
             enabled = true, host = "127.0.0.1", port = 7890,
