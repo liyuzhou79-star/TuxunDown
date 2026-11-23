@@ -6,6 +6,7 @@ import com.tuxundown.android.core.ThunderLink
 import com.tuxundown.android.sniff.SniffExport
 import com.tuxundown.android.sniff.SniffedResource
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
