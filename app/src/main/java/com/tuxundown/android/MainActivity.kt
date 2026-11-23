@@ -133,6 +133,7 @@ import com.tuxundown.android.core.GhostSnapshot
 import com.tuxundown.android.core.HealthCheck
 import com.tuxundown.android.core.IllegalTransitions
 import com.tuxundown.android.core.PowerStats
+import com.tuxundown.android.core.ResourceStatus
 import com.tuxundown.android.core.SecurityStatus
 import com.tuxundown.android.core.StatusDistribution
 import com.tuxundown.android.core.StorageHealth
@@ -6966,6 +6967,43 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
             if (powerLines.isNotEmpty()) {
                 SettingsGroup("功耗") {
                     for ((label, value) in powerLines) {
+                        InfoRow(label, value)
+                    }
+                }
+            }
+        }
+        // ---- v7.7 (audit round 62, Step C): 资源 — three
+        // read-only runtime figures, read once for this
+        // page visit: the thread count is Thread
+        // .activeCount() (the platform's own approximate
+        // count at the read instant — see ResourceStatus
+        // for the pinned caliber), the memory tier is the
+        // process's current tier from DownloadCenter
+        // .memoryTier() shown by its existing label, and
+        // the active sampler count reuses the 功耗
+        // section's caliber (DownloadCenter's registered-
+        // engine set size). A read that fails drops its
+        // row; if every read fails the whole group is
+        // absent. Neutral statements only. ----
+        item(key = "d-resource") {
+            val resourceLines = remember {
+                ResourceStatus.lines(
+                    ResourceStatus.Snapshot(
+                        threadCount = runCatching {
+                            Thread.activeCount()
+                        }.getOrNull(),
+                        memoryTier = runCatching {
+                            DownloadCenter.memoryTier()
+                        }.getOrNull(),
+                        activeSamplers = runCatching {
+                            DownloadCenter.runningEngines().size
+                        }.getOrNull(),
+                    )
+                )
+            }
+            if (resourceLines.isNotEmpty()) {
+                SettingsGroup("资源") {
+                    for ((label, value) in resourceLines) {
                         InfoRow(label, value)
                     }
                 }
