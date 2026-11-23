@@ -216,21 +216,42 @@ class DownloadService : Service() {
     }
 
     /**
-     * One pass every [PRECHECK_INTERVAL_MS]: take the front of
-     * the queue that is due a check, give each ONE light request,
-     * and stamp the record. Only a 404/410 raises the card's
-     * warning flag; any other outcome (alive, refused, server
-     * error, no network) just refreshes the cache stamp — the
-     * flag is a warning, and the task's real start re-probes
-     * for itself regardless.
+     * One pass every [PRECHECK_INTERVAL_MS] while passes keep
+     * finding candidates: take the front of the queue that is
+     * due a check, give each ONE light request, and stamp the
+     * record. Only a 404/410 raises the card's warning flag;
+     * any other outcome (alive, refused, server error, no
+     * network) just refreshes the cache stamp — the flag is a
+     * warning, and the task's real start re-probes for itself
+     * regardless.
+     *
+     * v7.6 (audit round 61, Step B-2): a pass that finds ZERO
+     * candidates backs the sleep off exponentially (doubling
+     * from the base, capped at [LinkPrecheck.MAX_INTERVAL_MS]
+     * — see LinkPrecheck for the worst-case warning latency
+     * that cap implies) instead of waking flat every 30 s for
+     * hours in pure-park / pure-future-schedule scenes. The
+     * sleep is [LinkPrecheck.awaitInterval]: the enqueue
+     * funnel's hook wakes it the moment a task (re-)queues,
+     * so a fresh candidate is still checked promptly and the
+     * backoff resets on that pass. Nothing here feeds the
+     * drain, a park release, or the sampler — the pre-check
+     * remains a warning flag only.
      */
     private fun precheckLoop() {
+        var sleepMs = PRECHECK_INTERVAL_MS
         while (precheckRunning) {
+            // Snapshot the queue generation BEFORE the pass:
+            // an enqueue landing during the pass must also cut
+            // the sleep that follows it.
+            val gen = LinkPrecheck.queueGeneration()
+            var candidateCount = 0
             runCatching {
                 if (!CrashGuard.safeMode) {
                     val candidates = LinkPrecheck.pickCandidates(
                         DownloadCenter.store.tasks, System.currentTimeMillis(),
                     )
+                    candidateCount = candidates.size
                     var changed = false
                     for (t in candidates) {
                         if (!precheckRunning) break
@@ -243,8 +264,9 @@ class DownloadService : Service() {
                     if (changed) DownloadCenter.store.save()
                 }
             }
+            sleepMs = LinkPrecheck.intervalAfterPass(candidateCount, sleepMs)
             try {
-                Thread.sleep(PRECHECK_INTERVAL_MS)
+                LinkPrecheck.awaitInterval(sleepMs, gen)
             } catch (e: InterruptedException) {
                 break
             }
@@ -2485,7 +2507,10 @@ class DownloadService : Service() {
         // the entry point is auditable.
         const val ACTION_SCHEDULE_WAKE = "com.tuxundown.android.action.SCHEDULE_WAKE"
         const val EXTRA_TASK_ID = "taskId"
-        /** v2.8: pre-check pass interval (see LinkPrecheck). */
-        private const val PRECHECK_INTERVAL_MS = 30_000L
+        /** v2.8: pre-check pass base interval (see LinkPrecheck;
+         *  v7.6: empty passes back off from this base — the one
+         *  definition lives on LinkPrecheck so the two can
+         *  never drift apart). */
+        private const val PRECHECK_INTERVAL_MS = LinkPrecheck.BASE_INTERVAL_MS
     }
 }

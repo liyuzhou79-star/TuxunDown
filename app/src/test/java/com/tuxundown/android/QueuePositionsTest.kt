@@ -244,6 +244,98 @@ class QueuePositionsTest {
         assertEquals(snapshot, input)
     }
 
+    // ---- v7.6 (Step B-6): signature coverage + memo ----
+
+    @Test
+    fun memoReturnsTheCachedInstanceWhileSignatureIsUnchanged() {
+        val tasks = listOf(hostTask("a.example.com"), hostTask("b.example.com"))
+        val memo = QueueOrder.QueuePositionsMemo()
+        val first = memo.positions(tasks, 1_000)
+        assertEquals(QueueOrder.queuePositions(tasks, 1_000), first)
+        // An input the simulation never reads changes — the
+        // memo must still serve the cached instance.
+        tasks[0].downloaded = 123_456
+        tasks[0].note = "changed"
+        val second = memo.positions(tasks, 1_001)
+        assertTrue(first === second)
+    }
+
+    @Test
+    fun memoRecomputesWhenRotationStateChanges() {
+        val a = hostTask("a.example.com")
+        val b = hostTask("b.example.com")
+        val tasks = listOf(a, b)
+        val memo = QueueOrder.QueuePositionsMemo()
+        val before = memo.positions(tasks, 0)
+        assertEquals(1, before[a.id])
+        // The drain serves host A for real: rotation now puts
+        // B first, and the memo must NOT serve the stale map.
+        QueueOrder.noteServed(a)
+        val after = memo.positions(tasks, 0)
+        assertEquals(1, after[b.id])
+        assertEquals(QueueOrder.queuePositions(tasks, 0), after)
+    }
+
+    @Test
+    fun memoRecomputesAcrossTheAgingCrossing() {
+        val t0 = 200_000_000L
+        val normal = agingTask(0, queuedAt = t0)
+        val low = agingTask(-1, queuedAt = t0)
+        val tasks = listOf(normal, low)
+        val memo = QueueOrder.QueuePositionsMemo()
+        val before = memo.positions(tasks, t0 + QueueOrder.AGING_PROMOTE_MS - 1)
+        assertEquals(2, before[low.id])
+        val after = memo.positions(tasks, t0 + QueueOrder.AGING_PROMOTE_MS)
+        assertEquals(QueueOrder.queuePositions(tasks, t0 + QueueOrder.AGING_PROMOTE_MS), after)
+        // The tier footprint inside the signature moved at
+        // the crossing, so this was a recompute, not a hit.
+        assertTrue(before !== after)
+        assertFalse(
+            QueueOrder.queuePositionsSignature(tasks, t0 + QueueOrder.AGING_PROMOTE_MS - 1) ==
+                QueueOrder.queuePositionsSignature(tasks, t0 + QueueOrder.AGING_PROMOTE_MS),
+        )
+    }
+
+    @Test
+    fun memoRecomputesWhenScheduledTaskBecomesDueAndWhenExclusionsChange() {
+        val due = hostTask("a.example.com")
+        val future = hostTask("b.example.com", scheduledAt = 10_000)
+        val tasks = listOf(future, due)
+        val memo = QueueOrder.QueuePositionsMemo()
+        val before = memo.positions(tasks, 5_000)
+        assertFalse(before.containsKey(future.id))
+        val after = memo.positions(tasks, 10_000)
+        assertTrue(after.containsKey(future.id))
+        val excluded = memo.positions(tasks, 10_000, setOf(due.id))
+        assertFalse(excluded.containsKey(due.id))
+        assertEquals(QueueOrder.queuePositions(tasks, 10_000, setOf(due.id)), excluded)
+    }
+
+    @Test
+    fun signatureCoversEverySimulationInput() {
+        val base = listOf(hostTask("a.example.com"), hostTask("b.example.com"))
+        val sig = QueueOrder.queuePositionsSignature(base, 0)
+        // Status flip changes it.
+        val flipped = listOf(
+            hostTask("a.example.com").apply { status = TaskStatus.PAUSED },
+            base[1],
+        )
+        assertFalse(sig == QueueOrder.queuePositionsSignature(flipped, 0))
+        // A park flag changes it (same task, flag flipped in
+        // place — the signature must follow the live record).
+        val flagged = hostTask("c.example.com")
+        val sigBefore = QueueOrder.queuePositionsSignature(listOf(flagged), 0)
+        flagged.netDeferred = true
+        assertFalse(sigBefore == QueueOrder.queuePositionsSignature(listOf(flagged), 0))
+        flagged.netDeferred = false
+        assertEquals(sigBefore, QueueOrder.queuePositionsSignature(listOf(flagged), 0))
+        // List order changes it.
+        assertFalse(sig == QueueOrder.queuePositionsSignature(base.reversed(), 0))
+        // Rotation state changes it.
+        QueueOrder.noteServed(base[0])
+        assertFalse(sig == QueueOrder.queuePositionsSignature(base, 0))
+    }
+
     @Test
     fun emptyOrNothingQueuedReturnsEmptyMap() {
         assertTrue(QueueOrder.queuePositions(emptyList(), 0).isEmpty())

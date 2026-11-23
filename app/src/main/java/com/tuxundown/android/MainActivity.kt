@@ -140,6 +140,7 @@ import com.tuxundown.android.core.ThermalStatus
 import com.tuxundown.android.core.HostMemory
 import com.tuxundown.android.core.FtpClient
 import com.tuxundown.android.core.LinkExtract
+import com.tuxundown.android.core.LiveTickPolicy
 import com.tuxundown.android.core.MirrorAccess
 import com.tuxundown.android.core.LinkSchemes
 import com.tuxundown.android.core.NotificationStatus
@@ -175,6 +176,7 @@ import com.tuxundown.android.sniff.SniffedResource
 import com.tuxundown.android.sniff.Sniffer
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import kotlin.math.roundToInt
 
@@ -528,24 +530,51 @@ fun DownApp() {
     // screen-off power work tries to respect. The gate is a
     // plain flag flipped by a LifecycleEventObserver on the
     // ACTIVITY's lifecycle (androidx.lifecycle only, no new
-    // dependency): ON_STOP closes it and the loop just polls
-    // it on a long delay — no tick, no recomposition;
+    // dependency): ON_STOP closes it and the loop waits for
+    // ON_START — no tick, no recomposition while invisible;
     // ON_START reopens it and ticks ONCE IMMEDIATELY, so the
     // first thing the user sees on return is the current
-    // progress, then the normal 1 s beat resumes. Nothing
-    // else changes: every existing tick consumer (TaskCard /
-    // SummaryCard liveTick, the screens taking tick) reads
-    // the same state as before, and the engine/service
-    // samplers never read this tick — they run on their own
-    // threads in DownloadEngine / DownloadService, so pausing
-    // the UI beat cannot slow a download.
+    // progress, then the beat resumes. Nothing else changes:
+    // every existing tick consumer (TaskCard / SummaryCard
+    // liveTick, the screens taking tick) reads the same state
+    // as before, and the engine/service samplers never read
+    // this tick — they run on their own threads in
+    // DownloadEngine / DownloadService, so pausing the UI
+    // beat cannot slow a download.
+    //
+    // v7.6 (audit round 61, Step B-1/B-3): two wake fixes on
+    // this same loop. (B-1) The beat is now GRADED by
+    // LiveTickPolicy on the live task list: FAST 1 s while a
+    // card is live (RUNNING / finalizing / verifying — the
+    // fields that truly move per second), SLOW 5 s while
+    // only QUEUED work exists, and IDLE — no increment at
+    // all — when nothing is active, instead of the old
+    // unconditional 1 s in every foreground scene. (B-3) The
+    // stopped wait is no longer a 5 s AtomicBoolean poll:
+    // the loop SUSPENDS on a conflated channel that ON_START
+    // alone sends to (the lifecycle-suspending wait pattern,
+    // via the coroutines channel already in the dependency
+    // set — no new dependency), so a stopped app's tick loop
+    // wakes zero times until the activity starts again. The
+    // boolean below is only READ after a delay / wake, never
+    // polled. In the IDLE grade the loop likewise suspends,
+    // bounded by a 30 s re-grade timeout (no tick is emitted
+    // on that path — it only re-judges the grade, so a task
+    // queued by a background path, e.g. a notification
+    // action, still picks its beat up within half a minute).
     val tickGate = remember { java.util.concurrent.atomic.AtomicBoolean(true) }
+    val tickStartSignal = remember {
+        kotlinx.coroutines.channels.Channel<Unit>(
+            kotlinx.coroutines.channels.Channel.CONFLATED,
+        )
+    }
     DisposableEffect(activity) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_START -> {
                     tickGate.set(true)
                     tick++
+                    tickStartSignal.trySend(Unit)
                 }
                 Lifecycle.Event.ON_STOP -> tickGate.set(false)
                 else -> {}
@@ -556,13 +585,23 @@ fun DownApp() {
     }
     LaunchedEffect(Unit) {
         while (true) {
-            if (tickGate.get()) {
-                delay(1000)
-                if (tickGate.get()) tick++
+            if (!tickGate.get()) {
+                // Stopped: suspend until ON_START signals —
+                // no polling, no tick, no recomposition.
+                tickStartSignal.receive()
+                continue
+            }
+            val beatMs = LiveTickPolicy.delayMs(
+                LiveTickPolicy.grade(store.tasks),
+            )
+            if (beatMs <= 0L) {
+                // IDLE grade: nothing can change per second —
+                // suspend (ON_START also lands here) and only
+                // re-judge the grade on the long timeout.
+                withTimeoutOrNull(30_000L) { tickStartSignal.receive() }
             } else {
-                // Stopped: poll the gate on a long delay only —
-                // no tick and no recomposition while invisible.
-                delay(5000)
+                delay(beatMs)
+                if (tickGate.get()) tick++
             }
         }
     }
@@ -1785,7 +1824,7 @@ fun DownApp() {
 
     // v7.1 (audit round 56, Step C): queue positions for the
     // WHOLE task list, computed ONCE here — this scope re-runs
-    // on the standing 1 s tick above, so the positions refresh
+    // on the standing tick above, so the positions refresh
     // on that same beat; cards never compute their own (no
     // per-card re-simulation). The exclude set is the
     // EngineClaims claim set (DownloadCenter.isClaimed, held
@@ -1793,7 +1832,19 @@ fun DownApp() {
     // backoff) — the UI-reachable set closest to the running
     // ids the drain itself passes to nextEligible; see
     // QueueOrder.queuePositions for the stated residual.
-    val queuePositions = com.tuxundown.android.core.QueueOrder.queuePositions(
+    // v7.6 (audit round 61, Step B-6): the computation now
+    // goes through QueueOrder.QueuePositionsMemo — the full
+    // drain simulation only re-runs when the structural
+    // signature of ALL its inputs changes (rotation state
+    // included; see queuePositionsSignature for the coverage
+    // proof). A download's per-second progress is not an
+    // input, so most beats now cost one O(n) signature pass
+    // instead of the whole simulation. The memo is UI-local:
+    // the drain's own picks never touch it.
+    val queuePositionsMemo = remember {
+        com.tuxundown.android.core.QueueOrder.QueuePositionsMemo()
+    }
+    val queuePositions = queuePositionsMemo.positions(
         store.tasks,
         System.currentTimeMillis(),
         store.tasks.filter { DownloadCenter.isClaimed(it.id) }.map { it.id }.toSet(),
@@ -1809,7 +1860,16 @@ fun DownApp() {
             // this scope, so a finished probe re-renders the
             // cards with their ghost marks (or clears them).
             isGhost = GhostSnapshot.isGhost(task.id),
-            liveTick = tick,
+            // v7.6 (audit round 61, Step B-5): only LIVE cards
+            // (RUNNING / finalizing / verifying — see
+            // LiveTickPolicy) receive the changing tick; every
+            // other card gets a constant, so a beat no longer
+            // recomposes PAUSED / DONE / QUEUED cards whose
+            // fields cannot have moved. A status flip still
+            // redraws them: DownApp's top level reads the tick
+            // itself and re-derives this call's other
+            // parameters on every graded beat.
+            liveTick = LiveTickPolicy.cardTick(task, tick),
             selecting = selecting,
             selected = task.id in selectedIds,
             onToggleSelect = {
@@ -8748,16 +8808,29 @@ fun WinProgressBar(
         BarState.ERROR -> WinPalette.Red
         else -> WinPalette.Green
     }
-    val transition = rememberInfiniteTransition(label = "winbar")
-    val phase by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1800, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "shine",
-    )
+    // v7.6 (audit round 61, Step B-4): the infinite shine
+    // transition only EXISTS while the bar is actually moving
+    // — RUNNING (the sweep over the fill) or indeterminate
+    // (the sweeping band). A static PAUSED / DONE / FAILED /
+    // IDLE bar used to keep a 1800 ms infinite transition
+    // running for its whole lifetime, waking the frame clock
+    // for a shine that is never drawn on those states; now
+    // it draws once, statically, with phase pinned at 0.
+    val phase: Float = if (indeterminate || state == BarState.RUNNING) {
+        val transition = rememberInfiniteTransition(label = "winbar")
+        val animated by transition.animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 1800, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart,
+            ),
+            label = "shine",
+        )
+        animated
+    } else {
+        0f
+    }
     val p = progress.coerceIn(0f, 1f)
     Canvas(
         modifier

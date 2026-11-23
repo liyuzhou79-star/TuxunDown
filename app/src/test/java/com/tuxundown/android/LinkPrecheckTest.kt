@@ -52,6 +52,71 @@ class LinkPrecheckTest {
         assertTrue(LinkPrecheck.isCandidate(stale, now))
     }
 
+    // ---- v7.6 (Step B-2): empty-pass backoff + wake hook ----
+
+    @Test
+    fun backoffResetsToBaseWhenPassFindsCandidates() {
+        assertEquals(
+            LinkPrecheck.BASE_INTERVAL_MS,
+            LinkPrecheck.intervalAfterPass(1, LinkPrecheck.MAX_INTERVAL_MS),
+        )
+        assertEquals(
+            LinkPrecheck.BASE_INTERVAL_MS,
+            LinkPrecheck.intervalAfterPass(3, LinkPrecheck.BASE_INTERVAL_MS),
+        )
+    }
+
+    @Test
+    fun backoffDoublesOnEmptyPassesUpToTheCap() {
+        var interval = LinkPrecheck.BASE_INTERVAL_MS
+        val seen = mutableListOf<Long>()
+        repeat(6) {
+            interval = LinkPrecheck.intervalAfterPass(0, interval)
+            seen.add(interval)
+        }
+        assertEquals(
+            listOf(60_000L, 120_000L, 240_000L, 480_000L, 480_000L, 480_000L),
+            seen,
+        )
+        assertEquals(LinkPrecheck.MAX_INTERVAL_MS, seen.last())
+        // A stale / zero previous value still starts from the
+        // base's double, never below it.
+        assertEquals(60_000L, LinkPrecheck.intervalAfterPass(0, 0L))
+    }
+
+    @Test
+    fun awaitIntervalReturnsAtOnceWhenGenerationAlreadyMoved() {
+        val gen = LinkPrecheck.queueGeneration()
+        LinkPrecheck.noteQueueChanged()
+        val start = System.currentTimeMillis()
+        LinkPrecheck.awaitInterval(10_000L, gen)
+        assertTrue(System.currentTimeMillis() - start < 5_000L)
+    }
+
+    @Test
+    fun awaitIntervalWakesPromptlyOnEnqueueHook() {
+        val gen = LinkPrecheck.queueGeneration()
+        val waker = Thread {
+            Thread.sleep(150)
+            LinkPrecheck.noteQueueChanged()
+        }
+        val start = System.currentTimeMillis()
+        waker.start()
+        LinkPrecheck.awaitInterval(10_000L, gen)
+        waker.join()
+        assertTrue(System.currentTimeMillis() - start < 5_000L)
+    }
+
+    @Test
+    fun awaitIntervalHonoursItsTimeoutWhenNothingHappens() {
+        val gen = LinkPrecheck.queueGeneration()
+        val start = System.currentTimeMillis()
+        LinkPrecheck.awaitInterval(300L, gen)
+        val elapsed = System.currentTimeMillis() - start
+        assertTrue("elapsed $elapsed must reach the timeout", elapsed >= 250L)
+        assertTrue("elapsed $elapsed must not overshoot wildly", elapsed < 5_000L)
+    }
+
     @Test
     fun pickTakesTheQueueFrontOnly() {
         val tasks = (1..6).map { queued("https://a.com/f$it.zip") }

@@ -61,4 +61,83 @@ object LinkPrecheck {
         nowMs: Long,
         limit: Int = MAX_CANDIDATES,
     ): List<TaskRecord> = tasks.filter { isCandidate(it, nowMs) }.take(limit)
+
+    // ---- v7.6 (audit round 61, Step B-2): empty-pass backoff
+    // + the enqueue wake hook. The pre-check loop used to wake
+    // every 30 s for the service's whole lifetime even when a
+    // pass found ZERO candidates (pure-park / pure-future-
+    // schedule scenes empty-scanned for hours). Now a pass
+    // with candidates resets the interval to the base, and
+    // each empty pass doubles it up to a stated cap. The
+    // pre-check stays a WARNING flag only — this backoff only
+    // ever delays a warning, never a drain pick, a park
+    // release, or a download.
+
+    /** Pass interval right after a pass that found work. */
+    const val BASE_INTERVAL_MS = 30_000L
+
+    /** The empty-pass backoff cap: at most 8 minutes between
+     *  passes once fully backed off. WORST-CASE WARNING
+     *  LATENCY: a task that becomes a candidate WITHOUT going
+     *  through the enqueue funnel (below) while the loop sits
+     *  at the cap waits up to MAX_INTERVAL_MS before its first
+     *  pre-check pass — a delayed "可能已失效" warning only;
+     *  the task itself starts on its turn and re-probes for
+     *  real regardless (see the class doc). */
+    const val MAX_INTERVAL_MS = 480_000L
+
+    /**
+     * The interval to sleep after a pass: [BASE_INTERVAL_MS]
+     * when the pass found candidates; after an empty pass,
+     * double the previous interval (never below the base),
+     * capped at [MAX_INTERVAL_MS].
+     */
+    fun intervalAfterPass(candidateCount: Int, previousMs: Long): Long {
+        if (candidateCount > 0) return BASE_INTERVAL_MS
+        val doubled = maxOf(previousMs, BASE_INTERVAL_MS) * 2
+        return minOf(doubled, MAX_INTERVAL_MS)
+    }
+
+    // The cheap enqueue hook: DownloadCenter.enqueue (the one
+    // funnel every manual (re-)queue passes through) bumps
+    // this generation and wakes the sleeper, so a freshly
+    // queued task's first pre-check is prompt and the backoff
+    // resets on the next pass — instead of waiting out the
+    // capped interval above. The wait is a monitor wait, not
+    // a poll: the sleeping thread wakes only on the notify,
+    // on its timeout, or on interrupt (service destroy).
+    private val wakeMonitor = Object()
+
+    @Volatile
+    private var queueGeneration = 0L
+
+    /** Current queue generation (snapshot before a pass, so
+     *  an enqueue DURING the pass also cuts the next sleep). */
+    fun queueGeneration(): Long = queueGeneration
+
+    /** Called by the enqueue funnel when a task (re-)queues. */
+    fun noteQueueChanged() {
+        synchronized(wakeMonitor) {
+            queueGeneration++
+            wakeMonitor.notifyAll()
+        }
+    }
+
+    /**
+     * Sleep for up to [timeoutMs], returning early the moment
+     * the queue generation moves past [sinceGeneration].
+     * Throws InterruptedException exactly like Thread.sleep,
+     * so the caller's destroy-interrupt handling is unchanged.
+     */
+    @Throws(InterruptedException::class)
+    fun awaitInterval(timeoutMs: Long, sinceGeneration: Long) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        synchronized(wakeMonitor) {
+            while (queueGeneration == sinceGeneration) {
+                val left = deadline - System.currentTimeMillis()
+                if (left <= 0L) return
+                wakeMonitor.wait(left)
+            }
+        }
+    }
 }

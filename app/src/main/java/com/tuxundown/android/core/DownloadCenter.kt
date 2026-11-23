@@ -1762,6 +1762,14 @@ object DownloadCenter {
         // v2.8: a manual （重新）排队 also retires a stale pre-check
         // warning — the user has decided to try this link again.
         task.precheckDead = false
+        // v7.6 (audit round 61, Step B-2): wake the link
+        // pre-check loop — this funnel is the one cheap hook
+        // every manual (re-)queue passes through, and the wake
+        // keeps a fresh candidate's first pre-check prompt even
+        // while the loop sits in its empty-pass backoff (see
+        // LinkPrecheck.awaitInterval). A no-op notify when the
+        // service (and its loop) is not running.
+        LinkPrecheck.noteQueueChanged()
         // v1.4: pressing 继续 on a paused task while on mobile data,
         // when the traffic guard would block it, IS the user's
         // explicit confirmation for this one task.

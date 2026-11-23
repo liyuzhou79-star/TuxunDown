@@ -282,4 +282,89 @@ object QueueOrder {
         tasks.filter {
             it.status == TaskStatus.QUEUED && it.scheduledAt > now
         }.minOfOrNull { it.scheduledAt } ?: 0
+
+    /**
+     * v7.6 (audit round 61, Step B-6): a cheap structural
+     * signature of EVERY input [queuePositions] (through
+     * [pickWithServed]) actually reads, in list order:
+     * - the rotation state itself, [lastServedHost] — read
+     *   once by queuePositions as the simulation's starting
+     *   memory, and cleanly readable here because it is a
+     *   public val on this object (that readability is what
+     *   makes this memo possible at all; had it been private
+     *   drain state, this item would have been deferred);
+     * - [excludeIds], as a sorted join (set order is not an
+     *   input — membership is);
+     * - per task, in list order (list order IS an input —
+     *   the simulation removes picks from a copy of this
+     *   list): id (exclusion + result key), status
+     *   (eligibility), [effectiveTier] (the tier ring — this
+     *   one Int is the COMPLETE footprint of priority /
+     *   queuedAt / createdAt / scheduledAt / [now] on the
+     *   tier judgement, including the v7.1 aging crossing),
+     *   jumpedAt (the jumped ring), netDeferred /
+     *   portalDeferred (eligibility), the not-yet-due
+     *   boolean (eligibility's ONLY use of scheduledAt
+     *   besides the tier footprint above), and the task's
+     *   host via HostMemory.hostOf (the rotation ring's
+     *   only use of the url).
+     * Two calls with equal signatures therefore provably run
+     * the identical simulation and return equal maps — the
+     * memo below never serves a stale position. Fields the
+     * simulation never reads (downloaded bytes, note, error,
+     * sizes…) are deliberately absent, so a RUNNING task's
+     * per-second progress does NOT bust the memo.
+     */
+    fun queuePositionsSignature(
+        tasks: List<TaskRecord>,
+        now: Long,
+        excludeIds: Set<String> = emptySet(),
+    ): List<Any?> {
+        val sig = ArrayList<Any?>(tasks.size * 8 + 2)
+        sig.add(lastServedHost)
+        sig.add(excludeIds.sorted().joinToString(","))
+        for (t in tasks) {
+            sig.add(t.id)
+            sig.add(t.status)
+            sig.add(effectiveTier(t, now))
+            sig.add(t.jumpedAt)
+            sig.add(t.netDeferred)
+            sig.add(t.portalDeferred)
+            sig.add(t.scheduledAt > 0 && t.scheduledAt > now)
+            sig.add(HostMemory.hostOf(t.url))
+        }
+        return sig
+    }
+
+    /**
+     * v7.6 (Step B-6): a single-entry memo over
+     * [queuePositions], keyed by [queuePositionsSignature].
+     * The UI recomputes positions on every live-tick beat;
+     * the simulation is O(picks × eligible scan) while the
+     * signature is one O(n) pass, so beats where nothing
+     * queue-relevant changed (the common case while a
+     * download runs) skip the simulation entirely. NOT
+     * thread-safe by design: it exists for the single UI
+     * composition thread that owns the one instance; the
+     * drain never uses it (it calls [nextEligible] directly,
+     * exactly as before — this memo cannot delay or alter a
+     * real pick).
+     */
+    class QueuePositionsMemo {
+        private var lastSignature: List<Any?>? = null
+        private var lastResult: Map<String, Int> = emptyMap()
+
+        fun positions(
+            tasks: List<TaskRecord>,
+            now: Long,
+            excludeIds: Set<String> = emptySet(),
+        ): Map<String, Int> {
+            val sig = queuePositionsSignature(tasks, now, excludeIds)
+            if (sig == lastSignature) return lastResult
+            val result = queuePositions(tasks, now, excludeIds)
+            lastSignature = sig
+            lastResult = result
+            return result
+        }
+    }
 }
