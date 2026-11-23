@@ -1704,7 +1704,10 @@ class DownloadEngine(
                     recordFailureVerdict(e)
                     task.error = Errors.human(e)
                 }
-                try { Thread.sleep(500L * attempt) } catch (_: InterruptedException) { }
+                // v5.8: jittered (see BackoffJitter) — every chunk
+                // that failed in the same hiccup must not retry in
+                // lockstep; the wait stays within [250, 500] x attempt ms.
+                try { Thread.sleep(BackoffJitter.apply(500L * attempt)) } catch (_: InterruptedException) { }
             }
         }
         synchronized(activeLock) { active.remove(ac) }
@@ -2319,7 +2322,10 @@ class DownloadEngine(
                     throw e
                 } catch (e: Exception) {
                     lastError = e
-                    try { Thread.sleep(400L * attempt) } catch (_: InterruptedException) {
+                    // v5.8: jittered (see BackoffJitter) — parallel
+                    // segments failing together must not all refetch
+                    // together; the wait stays within [200, 400] x attempt ms.
+                    try { Thread.sleep(BackoffJitter.apply(400L * attempt)) } catch (_: InterruptedException) {
                         throw InterruptedException("stopped")
                     }
                 }
@@ -3153,8 +3159,12 @@ class DownloadEngine(
                                 recordFailureVerdict(e)
                                 if (task.error.isBlank()) task.error = Errors.human(e)
                             }
+                            // v5.8: jittered (see BackoffJitter) — FTP
+                            // workers dropped by the same hiccup must
+                            // not all reconnect together; the wait
+                            // stays within [250, 500] x attempt ms.
                             try {
-                                Thread.sleep(500L * attempt)
+                                Thread.sleep(BackoffJitter.apply(500L * attempt))
                             } catch (_: InterruptedException) { }
                         }
                     }

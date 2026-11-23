@@ -1307,7 +1307,10 @@ class DownloadService : Service() {
             ) {
                 return false
             }
-            val waitMs = RetryPolicy.backoffMs(task.autoRetriesUsed)
+            // v5.8: jittered form (see BackoffJitter) — tasks that
+            // failed in the same instant do not all retry in the
+            // same instant; the note below quotes the actual wait.
+            val waitMs = RetryPolicy.backoffMsJittered(task.autoRetriesUsed)
             task.autoRetriesUsed++
             task.note = "下载失败，将在 ${waitMs / 1000} 秒后自动重试" +
                 "（第 ${task.autoRetriesUsed}/$limit 次）。原因：${task.error}"
