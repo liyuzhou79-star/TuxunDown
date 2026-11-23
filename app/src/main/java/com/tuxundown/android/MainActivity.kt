@@ -126,6 +126,7 @@ import com.tuxundown.android.core.DownloadCenter
 import com.tuxundown.android.core.DownloadedFiles
 import com.tuxundown.android.core.DuplicateFinder
 import com.tuxundown.android.core.TaskPriority
+import com.tuxundown.android.core.Finalizing
 import com.tuxundown.android.core.Format
 import com.tuxundown.android.core.GhostMark
 import com.tuxundown.android.core.GhostSnapshot
@@ -1749,7 +1750,20 @@ fun DownApp() {
         // a while after pause(). The service owns the cleanup now:
         // mark cancelled here; the service deletes the file and the
         // record once the engine has fully stopped.
-        if (task.status == TaskStatus.RUNNING) {
+        // v7.5 (audit round 60): the route is CLAIMED, not just
+        // RUNNING — the same discipline as the notification's
+        // ACTION_CANCEL. The engine claim is held for a whole
+        // runOne invocation, retry backoff AND the finalize lane
+        // included, so a delete landing in either window used to
+        // remove the record directly under its live owner: in
+        // the finalize window the lane's milestone 0 then saw
+        // the record gone and skipped, stranding the finished
+        // bytes as an orphan .part with no record and no
+        // completion notice. Through cancelTask the owner
+        // itself removes the record after finalize completes
+        // (the lane's consumeCancelled), and the file keeps its
+        // final name — ordinary DONE-card semantics.
+        if (task.status == TaskStatus.RUNNING || DownloadCenter.isClaimed(task.id)) {
             DownloadCenter.cancelTask(task)
             Toast.makeText(context, "正在停止并删除这个任务…", Toast.LENGTH_SHORT).show()
             return
@@ -8953,12 +8967,25 @@ fun TaskCard(
         Toast.makeText(ctx, "链接已复制", Toast.LENGTH_SHORT).show()
     }
     val pct = WidgetState.taskPercent(task)
-    val barState = when (task.status) {
-        TaskStatus.RUNNING -> BarState.RUNNING
-        TaskStatus.PAUSED -> BarState.PAUSED
-        TaskStatus.FAILED -> BarState.ERROR
-        TaskStatus.DONE -> BarState.DONE
-        TaskStatus.QUEUED -> BarState.IDLE
+    // v7.5 (audit round 60): the finalize window — DONE is
+    // already persisted but savedUri has not landed, so the
+    // file is still being renamed / verified / extracted and
+    // is NOT openable yet. Every presentation below keys off
+    // this one derivation (see Finalizing): the card must not
+    // read as a finished task until savedUri lands, when the
+    // standing 1 s liveTick flips it back on its own.
+    val finalizing = Finalizing.isFinalizing(task)
+    val barState = when {
+        // The running presentation (shine sweep), not the
+        // static done one: work is still visibly in flight.
+        finalizing -> BarState.RUNNING
+        else -> when (task.status) {
+            TaskStatus.RUNNING -> BarState.RUNNING
+            TaskStatus.PAUSED -> BarState.PAUSED
+            TaskStatus.FAILED -> BarState.ERROR
+            TaskStatus.DONE -> BarState.DONE
+            TaskStatus.QUEUED -> BarState.IDLE
+        }
     }
     // v6.7.0 Step B guard: an adopted record has url="" — fall
     // back to the saved file name before the (blank) URL so the
@@ -9113,15 +9140,21 @@ fun TaskCard(
                                 // same adjudication the drain uses.
                                 "排队中 · 第 $queuePosition 位"
                             else "排队中，等待开始"
-                        TaskStatus.DONE -> "已完成"
+                        // v7.5: in the finalize window the word
+                        // is 正在收尾…, never 已完成 — the file
+                        // is not under its final name yet.
+                        TaskStatus.DONE -> if (finalizing) "正在收尾…" else "已完成"
                         TaskStatus.FAILED -> "下载失败"
                     }
                     Text(
                         headline,
                         style = MaterialTheme.typography.bodyMedium,
-                        color = when (task.status) {
-                            TaskStatus.FAILED -> WinPalette.Red
-                            TaskStatus.DONE -> statusTextGreen()
+                        color = when {
+                            task.status == TaskStatus.FAILED -> WinPalette.Red
+                            // v7.5: the finished green is earned
+                            // only once savedUri has landed.
+                            task.status == TaskStatus.DONE && !finalizing ->
+                                statusTextGreen()
                             else -> MaterialTheme.colorScheme.onSurfaceVariant
                         },
                     )
@@ -9156,8 +9189,15 @@ fun TaskCard(
                             )
                         }
                     TaskStatus.DONE ->
-                        Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-                            CheckGlyph(WinPalette.ChartGreen)
+                        // v7.5: no check mark while finalizing —
+                        // the tick is the finished verdict, and
+                        // the headline already says 正在收尾….
+                        if (finalizing) {
+                            Spacer(Modifier.size(48.dp))
+                        } else {
+                            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                                CheckGlyph(WinPalette.ChartGreen)
+                            }
                         }
                     TaskStatus.QUEUED -> Spacer(Modifier.size(48.dp))
                 }
@@ -9171,7 +9211,13 @@ fun TaskCard(
 
             Spacer(Modifier.height(8.dp))
             WinProgressBar(
-                progress = if (task.status == TaskStatus.DONE) 1f else task.progress,
+                // v7.5: the forced full bar is the FINISHED
+                // verdict — while finalizing, show the record's
+                // own progress (the bytes are all here, but the
+                // bar's state above is the running one, so it
+                // reads as 收尾中， not done).
+                progress = if (task.status == TaskStatus.DONE && !finalizing) 1f
+                else task.progress,
                 state = barState,
                 modifier = Modifier.fillMaxWidth(),
                 indeterminate = task.totalSize <= 0 && !task.isHls &&
@@ -9194,7 +9240,12 @@ fun TaskCard(
                         else if (task.scheduledAt > System.currentTimeMillis())
                             "预约在 ${Format.clockTime(task.scheduledAt)} 自动开始"
                         else "等待前面的任务完成"
-                    TaskStatus.DONE -> Format.size(task.totalSize)
+                    // v7.5: the collapsed line carries the
+                    // reason the quick actions are disabled —
+                    // visible without expanding the card.
+                    TaskStatus.DONE ->
+                        if (finalizing) "正在收尾，完成后可打开"
+                        else Format.size(task.totalSize)
                     TaskStatus.FAILED -> task.error.ifBlank { "下载失败" }
                 }
                 Text(
@@ -9717,26 +9768,38 @@ fun TaskCard(
                     // share are disabled UP FRONT (the file is
                     // probed gone — tapping could only fail),
                     // with the reason written under the row.
+                    // v7.5: same discipline for the finalize
+                    // window — the file is not under its final
+                    // name yet, so those taps could only fail;
+                    // disabled WITH the reason under the row,
+                    // never silently grey.
                     Spacer(Modifier.height(6.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         val ext = displayName.substringAfterLast('.', "").lowercase()
                         if (ext == "apk") {
-                            Button(onClick = onInstall, enabled = !isGhost) { Text("安装") }
-                            OutlinedButton(onClick = onOpen, enabled = !isGhost) { Text("打开") }
+                            Button(onClick = onInstall, enabled = !isGhost && !finalizing) { Text("安装") }
+                            OutlinedButton(onClick = onOpen, enabled = !isGhost && !finalizing) { Text("打开") }
                         } else if (kind == "video" || kind == "audio") {
-                            Button(onClick = onOpen, enabled = !isGhost) { Text("播放") }
-                            OutlinedButton(onClick = onShare, enabled = !isGhost) { Text("分享") }
+                            Button(onClick = onOpen, enabled = !isGhost && !finalizing) { Text("播放") }
+                            OutlinedButton(onClick = onShare, enabled = !isGhost && !finalizing) { Text("分享") }
                         } else {
-                            OutlinedButton(onClick = onOpen, enabled = !isGhost) { Text("打开") }
-                            OutlinedButton(onClick = onShare, enabled = !isGhost) { Text("分享") }
+                            OutlinedButton(onClick = onOpen, enabled = !isGhost && !finalizing) { Text("打开") }
+                            OutlinedButton(onClick = onShare, enabled = !isGhost && !finalizing) { Text("分享") }
                         }
                         if (ext == "apk") {
-                            OutlinedButton(onClick = onShare, enabled = !isGhost) { Text("分享") }
+                            OutlinedButton(onClick = onShare, enabled = !isGhost && !finalizing) { Text("分享") }
                         }
                     }
                     if (isGhost) {
                         Text(
                             "文件已不在，没法打开、分享或安装；不需要这条记录时可以删掉它（只删记录）。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (finalizing) {
+                        Text(
+                            "正在收尾（校验、改名或解压），完成后就能打开、分享或安装。",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

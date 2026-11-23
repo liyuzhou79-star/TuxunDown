@@ -315,6 +315,63 @@ class WidgetStateTest {
         assertEquals("TuxunDown", WidgetState.headline(stopped))
     }
 
+    // ---- v7.5 (audit round 60): finalize-window wording ----
+
+    private fun doneTask(savedUri: String): TaskRecord {
+        val t = task(TaskStatus.DONE, total = 100, downloaded = 100)
+        t.savedUri = savedUri
+        return t
+    }
+
+    @Test
+    fun summaryCountsFinalizingSeparatelyFromActive() {
+        // A finalizing task (DONE, savedUri not yet landed) is
+        // NOT active — its bytes enter no sum — but the count
+        // rides along so the wording can see it.
+        val s = WidgetState.summary(
+            listOf(
+                doneTask(savedUri = ""),
+                doneTask(savedUri = "content://media/download/f.bin"),
+                task(TaskStatus.RUNNING, total = 100, downloaded = 10),
+            )
+        )
+        assertEquals(1, s.activeCount)
+        assertEquals(1, s.finalizingCount)
+    }
+
+    @Test
+    fun headlineSaysFinalizingWhenOnlyFinalizingTasksRemain() {
+        val s = WidgetState.summary(listOf(doneTask(savedUri = "")))
+        assertEquals("正在收尾…", WidgetState.headline(s))
+        assertEquals("正在收尾，马上就好，点这里打开", WidgetState.line(s))
+    }
+
+    @Test
+    fun activeTasksKeepThePreFinalizingWording() {
+        // Anything active: headline and line are exactly the
+        // pre-v7.5 verdicts, finalizing tasks or not.
+        val s = WidgetState.summary(
+            listOf(
+                doneTask(savedUri = ""),
+                task(TaskStatus.RUNNING, total = 100, downloaded = 10),
+            )
+        )
+        assertEquals("正在下载 1 个任务", WidgetState.headline(s))
+        assertEquals("总进度 10%", WidgetState.line(s))
+    }
+
+    @Test
+    fun finishedTasksKeepTheIdleWording() {
+        // DONE with savedUri landed is finished, not finalizing:
+        // the idle wording stands.
+        val s = WidgetState.summary(
+            listOf(doneTask(savedUri = "content://media/download/f.bin"))
+        )
+        assertEquals(0, s.finalizingCount)
+        assertEquals("TuxunDown", WidgetState.headline(s))
+        assertEquals("没有进行中的任务，点这里打开", WidgetState.line(s))
+    }
+
     @Test
     fun unknownSizesGiveZeroPctNotAFakeNumber() {
         val s = WidgetState.summary(

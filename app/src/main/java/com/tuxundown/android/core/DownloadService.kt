@@ -28,6 +28,12 @@ class DownloadService : Service() {
 
     @Volatile private var worker: Thread? = null
     @Volatile private var lastNotifyMs = 0L
+    /** v7.5 (audit round 60): throttle for the drain's
+     *  finalize-wait notification post — that branch re-loops
+     *  every 500 ms for the whole finalize window, and the
+     *  foreground notification only needs re-asserting on a
+     *  slower beat than that. */
+    @Volatile private var lastFinalizingNotifyMs = 0L
     /** v2.1 audit (C1/C7): monitors for the two check-then-act pairs
      *  that used to race — the drain-worker start and the
      *  notification throttle gate. */
@@ -782,6 +788,32 @@ class DownloadService : Service() {
                 // Poll briefly; the lane's completion path owns
                 // everything that happens next for that task.
                 if (finalizeGate.pendingCount() > 0) {
+                    // v7.5 (audit round 60): while the lane
+                    // works and nothing is RUNNING, keep the
+                    // foreground notification honest — it used
+                    // to sit frozen on the startForeground
+                    // 「准备下载… 0%」 post for the whole
+                    // window (a multi-GB verify / extract can
+                    // take a while), claiming a download that
+                    // already finished had not even started.
+                    // The completion notification's timing is
+                    // untouched: it still fires only after
+                    // finalize completes. Throttled — this
+                    // branch re-loops every 500 ms.
+                    if (store.tasks.none { it.status == TaskStatus.RUNNING }) {
+                        val finCount = Finalizing.count(store.tasks)
+                        if (finCount > 0) {
+                            val nowMs = System.currentTimeMillis()
+                            if (nowMs - lastFinalizingNotifyMs >= 2000) {
+                                lastFinalizingNotifyMs = nowMs
+                                notifyUpdate(
+                                    "正在收尾…",
+                                    finalizingNotifyText(finCount),
+                                    100,
+                                )
+                            }
+                        }
+                    }
                     if (!drainWait(500, wakeGen)) break
                     continue
                 }
@@ -2191,6 +2223,21 @@ class DownloadService : Service() {
 
     // ---------- notification: same Windows-style wording as the UI ----------
 
+    /**
+     * v7.5 (audit round 60): the finalize window's notification
+     * text — the bytes are all here; what remains is the lane's
+     * verify / rename / extract, named as possibilities, never
+     * as a claimed stage (the notification cannot know which
+     * one is running). The completion notification still fires
+     * only when finalize actually completes.
+     */
+    private fun finalizingNotifyText(count: Int): String =
+        if (count > 1) {
+            "$count 个文件已下完，正在做最后处理（校验、改名或解压），完成后会通知你"
+        } else {
+            "文件已下完，正在做最后处理（校验、改名或解压），完成后会通知你"
+        }
+
     private fun notifyAggregate() {
         // v1.4: several engines may report in the same second; the
         // notification never needs more than one post per ~second.
@@ -2205,7 +2252,19 @@ class DownloadService : Service() {
         val store = DownloadCenter.store
         val runningTasks = store.tasks.filter { it.status == TaskStatus.RUNNING }
         if (runningTasks.isEmpty()) {
-            notifyUpdate("TuxunDown", "准备下载…", 0)
+            // v7.5 (audit round 60): an engine's final progress
+            // report lands AFTER its task was persisted DONE
+            // and handed to the finalize lane — with a task in
+            // the finalize window this post must not read
+            // 准备下载… (the drain's finalize-wait branch
+            // re-asserts the same wording while the lane
+            // works; this is the post that first lands it).
+            val finCount = Finalizing.count(store.tasks)
+            if (finCount > 0) {
+                notifyUpdate("正在收尾…", finalizingNotifyText(finCount), 100)
+            } else {
+                notifyUpdate("TuxunDown", "准备下载…", 0)
+            }
             return
         }
         val active = store.tasks.filter {

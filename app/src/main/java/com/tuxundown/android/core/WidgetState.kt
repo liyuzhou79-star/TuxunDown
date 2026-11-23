@@ -25,6 +25,15 @@ object WidgetState {
          *  home summary card's "x / y" line). */
         val totalBytes: Long,
         val doneBytes: Long,
+        /** v7.5 (audit round 60): tasks in the finalize window
+         *  ([Finalizing] — DONE persisted, savedUri not yet
+         *  landed). NOT part of the active set: their bytes are
+         *  all here, so they enter no byte sum — but a widget
+         *  that drops them entirely announces 没有进行中的任务
+         *  while the file is still being renamed / verified /
+         *  extracted, so the count rides along for the wording
+         *  derivations below. */
+        val finalizingCount: Int,
     )
 
     fun summary(tasks: List<TaskRecord>): Summary {
@@ -41,6 +50,7 @@ object WidgetState {
             anyRunning = active.any { it.status == TaskStatus.RUNNING },
             totalBytes = totalAll,
             doneBytes = doneAll,
+            finalizingCount = Finalizing.count(tasks),
         )
     }
 
@@ -59,9 +69,32 @@ object WidgetState {
      * 没有进行中的任务）.
      */
     fun headline(s: Summary): String = when {
+        // v7.5 (audit round 60): nothing active but a task is
+        // in its finalize window — the widget must not fall
+        // back to the idle bare name (whose line then claimed
+        // 没有进行中的任务） while a file is still being
+        // renamed / verified / extracted. With anything active
+        // the pre-v7.5 wording stands unchanged.
+        s.activeCount <= 0 && s.finalizingCount > 0 -> "正在收尾…"
         s.activeCount <= 0 -> "TuxunDown"
         s.anyRunning -> "正在下载 ${s.activeCount} 个任务"
         else -> "排队中 ${s.activeCount} 个任务"
+    }
+
+    /**
+     * v7.5 (audit round 60): the widget's second line, moved
+     * here from the widget updater so the wording table is
+     * unit-pinned like [headline]'s. Active tasks keep the
+     * total-progress line; with nothing active, a finalizing
+     * task turns the idle line into a 收尾中 line instead of
+     * 没有进行中的任务 (the tap-to-open hint rides along — the
+     * widget root still opens the app, where the card shows
+     * the same state).
+     */
+    fun line(s: Summary): String = when {
+        s.activeCount > 0 -> "总进度 ${s.totalPct}%"
+        s.finalizingCount > 0 -> "正在收尾，马上就好，点这里打开"
+        else -> "没有进行中的任务，点这里打开"
     }
 
     /**

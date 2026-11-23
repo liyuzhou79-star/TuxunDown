@@ -102,8 +102,11 @@ object WidgetUpdater {
             )
             views.setTextViewText(
                 R.id.widget_line,
-                if (s.activeCount > 0) "总进度 ${s.totalPct}%"
-                else "没有进行中的任务，点这里打开",
+                // v7.5 (audit round 60): the wording verdict is
+                // WidgetState.line's — with nothing active but a
+                // task in its finalize window it says 正在收尾
+                // instead of 没有进行中的任务 (see WidgetState).
+                WidgetState.line(s),
             )
             views.setProgressBar(R.id.widget_progress, 100, s.totalPct, false)
             // v4.1: bulk-toggle button, driven by the same
