@@ -12,8 +12,8 @@ android {
         applicationId = "com.tuxundown.android"
         minSdk = 29
         targetSdk = 35
-        versionCode = 55
-        versionName = "6.4.0"
+        versionCode = 56
+        versionName = "6.5.0"
         // v5.6.0 slimming (audit round 41, lever L1): keep only the
         // default resources plus English and Chinese variants. The
         // AndroidX libraries ship accessibility strings (Tab / Dialog /
