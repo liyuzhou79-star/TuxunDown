@@ -9677,6 +9677,18 @@ fun TaskCard(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    // v8.3: one-line summary under the chart,
+                    // computed ONLY from the stored sample
+                    // points (see FullSpeedHistory.summary) —
+                    // the copy states the mean is over the
+                    // sample points, never a restored original.
+                    FullSpeedHistory.summary(fullSnapshot)?.let { s ->
+                        Text(
+                            "全程峰值 ${Format.speed(s.peakBps)} · 平均 ${Format.speed(s.avgBps)}（按 ${s.count} 个采样点算）",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
                 Spacer(Modifier.height(8.dp))
                 when (task.status) {

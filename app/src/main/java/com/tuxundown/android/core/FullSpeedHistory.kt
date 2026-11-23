@@ -102,4 +102,39 @@ object FullSpeedHistory {
      *  the detail page prints under the full-run chart. */
     fun spanSeconds(pointCount: Int, intervalSec: Int): Long =
         pointCount.toLong() * sanitizeInterval(intervalSec)
+
+    /** One-line summary of a stored series, shown under the
+     *  full-run chart on the detail page. */
+    data class Summary(
+        val peakBps: Long,
+        val avgBps: Long,
+        val count: Int,
+    )
+
+    /**
+     * Summarize the stored [points] themselves: [Summary.peakBps]
+     * is the largest stored point, [Summary.avgBps] is the plain
+     * arithmetic mean of the stored points (Long sum / point
+     * count), and [Summary.count] is how many points there are.
+     * The numbers come ONLY from the points as stored — after
+     * decimation a point IS the decimated value, and nothing is
+     * restored, reconstructed or extrapolated from the original
+     * pre-decimation samples. Points are clamped non-negative
+     * when stored (see [append]), so the mean needs no extra
+     * guarding here. An empty series has no summary: null.
+     */
+    fun summary(points: List<Long>): Summary? {
+        if (points.isEmpty()) return null
+        var peak = points[0]
+        var sum = 0L
+        for (p in points) {
+            if (p > peak) peak = p
+            sum += p
+        }
+        return Summary(
+            peakBps = peak,
+            avgBps = sum / points.size,
+            count = points.size,
+        )
+    }
 }

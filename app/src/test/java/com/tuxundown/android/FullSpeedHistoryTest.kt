@@ -3,6 +3,7 @@ package com.tuxundown.android
 import com.tuxundown.android.core.FullSpeedHistory
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -111,6 +112,53 @@ class FullSpeedHistoryTest {
         assertTrue(FullSpeedHistory.shouldSample(10, 10))
         // A corrupt interval falls back to the base cadence.
         assertTrue(FullSpeedHistory.shouldSample(5, 7))
+    }
+
+    @Test
+    fun summaryOfKnownSeriesGivesPeakMeanAndCount() {
+        // Sum 100 + 300 + 200 = 600, mean 600 / 3 = 200 exactly.
+        val s = FullSpeedHistory.summary(listOf(100L, 300L, 200L))!!
+        assertEquals(300L, s.peakBps)
+        assertEquals(200L, s.avgBps)
+        assertEquals(3, s.count)
+    }
+
+    @Test
+    fun summaryMeanUsesLongDivisionWhenNotEvenlyDivisible() {
+        // Sum 10 + 20 + 31 = 61; 61 / 3 = 20 in Long division
+        // (the fraction is dropped, never rounded up).
+        val s = FullSpeedHistory.summary(listOf(10L, 20L, 31L))!!
+        assertEquals(31L, s.peakBps)
+        assertEquals(20L, s.avgBps)
+        assertEquals(3, s.count)
+    }
+
+    @Test
+    fun summaryOfSinglePointIsThatPoint() {
+        val s = FullSpeedHistory.summary(listOf(42L))!!
+        assertEquals(42L, s.peakBps)
+        assertEquals(42L, s.avgBps)
+        assertEquals(1, s.count)
+    }
+
+    @Test
+    fun summaryOfEmptyListIsNull() {
+        assertNull(FullSpeedHistory.summary(emptyList()))
+    }
+
+    @Test
+    fun summaryCountsDecimatedPointsAsStoredNotOriginals() {
+        // Decimation merges (10,20) -> 15 and (30,40) -> 35, so
+        // the stored series is [15, 35]: the summary must be
+        // computed over THOSE two points (peak 35, mean
+        // (15 + 35) / 2 = 25, count 2) — not over the four
+        // original samples (which would give count 4).
+        val stored = FullSpeedHistory.decimate(listOf(10L, 20L, 30L, 40L))
+        assertEquals(listOf(15L, 35L), stored)
+        val s = FullSpeedHistory.summary(stored)!!
+        assertEquals(35L, s.peakBps)
+        assertEquals(25L, s.avgBps)
+        assertEquals(2, s.count)
     }
 
     @Test
