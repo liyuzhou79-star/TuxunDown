@@ -2636,6 +2636,18 @@ class DownloadEngine(
          *  fetch-bound evidence; the sampler tick consumes and
          *  clears it. */
         val hlsStarved = AtomicInteger(0)
+        /** v8.4 (audit round 69): segment fetches ACTUALLY running
+         *  right now, counted around the pool Callable body below
+         *  (increment on entry, decrement in finally) — the honest
+         *  live concurrency for the server profile's peak. The
+         *  gated width must NOT stand in for this: it is a window
+         *  LIMIT, not a live count, and would overstate the peak
+         *  near the playlist tail. [hlsFetchPeak] is the running
+         *  maximum; the sampler copies it into task.peakConns on
+         *  its tick and stays the record field's only writer (the
+         *  segmented path's sampler-owned caliber). */
+        val hlsFetchLive = AtomicInteger(0)
+        val hlsFetchPeak = AtomicInteger(0)
         var hlsLastRetryCount = task.retryCount
         // task.threads is the card's live connection display
         // (the same field the segmented path keeps equal to its
@@ -2675,6 +2687,12 @@ class DownloadEngine(
                 task.speedBps = SpeedSmoothing.next(task.speedBps, speed)
                 recordSpeed(task.speedBps)
                 task.downloaded = bytes
+                // v8.4 (audit round 69): fold the segment-fetch
+                // concurrency peak into the record — the sampler
+                // is the only writer of task.peakConns here, same
+                // caliber as the segmented path's :1140 max.
+                val hlsPeak = hlsFetchPeak.get()
+                if (hlsPeak > task.peakConns) task.peakConns = hlsPeak
                 // v4.3: re-read the global allowance and re-judge
                 // the HLS width on this same tick (no new thread —
                 // the segmented path drives its scaler from its
@@ -2857,14 +2875,24 @@ class DownloadEngine(
                     val idx = submitIndex
                     futures[idx] = pool.submit(
                         java.util.concurrent.Callable {
-                            val data = segmentBytes(segments[idx])
-                            synchronized(hlsLedgerLock) {
-                                if (!hlsClosed.get()) {
-                                    bufferedBytes.addAndGet(data.size.toLong())
-                                    hlsLedger.onFetched(data.size.toLong())
+                            // v8.4 (audit round 69): count this
+                            // fetch as live concurrency for the
+                            // peak record; the sampler folds the
+                            // running max into task.peakConns.
+                            val liveNow = hlsFetchLive.incrementAndGet()
+                            hlsFetchPeak.accumulateAndGet(liveNow) { a, b -> maxOf(a, b) }
+                            try {
+                                val data = segmentBytes(segments[idx])
+                                synchronized(hlsLedgerLock) {
+                                    if (!hlsClosed.get()) {
+                                        bufferedBytes.addAndGet(data.size.toLong())
+                                        hlsLedger.onFetched(data.size.toLong())
+                                    }
                                 }
+                                data
+                            } finally {
+                                hlsFetchLive.decrementAndGet()
                             }
-                            data
                         }
                     )
                     submitIndex++
@@ -3124,6 +3152,11 @@ class DownloadEngine(
                 task.speedBps = SpeedSmoothing.next(task.speedBps, speed)
                 recordSpeed(task.speedBps)
                 task.downloaded = bytes
+                // v8.4 (audit round 69): exactly one data
+                // connection by construction — record that fact
+                // as the peak (its connInfos below is already a
+                // single entry).
+                if (task.peakConns < 1) task.peakConns = 1
                 // v3.5: one whole-file data connection — the
                 // details view's snapshot is this single entry
                 // (chunkIndex -1, see ConnInfo).
@@ -3685,6 +3718,11 @@ class DownloadEngine(
                 task.speedBps = SpeedSmoothing.next(task.speedBps, speed)
                 recordSpeed(task.speedBps)
                 task.downloaded = bytes
+                // v8.4 (audit round 69): exactly one transfer
+                // connection by construction — record that fact
+                // as the peak (its connInfos below is already a
+                // single entry).
+                if (task.peakConns < 1) task.peakConns = 1
                 // v3.5: one whole-file connection — the
                 // details view's snapshot is this single entry
                 // (chunkIndex -1, see ConnInfo).

@@ -119,6 +119,25 @@ class ServerProfileTest {
     }
 
     @Test
+    fun singleConnectionPeakShowsOneConnAndFullPeakPerConn() {
+        // v8.4 (audit round 69): the single-connection paths
+        // (HTTP single-stream, FTP single) now record
+        // peakConns = 1 — the display consequence pinned here:
+        // both peak rows appear, and the per-connection figure
+        // IS the whole recorded peak speed (peakBps / 1).
+        val t = TaskRecord(url = "https://a.example.com/f.bin", totalSize = 1000)
+        t.peakConns = 1
+        t.peakBps = 3L * 1024 * 1024
+        val rows = ServerProfile.rows(t, 0)
+        assertEquals("1 条", valueOf(rows, "实际峰值连接："))
+        assertEquals(
+            Format.speed(3L * 1024 * 1024),
+            valueOf(rows, "峰值时平均每条连接："),
+        )
+        assertEquals(t.peakBps, ServerProfile.peakPerConnectionBps(t.peakBps, t.peakConns))
+    }
+
+    @Test
     fun derivedSpeedAbsentWhenEitherInputMissing() {
         // peakConns = 0 must not divide (and must not invent).
         assertNull(ServerProfile.peakPerConnectionBps(1_000_000, 0))
