@@ -114,7 +114,9 @@ class TailRaceTest {
         assertEquals(700_000L, downloaded)
         assertTrue(downloaded <= total)
         l.advance(1, total, 50_000)
-        assertEquals(total, bitmapBytes + 50_000 + l.credited())
+        // Chunk 3 is now fully credited; chunk 2 is still open,
+        // so the honest total is 500k + 250k, not the file size.
+        assertEquals(750_000L, bitmapBytes + 50_000 + l.credited())
     }
 
     // Invariant 5 (caliber): the winner drains chunkParts over
