@@ -89,7 +89,13 @@ object TaskDiagnostics {
             }
         ).append('\n')
         if (task.error.isNotBlank()) {
-            sb.append("错误：").append(task.error).append('\n')
+            // v7.2 (audit round 57): the error text passes
+            // through the shared redactor — today's writers are
+            // fixed human sentences, but the field is NOT
+            // filtered on backup import, so a crafted record
+            // could otherwise smuggle a token URL out through
+            // this copy出口.
+            sb.append("错误：").append(Redact.forCopy(task.error)).append('\n')
         }
         val expected = Checksum.expectedOf(task)
         sb.append("完整性校验：").append(

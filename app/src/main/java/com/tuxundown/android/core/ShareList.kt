@@ -34,10 +34,34 @@ object ShareList {
             "（批量粘贴），或者存成 .txt 文件再用「从文件导入」；" +
             "文件名行会被自动跳过，只认链接行。"
 
+    /**
+     * v7.2 (audit round 57): the one reminder line added when —
+     * and only when — a link in the list carries a query string
+     * or userinfo. The links themselves stay whole (re-import
+     * needs them, that is the list's whole point), but until now
+     * nothing told the user a signed link's parameter can BE a
+     * login credential. The line carries no scheme, so both
+     * import doors skip it like the other header lines, and the
+     * list format is otherwise unchanged.
+     */
+    const val CREDENTIAL_HINT_LINE: String =
+        "提醒：这份清单里有链接带着参数或账号信息，这类参数可能就是登录凭据，" +
+            "转发给别人前请先确认。"
+
+    /** The hint line for [urls], or null when none of them
+     *  carries a query string or userinfo (see [Redact]). */
+    fun credentialHint(urls: List<String>): String? =
+        if (urls.any { Redact.urlCarriesCredentials(it) }) {
+            CREDENTIAL_HINT_LINE
+        } else {
+            null
+        }
+
     fun build(tasks: List<TaskRecord>): String {
         val sb = StringBuilder()
         sb.append(headerLine(tasks.size)).append("\n")
         sb.append(HOW_TO_LINE).append("\n")
+        credentialHint(tasks.map { it.url })?.let { sb.append(it).append("\n") }
         for (t in tasks) {
             // v6.7.0 Step B guard: a record with no URL (an
             // adopted file, url="") has no link line to share —

@@ -37,7 +37,11 @@ fun bytesOf(task: TaskRecord): Long =
 if (task.totalSize > 0) task.totalSize else task.downloaded
 
 private fun displayName(task: TaskRecord): String =
-task.savedName.ifBlank { task.fileName}.ifBlank { task.url}
+// v7.2 (audit round 57): the last-resort fallback used to be
+// the FULL task.url — a signed link's token would ride into
+// the report. The redacted form (host + path, parameters
+// folded) still says which file it was.
+task.savedName.ifBlank { task.fileName}.ifBlank { TaskDiagnostics.redactedUrl(task.url)}
 
 fun build(
 tasks: List<TaskRecord>,

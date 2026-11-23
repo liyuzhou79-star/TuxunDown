@@ -8229,7 +8229,9 @@ fun CrashReportScreen(info: CrashGuard.CrashInfo, onContinue: () -> Unit) {
                             android.content.Context.CLIPBOARD_SERVICE
                         ) as android.content.ClipboardManager
                         cm.setPrimaryClip(
-                            android.content.ClipData.newPlainText("TuxunDown 崩溃日志", info.detail)
+                            android.content.ClipData.newPlainText(
+                                "TuxunDown 崩溃日志", CrashGuard.copyText(info.detail)
+                            )
                         )
                         Toast.makeText(context, "崩溃日志已复制，去粘贴发送就行", Toast.LENGTH_SHORT)
                             .show()

@@ -680,7 +680,14 @@ class TaskStore(context: Context) {
                 o.put("createdAt", t.createdAt)
                 o.put("savedUri", t.savedUri)
                 o.put("savedName", t.savedName)
-                o.put("targetUri", t.targetUri)
+                // v7.2 (audit round 57): in the EXPORT branch
+                // (stripSensitiveHeaders) targetUri is dropped —
+                // a SAF content Uri's document id encodes a local
+                // path and a backup file may end up anywhere.
+                // savedUri stays (the same-device DONE 打开文件
+                // path depends on it; on another device it is
+                // inert). The on-disk form keeps both, untouched.
+                o.put("targetUri", if (stripSensitiveHeaders) "" else t.targetUri)
                 o.put("etag", t.etag)
                 o.put("lastModified", t.lastModified)
                 o.put("scheduledAt", t.scheduledAt)
@@ -845,7 +852,14 @@ class TaskStore(context: Context) {
                     if (srcArr != null) {
                         for (j in 0 until srcArr.length()) {
                             val s = srcArr.optString(j)
+                            // v7.2 (audit round 57): mirrors pass
+                            // the SAME scheme gate as the main
+                            // link (LinkSchemes, the v2.8 entry
+                            // door) — a backup could otherwise
+                            // plant file:// / content:// mirrors
+                            // the entry doors would never accept.
                             if (s.isNotBlank() && s != t.url && s !in t.sources &&
+                                LinkSchemes.isSupported(s) &&
                                 t.sources.size < MAX_SOURCES
                             ) {
                                 t.sources.add(s)
@@ -991,7 +1005,20 @@ class TaskStore(context: Context) {
                         t.status = TaskStatus.PAUSED
                         t.wasRunning = true
                     }
-                    out.add(t)
+                    // v7.2 (audit round 57): the scheme gate at
+                    // the parse door. This parser reads imported
+                    // backups (untrusted) AND the on-disk store;
+                    // every creation funnel has enforced
+                    // LinkSchemes since v2.8, so a non-blank URL
+                    // that fails the gate can only have arrived
+                    // via a crafted backup — the record is
+                    // isolated (skipped alone, per the per-record
+                    // rule above), never the whole import. A
+                    // BLANK url stays legal: an adopted （认领）
+                    // DONE record has no URL by construction.
+                    if (t.url.isBlank() || LinkSchemes.isSupported(t.url)) {
+                        out.add(t)
+                    }
                 }
             }
             return out

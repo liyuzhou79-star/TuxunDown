@@ -298,31 +298,17 @@ object HealthCheck {
 
     // ---------- copyable text (redacted) ----------
 
-    private val urlToken = Regex("""https?://\S+|ftp://\S+""")
-    private val secretPair =
-        Regex("""(?i)(password|passwd|pwd|token|secret|authorization)\s*[:=]\s*\S+""")
-    private val basicAuth = Regex("""(?i)basic\s+[A-Za-z0-9+/=]{8,}""")
-    private val ciphertext = Regex("""v1:[A-Za-z0-9+/=]{8,}""")
-
     /**
-     * One value made safe to copy out, following
-     *  [TaskDiagnostics]' discipline: a URL collapses to
-     *  scheme + host + path (userinfo dropped, query replaced
-     *  by a marker), key=value secrets lose their value, a
-     *  Basic-auth blob and a "v1:" Keystore ciphertext are
-     *  removed outright. Pure and pinned by tests against
-     *  secret-shaped inputs.
+     * One value made safe to copy out. v7.2: this delegates to
+     * the single shared redactor [Redact.forCopy] — this page's
+     * old private corpus (v1: ciphertext, Basic, the
+     * password/token/secret/authorization pairs, URL folding)
+     * moved there and gained the shapes it was missing (a
+     * standalone Bearer token, a Cookie: line, api-key style
+     * names), so the surfaces can never drift apart again. The
+     * name stays for the existing callers and tests.
      */
-    fun sanitizeForCopy(value: String): String {
-        var s = value
-        s = ciphertext.replace(s) { "（密文已隐藏）" }
-        s = basicAuth.replace(s) { "（凭据已隐藏）" }
-        s = secretPair.replace(s) { m ->
-            m.value.substringBefore(':').substringBefore('=') + "：（已隐藏）"
-        }
-        s = urlToken.replace(s) { m -> TaskDiagnostics.redactedUrl(m.value) }
-        return s
-    }
+    fun sanitizeForCopy(value: String): String = Redact.forCopy(value)
 
     /**
      * The whole体检 result as plain text, one line per item:

@@ -31,6 +31,13 @@ object SniffExport {
         val sb = StringBuilder()
         sb.append(ShareList.headerLine(resources.size)).append("\n")
         sb.append(ShareList.HOW_TO_LINE).append("\n")
+        // v7.2 (audit round 57): same share-time credential
+        // reminder as the queue share list (ShareList) — one
+        // extra line, only when a link in THIS list carries a
+        // query string or userinfo; the format is otherwise
+        // unchanged and both import doors skip the line.
+        ShareList.credentialHint(resources.map { it.url })
+            ?.let { sb.append(it).append("\n") }
         for (r in resources) {
             sb.append("\n")
             if (r.name.isNotBlank()) sb.append(r.name).append("\n")

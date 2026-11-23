@@ -69,6 +69,16 @@ object CrashGuard {
         else -> "遇到一个没预料到的问题，应用自己停下了"
     }
 
+    /**
+     * v7.2 (audit round 57): the text the crash page's 复制日志
+     * button puts on the clipboard. The stored log itself stays
+     * raw (it never leaves the phone on its own), but the copy
+     * 出口 passes through the shared redactor — a library
+     * exception message can carry a full URL, and that URL's
+     * query token or userinfo must not leave verbatim.
+     */
+    fun copyText(detail: String): String = Redact.forCopy(detail)
+
     /** Keep the HEAD of a log: the exception line and the top
      *  frames are the part a developer needs most. */
     fun truncateLog(text: String, max: Int = MAX_LOG_CHARS): String =

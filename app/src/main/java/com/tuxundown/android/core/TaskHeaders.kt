@@ -66,11 +66,30 @@ object TaskHeaders {
      * Proxy-Authorization — a Bearer/Basic token is exactly as
      * much a login credential as a cookie, and the backup file
      * may be stored or sent anywhere.
+     *
+     * v7.2 (audit round 57): the fixed three-name list missed
+     * custom credential headers — X-Api-Key, X-Auth-Token and
+     * kin rode into backups verbatim. The verdict is now by
+     * NAME FEATURE: the three exact names above, plus any name
+     * carrying a credential feature (api-key / apikey /
+     * auth-token / secret / token / password). Ordinary business
+     * headers (Referer, User-Agent, Range, X-Request-Id…) carry
+     * none of those features and are kept. ("cookie2" is kept
+     * too: Cookie matches exactly, not as a substring.)
      */
-    fun isSensitive(name: String): Boolean =
-        name.equals("Cookie", ignoreCase = true) ||
-            name.equals("Authorization", ignoreCase = true) ||
-            name.equals("Proxy-Authorization", ignoreCase = true)
+    private val credentialFeatures = listOf(
+        "api-key", "apikey", "api_key",
+        "auth-token", "authtoken", "auth_token",
+        "secret", "token", "password", "passwd",
+    )
+
+    fun isSensitive(name: String): Boolean {
+        val n = name.trim().lowercase()
+        if (n == "cookie" || n == "authorization" || n == "proxy-authorization") {
+            return true
+        }
+        return credentialFeatures.any { n.contains(it) }
+    }
 
     /** A copy of [headers] with the sensitive entries removed. */
     fun strippedForExport(headers: Map<String, String>): Map<String, String> =

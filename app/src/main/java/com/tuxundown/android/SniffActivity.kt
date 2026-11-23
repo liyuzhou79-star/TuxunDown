@@ -55,6 +55,32 @@ class SniffActivity : Activity() {
         }
         root.addView(hint)
 
+        // v7.2 (audit round 57): a way OUT of a sniff-browser
+        // login. CookieManager persists the cookies of every
+        // site the user signed into here, and until now there
+        // was no clear path anywhere — a login lived forever.
+        // This button wipes the browser's cookies and web
+        // storage; the feedback toast says plainly that sites
+        // will ask for a fresh login afterwards.
+        val clearLogin = Button(this).apply {
+            text = "清除浏览器登录状态"
+            setOnClickListener {
+                runCatching {
+                    val cm = CookieManager.getInstance()
+                    cm.removeAllCookies {
+                        runCatching { cm.flush() }
+                    }
+                    android.webkit.WebStorage.getInstance().deleteAllData()
+                }
+                Toast.makeText(
+                    this@SniffActivity,
+                    "已清除浏览器登录状态（Cookie 和网页存储），网站会要求重新登录",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+        }
+        root.addView(clearLogin)
+
         val frame = FrameLayout(this)
         frame.layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
@@ -85,6 +111,13 @@ class SniffActivity : Activity() {
         // navigation gate below might miss.
         web.settings.allowFileAccess = false
         web.settings.allowContentAccess = false
+        // v7.2 (audit round 57): mixed content is refused
+        // EXPLICITLY. The platform default at targetSdk 35 is
+        // already NEVER_ALLOW, so behaviour does not change —
+        // the setting is written out so the rule is visible to
+        // audit instead of living in a platform default a future
+        // targetSdk bump could quietly move.
+        web.settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
         // v1.9 audit: navigation is gated to web schemes. A page
         // (or an ad inside it) trying to steer the WebView at
         // intent://, file://, tel: and friends used to just fail
