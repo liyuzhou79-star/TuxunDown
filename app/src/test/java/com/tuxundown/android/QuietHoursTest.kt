@@ -149,4 +149,52 @@ class CompletionMergeTest {
         assertEquals("b.zip", list[0].name)
         assertFalse(CompletionMerge.isMerged(list))
     }
+
+    // ---- v7.5 (audit round 60, Step C): prune on record deletion ----
+
+    private fun doneId(name: String, taskId: String) =
+        CompletionMerge.Done(name, "content://x/$name", 0L, 100L, taskId)
+
+    @Test
+    fun pruneRemovesOnlyTheDeletedTasksEntry() {
+        // Deleting a DONE record removes its entry from the
+        // merge list, so a later merged summary never names a
+        // task the user already removed.
+        val list = listOf(
+            doneId("a.zip", "id-a"),
+            doneId("b.zip", "id-b"),
+            doneId("c.zip", "id-c"),
+        )
+        val pruned = CompletionMerge.prune(list, setOf("id-b"))
+        assertEquals(listOf("a.zip", "c.zip"), pruned.map { it.name })
+    }
+
+    @Test
+    fun pruneCanEmptyTheList() {
+        val list = listOf(doneId("a.zip", "id-a"))
+        assertEquals(
+            emptyList<CompletionMerge.Done>(),
+            CompletionMerge.prune(list, setOf("id-a")),
+        )
+    }
+
+    @Test
+    fun pruneWithUnknownIdsIsANoOp() {
+        val list = listOf(doneId("a.zip", "id-a"), doneId("b.zip", "id-b"))
+        assertEquals(list, CompletionMerge.prune(list, setOf("id-zzz")))
+        assertEquals(list, CompletionMerge.prune(list, emptySet()))
+    }
+
+    @Test
+    fun pruneNeverRemovesEntriesWithoutATaskId() {
+        // Entries built without an id (taskId = "") predate
+        // the id; pruning them by a deleted record's id could
+        // kill a different task's entry, so they stay.
+        val legacy = CompletionMerge.Done("old.zip", "content://x/old.zip", 0L, 5L)
+        val list = listOf(legacy, doneId("a.zip", "id-a"))
+        assertEquals(
+            listOf(legacy),
+            CompletionMerge.prune(list, setOf("id-a", "")),
+        )
+    }
 }
