@@ -110,7 +110,20 @@ class DownloadEngine(
      *  (see openFollowingRedirects) — never a silent direct
      *  connection. FTP runs ignore it (documented in settings). */
     private val proxySettings: ProxySettings = ProxySettings(),
+    /** v5.1 (Step B): this device's memory tier, decided once
+     *  per process by DownloadCenter and passed in by the
+     *  service. The budget table is snapshotted HERE, at engine
+     *  construction — an engine is created per run, so this is
+     *  exactly "read at task start": a running task's buffers
+     *  are never resized mid-run, whatever happens later. */
+    private val memoryTier: MemoryTier = MemoryTier.STANDARD,
 ) {
+    /** v5.1: the run's frozen budget table (see MemoryTiers). */
+    private val tierBudget: MemoryTiers.Budget = MemoryTiers.budgetFor(memoryTier)
+
+    /** v5.1: [bufferSizeFor] under this run's tier budget. */
+    private fun runBufferSizeFor(threads: Int): Int =
+        bufferSizeFor(threads, tierBudget.perTaskBufferBytes)
     /** v2.3: owns the worker count for the segmented run — the
      *  opening ladder, then steady-state dynamic scaling (see
      *  [ThreadScaler]). Created in runSegmented, read by the
@@ -1770,7 +1783,7 @@ class DownloadEngine(
             // low-count buffer and break the per-task 4 MB
             // account in bufferSizeFor's doc).
             val buf = ByteArray(
-                bufferSizeFor(bufferThreadsFor(task.threads, activeWorkers.get()))
+                runBufferSizeFor(bufferThreadsFor(task.threads, activeWorkers.get()))
             )
             var pos = from
             while (!stopped()) {
@@ -1892,7 +1905,9 @@ class DownloadEngine(
                         break
                     }
                     total += n
-                    if (total > capBytes) throw IllegalStateException("分片太大了，已停下")
+                    if (total > capBytes) throw IllegalStateException(
+                        "分片太大了（超过这台设备能安全装进内存的大小），已停下"
+                    )
                     out.write(buf, 0, n)
                 }
                 out.toByteArray()
@@ -2171,7 +2186,13 @@ class DownloadEngine(
                 if (attempt > 1) task.retryCount++
                 if (stopped()) throw InterruptedException("stopped")
                 try {
-                    var data = fetchBytes(seg.url, MAX_SEGMENT_BYTES)
+                    // v5.1 (Step B): the whole-segment-in-memory cap
+                    // is this tier's (LOW 16 MB / STANDARD 32 MB /
+                    // HIGH 64 MB — see MemoryTiers). A segment over
+                    // the cap fails inside fetchBytes with a plain
+                    // reason instead of risking an OOM; normal
+                    // playlists (segments of a few MB) never notice.
+                    var data = fetchBytes(seg.url, tierBudget.hlsMaxSegmentBytes)
                     val keyUri = seg.keyUri
                     if (keyUri != null) {
                         val key = synchronized(keyCache) {
@@ -2220,35 +2241,91 @@ class DownloadEngine(
             Thread(r).apply { isDaemon = true }
         }
         // v1.7 perf: in-flight BYTE budget. The window alone does
-        // not bound memory: each segment may be up to
-        // MAX_SEGMENT_BYTES (64 MB), so a window of finished-but-
-        // unwritten segments could theoretically pin hundreds of
-        // MB. Fetched bytes now count against a ~48 MB budget;
-        // prefetch pauses while the buffer is over budget and
-        // resumes as the writer drains it. The segment AT the
-        // write cursor is always submittable — the byte budget
-        // exempts it (submitIndex == writeIndex below) and the
-        // width gate can never close on it either, because the
-        // gated live width has a floor of 1 (HlsPlan.gate), so
-        // writeIndex itself is always inside the window. The
-        // writer can never starve waiting for a fetch the gates
-        // refused to start.
+        // not bound memory: each segment may be up to the tier's
+        // segment cap, so a window of finished-but-unwritten
+        // segments could theoretically pin hundreds of MB.
+        // Fetched bytes count against a byte budget; prefetch
+        // pauses while the buffer is over budget and resumes as
+        // the writer drains it.
+        //
+        // v5.1 (Step B): the budget is now the process-wide
+        // HlsByteBudget ledger (HlsSharedBudget), shared by ALL
+        // concurrent HLS tasks and scaled by this device's tier
+        // (LOW 16 MB / STANDARD 48 MB / HIGH 64 MB global) — it
+        // replaces the pre-v5.1 PER-TASK 48 MB budget under which
+        // five HLS tasks carried 240 MB of budgets alone (Step A
+        // ledger). The segment AT the write cursor remains
+        // always submittable, but its exemption is now BOUNDED:
+        // a cursor fetch must hold a claim against the ledger's
+        // exemption cap (one maximum-size segment), so cursor
+        // bytes in flight + buffered can never exceed the cap.
+        // The width gate can never close on the cursor either
+        // (HlsPlan.gate floors at 1), and the claim wait below
+        // has a timeout + stopped() checks, so the writer can
+        // never starve — or hang on pause/delete — waiting for a
+        // fetch the gates refused to start.
+        val hlsLedger = HlsSharedBudget.get(tierBudget)
+        // This run's contribution to the ledger's buffered
+        // account, so the finally below can hand back every byte
+        // a pause/failure leaves unwritten (no leak on cancel).
         val bufferedBytes = AtomicLong(0)
+        // Set when the run ends: late fetch completions (a pool
+        // thread that outlives shutdownNow) must not add bytes
+        // to the ledger after the finally already released them.
+        // The check-and-add and the finally's close-and-release
+        // both hold this lock, so the two can never interleave.
+        val hlsClosed = java.util.concurrent.atomic.AtomicBoolean(false)
+        val hlsLedgerLock = Object()
+        var cursorClaimHeld = false
         var failure: Exception? = null
         try {
             val futures = HashMap<Int, java.util.concurrent.Future<ByteArray>>()
             var submitIndex = writeIndex
             while (writeIndex < segments.size && !stopped()) {
+                // Bounded cursor exemption: when the writer's own
+                // next segment has not been submitted yet, claim
+                // the exemption BEFORE submitting it. The wait is
+                // short in practice (a claimed cursor segment is
+                // written the moment it lands) and is interruptible
+                // by stopped(); after the timeout the claim is
+                // forced — progress beats a perfect ledger.
+                if (submitIndex == writeIndex && !cursorClaimHeld) {
+                    var waitedMs = 0L
+                    while (!stopped() && !cursorClaimHeld) {
+                        if (hlsLedger.tryClaimCursor()) {
+                            // Record the claim IMMEDIATELY: if
+                            // stopped() fires right after, the
+                            // finally still hands it back.
+                            cursorClaimHeld = true
+                            break
+                        }
+                        if (waitedMs >= HLS_CURSOR_CLAIM_TIMEOUT_MS) {
+                            hlsLedger.forceClaimCursor()
+                            cursorClaimHeld = true
+                            break
+                        }
+                        try { Thread.sleep(50) } catch (e: InterruptedException) {
+                            throw e
+                        }
+                        waitedMs += 50
+                    }
+                    if (stopped()) break
+                }
                 while (submitIndex < segments.size &&
                     submitIndex < writeIndex + hlsLiveWidth.get() && !stopped() &&
                     (submitIndex == writeIndex ||
-                        bufferedBytes.get() < HLS_BUFFER_BUDGET_BYTES)
+                        hlsLedger.canSubmitPrefetch())
                 ) {
                     val idx = submitIndex
                     futures[idx] = pool.submit(
                         java.util.concurrent.Callable {
                             val data = segmentBytes(segments[idx])
-                            bufferedBytes.addAndGet(data.size.toLong())
+                            synchronized(hlsLedgerLock) {
+                                if (!hlsClosed.get()) {
+                                    bufferedBytes.addAndGet(data.size.toLong())
+                                    hlsLedger.onFetched(data.size.toLong())
+                                }
+                            }
                             data
                         }
                     )
@@ -2266,6 +2343,13 @@ class DownloadEngine(
                 }
                 target.writeAt(offset, data, 0, data.size)
                 bufferedBytes.addAndGet(-data.size.toLong())
+                hlsLedger.release(data.size.toLong())
+                // The claimed cursor segment is now written —
+                // hand the exemption claim back.
+                if (cursorClaimHeld) {
+                    hlsLedger.releaseCursorClaim()
+                    cursorClaimHeld = false
+                }
                 offset += data.size
                 synchronized(task.hlsSizes) { task.hlsSizes[writeIndex] = data.size.toLong() }
                 task.hlsDone[writeIndex] = true
@@ -2280,6 +2364,16 @@ class DownloadEngine(
         } catch (e: Exception) {
             failure = e
         } finally {
+            // v5.1: cancel/pause/failure cleanup for the shared
+            // ledger — bytes this run fetched but never wrote go
+            // back, and a still-held cursor claim is released, so
+            // a stopped run can never leak global budget.
+            synchronized(hlsLedgerLock) {
+                hlsClosed.set(true)
+                val leftover = bufferedBytes.get()
+                if (leftover > 0) hlsLedger.release(leftover)
+            }
+            if (cursorClaimHeld) hlsLedger.releaseCursorClaim()
             pool.shutdownNow()
             stopSampler.set(1)
             sampler.join(1500)
@@ -3101,7 +3195,7 @@ class DownloadEngine(
             var eof = false
             c.inputStream.use { input ->
                 target.openStream().use { out ->
-                    val buf = ByteArray(bufferSizeFor(1))
+                    val buf = ByteArray(runBufferSizeFor(1))
                     var firstBlock = true
                     while (!stopped()) {
                         val n = input.read(buf)
@@ -3258,7 +3352,10 @@ class DownloadEngine(
          *  maximum this remains (kept as the single source for
          *  that number). */
         const val STALL_EVICT_MS = StallPolicy.MAX_THRESHOLD_MS
-        /** v1.6 HLS segment size cap. */
+        /** v1.6 HLS segment size cap. v5.1: the LIVE cap is the
+         *  tier's (MemoryTiers.Budget.hlsMaxSegmentBytes — LOW
+         *  16 MB / STANDARD 32 MB / HIGH 64 MB); this constant
+         *  remains as the HIGH tier's value / historical ceiling. */
         const val MAX_SEGMENT_BYTES = 64 * 1024 * 1024
         /** v4.3: the widest an HLS fetch pool may ever get (see
          *  HlsPlan for why 16: segments are small and short, the
@@ -3269,8 +3366,18 @@ class DownloadEngine(
          *  pool is now sized to this max and the live width
          *  (plan + scaler + allowance gate) is the window. */
         const val HLS_MAX_PARALLEL = 16
-        /** v1.7: cap on fetched-but-unwritten HLS segment bytes. */
+        /** v1.7: cap on fetched-but-unwritten HLS segment bytes.
+         *  v5.1: this was a PER-TASK budget; the live budget is
+         *  now the tier-scaled GLOBAL HlsByteBudget (STANDARD's
+         *  global value equals this 48 MB — see MemoryTiers).
+         *  Kept as the STANDARD reference value. */
         const val HLS_BUFFER_BUDGET_BYTES = 48L * 1024 * 1024
+
+        /** v5.1: how long a writer waits for a write-cursor
+         *  exemption claim before forcing one (see runHls) —
+         *  bounds the wait so pause/delete and a stuck peer run
+         *  can never hang a writer on the budget. */
+        const val HLS_CURSOR_CLAIM_TIMEOUT_MS = 15_000L
 
         /** True when the URL path ends in .m3u8 (query/fragment aside). */
         fun isHlsUrl(url: String): Boolean =
@@ -3358,9 +3465,24 @@ class DownloadEngine(
          * streams, which is what lets HttpURLConnection recycle the
          * underlying sockets — audited in v1.5, no change needed.
          */
-        fun bufferSizeFor(threads: Int): Int {
+        fun bufferSizeFor(threads: Int): Int =
+            bufferSizeFor(threads, MemoryTiers.budgetFor(MemoryTier.STANDARD).perTaskBufferBytes)
+
+        /**
+         * v5.1 (Step B): [bufferSizeFor] under an explicit
+         * per-task budget — the memory tier's table (LOW 2 MB /
+         * STANDARD 4 MB / HIGH 6 MB; see MemoryTiers for the
+         * worst-case account). The two-argument form is the
+         * single出口 every run uses (via the engine's frozen
+         * tier snapshot); the one-argument form keeps STANDARD
+         * semantics for existing callers/tests. The invariant is
+         * unchanged in shape: n live buffers sized by >= n total
+         * at most the per-task budget (the 128 KB ceiling can
+         * only make the total SMALLER, never larger).
+         */
+        fun bufferSizeFor(threads: Int, perTaskBudgetBytes: Long): Int {
             val t = threads.coerceAtLeast(1)
-            val budget = 4 * 1024 * 1024 / t
+            val budget = (perTaskBudgetBytes / t).toInt()
             return budget.coerceIn(32 * 1024, BUFFER_SIZE)
         }
 

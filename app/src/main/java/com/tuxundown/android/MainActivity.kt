@@ -5033,6 +5033,11 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
                         "下载会直接报这个错，不会偷偷直连"
                 }
             }
+            // ---- v5.1: memory tier (same line as the page row) ----
+            val tierBudget = DownloadCenter.memoryBudget()
+            out += "内存档位" to
+                "${com.tuxundown.android.core.MemoryTiers.tierLabel(DownloadCenter.memoryTier())}；" +
+                "每个下载任务的缓冲上限约 ${tierBudget.perTaskBufferBytes / (1024 * 1024)} MB"
             // ---- tasks: counts + on-disk footprint ----
             val tasks = DownloadCenter.store.tasks
             out += "任务数" to Diagnostics.taskCountsLine(tasks)
@@ -5132,6 +5137,19 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+        // ---- v5.1: current memory tier (display only — the
+        // tier is automatic, there is deliberately no switch) ----
+        item(key = "d-tier") {
+            val tier = DownloadCenter.memoryTier()
+            val budget = DownloadCenter.memoryBudget()
+            SettingsGroup("内存档位") {
+                InfoRow(
+                    "内存档位",
+                    "${com.tuxundown.android.core.MemoryTiers.tierLabel(tier)}；" +
+                        "每个下载任务的缓冲上限约 ${budget.perTaskBufferBytes / (1024 * 1024)} MB",
+                )
+            }
         }
         item(key = "d-run") {
             Button(

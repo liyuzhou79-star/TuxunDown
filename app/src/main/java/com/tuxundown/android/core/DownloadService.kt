@@ -1123,6 +1123,10 @@ class DownloadService : Service() {
                 customUserAgent = DownloadCenter.userAgent,
                 // v1.9: the app-wide download proxy (default off).
                 proxySettings = DownloadCenter.proxySettings(),
+                // v5.1: the process-wide memory tier (decided once
+                // in DownloadCenter); the engine snapshots its
+                // budget table at construction = this run's start.
+                memoryTier = DownloadCenter.memoryTier(),
                 // v1.5: per-host thread memory — start known hosts at
                 // their remembered optimum, remember new optima, and
                 // age the memory out when a host starts failing.

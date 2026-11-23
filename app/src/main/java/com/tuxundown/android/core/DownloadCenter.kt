@@ -1053,6 +1053,36 @@ object DownloadCenter {
         )
     }
 
+    // ---- v5.1 (Step B): memory tier, decided ONCE per process.
+    // The pure decision is MemoryTiers.tierFor; this is the thin
+    // Android-facing layer that reads the two platform signals.
+    // Cached at first use (init warms it); a running task never
+    // re-reads it — engines snapshot the budget at construction.
+    @Volatile
+    private var cachedMemoryTier: MemoryTier? = null
+
+    fun memoryTier(): MemoryTier {
+        cachedMemoryTier?.let { return it }
+        synchronized(this) {
+            cachedMemoryTier?.let { return it }
+            val ctx = appContext
+            val tier = if (ctx == null) {
+                MemoryTier.STANDARD
+            } else {
+                runCatching {
+                    val am = ctx.getSystemService(Context.ACTIVITY_SERVICE)
+                        as android.app.ActivityManager
+                    MemoryTiers.tierFor(am.memoryClass, am.isLowRamDevice)
+                }.getOrDefault(MemoryTier.STANDARD)
+            }
+            cachedMemoryTier = tier
+            return tier
+        }
+    }
+
+    /** The budget table for this process's memory tier. */
+    fun memoryBudget(): MemoryTiers.Budget = MemoryTiers.budgetFor(memoryTier())
+
     @Synchronized
     fun init(context: Context) {
         if (appContext != null) return
@@ -1061,6 +1091,9 @@ object DownloadCenter {
         store.load()
         syncProxyState()
         refreshScheduleAlarm()
+        // v5.1: fix the memory tier for this process now that a
+        // context exists (two cheap system reads, no IO).
+        memoryTier()
     }
 
     /**
