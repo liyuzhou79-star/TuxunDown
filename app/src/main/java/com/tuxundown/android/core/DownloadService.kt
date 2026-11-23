@@ -1873,6 +1873,20 @@ class DownloadService : Service() {
         val active = store.tasks.filter {
             it.status == TaskStatus.RUNNING || it.status == TaskStatus.QUEUED
         }
+        // v6.1 (audit round 46): while downloads are running and
+        // the device is in the 发热降速中 band, the notification
+        // gains ONE honest line — a throttled slowdown may not
+        // be the network's fault. HINT ONLY: nothing pauses,
+        // slows or otherwise reacts automatically; what to do
+        // about a hot phone is the user's call. The read rides
+        // this existing aggregate post (already gated to one
+        // per ~900 ms above): no listener, no new polling loop.
+        // An unreadable status yields no hint — never faked.
+        // The notification is the surface because it is visible
+        // with the screen off and the app closed, which is
+        // exactly when long hot downloads run; the home summary
+        // card would only be seen after opening the app.
+        val thermalHint = ThermalStatus.hintFor(ThermalStatus.currentBand(this))
         // v2.6 audit round 12: the headline numbers (count +
         // total %) come from WidgetState — the ONE aggregation
         // the widget and the home summary card also use — so
@@ -1887,6 +1901,7 @@ class DownloadService : Service() {
                 append(Format.speed(running.speedBps))
                 if (eta > 0) append(" · 还剩 ${Format.eta(eta)}")
                 append(" · 已完成 ${WidgetState.taskPercent(running)}%")
+                if (thermalHint != null) append(" · $thermalHint")
             }
             // v1.8: a single running task earns pause/cancel
             // buttons right on the notification.
@@ -1909,6 +1924,7 @@ class DownloadService : Service() {
                 append("总速度 ${Format.speed(totalSpeed)}")
                 append(" · 已完成 $totalPct%")
                 if (eta > 0) append(" · 全部还剩 ${Format.eta(eta)}")
+                if (thermalHint != null) append(" · $thermalHint")
             }
             // v1.8: several tasks — the expanded notification
             // lists each one's own progress instead of buttons
