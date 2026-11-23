@@ -7038,7 +7038,13 @@ fun SummaryCard(active: List<TaskRecord>, all: List<TaskRecord>, liveTick: Int) 
                 // site): an aggregate over zero active tasks would
                 // print a meaningless 0% — say the true thing.
                 Text(
-                    "任务都暂停了",
+                    // v5.3 (audit round 38): BulkControl's
+                    // verdict — 「任务都暂停了」 only when the
+                    // resumable set is really all PAUSED; a
+                    // FAILED task is named as failed, not
+                    // relabelled paused (see BulkControl
+                    // .stoppedTitle).
+                    BulkControl.stoppedTitle(all),
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )

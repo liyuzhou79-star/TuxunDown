@@ -55,8 +55,11 @@ class DownloadTileService : TileService() {
                 }
                 BulkControl.Action.RESUME_ALL -> {
                     tile.state = Tile.STATE_INACTIVE
-                    tile.subtitle =
-                        "已暂停 ${BulkControl.resumableCount(tasks)} 个 · 点按全部继续"
+                    // v5.3 (audit round 38): wording from
+                    // BulkControl.resumeSubtitle — PAUSED and
+                    // FAILED halves named separately, never one
+                    // 「已暂停」 count covering both.
+                    tile.subtitle = BulkControl.resumeSubtitle(tasks)
                 }
                 BulkControl.Action.NONE -> {
                     tile.state = Tile.STATE_INACTIVE

@@ -61,6 +61,64 @@ class BulkControlTest {
         assertEquals(null, labelOf(emptyList()))
     }
 
+    // ---- v5.3 (audit round 38): FAILED is never called 已暂停 ----
+
+    @Test
+    fun resumeSubtitleNamesPausedAndFailedSeparately() {
+        val mixed = listOf(
+            task(TaskStatus.PAUSED), task(TaskStatus.PAUSED),
+            task(TaskStatus.FAILED), task(TaskStatus.DONE),
+        )
+        assertEquals(
+            "已暂停 2 个 · 失败 1 个 · 点按全部继续",
+            BulkControl.resumeSubtitle(mixed),
+        )
+        // The two halves still add up to the resumable count
+        // the tap will act on — the split is wording, not a
+        // change to what 全部继续 does.
+        assertEquals(
+            BulkControl.resumableCount(mixed),
+            BulkControl.pausedCount(mixed) + BulkControl.failedCount(mixed),
+        )
+    }
+
+    @Test
+    fun resumeSubtitleSingleKindShapes() {
+        assertEquals(
+            "已暂停 2 个 · 点按全部继续",
+            BulkControl.resumeSubtitle(
+                listOf(task(TaskStatus.PAUSED), task(TaskStatus.PAUSED)),
+            ),
+        )
+        assertEquals(
+            "失败 3 个 · 点按全部继续",
+            BulkControl.resumeSubtitle(
+                listOf(
+                    task(TaskStatus.FAILED), task(TaskStatus.FAILED),
+                    task(TaskStatus.FAILED),
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun stoppedTitleOnlySaysPausedWhenAllResumableArePaused() {
+        assertEquals(
+            "任务都暂停了",
+            BulkControl.stoppedTitle(listOf(task(TaskStatus.PAUSED))),
+        )
+        assertEquals(
+            "任务都失败了",
+            BulkControl.stoppedTitle(listOf(task(TaskStatus.FAILED))),
+        )
+        assertEquals(
+            "任务都停下了",
+            BulkControl.stoppedTitle(
+                listOf(task(TaskStatus.PAUSED), task(TaskStatus.FAILED)),
+            ),
+        )
+    }
+
     @Test
     fun doneOnlyAndEmptyMeanNone() {
         assertEquals(
