@@ -696,7 +696,7 @@ fun DownApp() {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "6.0.0"
+        }.getOrNull() ?: "6.1.0"
     }
     var showGuide by remember {
         // v2.2 safe mode: after 2+ consecutive crashes, first-
@@ -7494,9 +7494,9 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 这是 5.x 的整合版：把 4.1 以来的功能逐项做了一遍全量回归——57 个功能点一个一个对着实际代码复核接通情况，结论是全部接通、没有回退、没有只剩说明没有实装的空壳\n" +
-            "· 升级前的准备核查也做完了：从 1.2 到这一版的版本号链逐个核对、没有断档；检查更新的版本比较在 5.9 升 6.0、6.9 升 6.10 这类跨位情况下都算对；备份导出再导入的往返也核过，设置、任务、统计和按站点学习数据都能原样回来\n" +
-            "· 文档和帮助补齐了：帮助中心新增六个话题——连接预算、自动读取校验文件、建任务为什么会去重、镜像待确认与手动放行、嗅探历史重新嗅探、一键体检；仓库说明里也补上了完整的权限清单和体积说明，用的还是你手上这一版的功能，没有超前写还没做好的东西",
+            "· 手机温控看得见了：诊断页的一键体检新增「设备温控」一项，把手机当前的发热状态分成正常、偏热、发热降速中三档显示；要是这台手机读不到温控状态，这一项就不显示，不会拿假数据糊弄\n" +
+            "· 下载中发热会提醒你：正在下载时如果手机已经发热降速，通知里会多写一句，提醒这时速度变慢可能不是网络的问题；只是提醒，不会自动暂停、也不会自动降速，下载照常进行\n" +
+            "· 「下载中保持运行」开关现在即时生效：下载途中改这个开关，约一秒内就按新设置走，不用等当前任务下完；另外桌面启动器图标的字形略微缩小了一点，看着更协调",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
             "· 文件直链 → 直接开始多线程下载，还能预先改好保存文件名\n" +
@@ -8640,7 +8640,7 @@ fun TaskCard(
                     val version = runCatching {
                         ctx.packageManager.getPackageInfo(ctx.packageName, 0)
                             .versionName
-                    }.getOrNull() ?: "6.0.0"
+                    }.getOrNull() ?: "6.1.0"
                     val cm = ctx.getSystemService(
                         android.content.Context.CLIPBOARD_SERVICE,
                     ) as android.content.ClipboardManager
