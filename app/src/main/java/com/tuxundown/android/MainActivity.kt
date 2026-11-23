@@ -136,6 +136,7 @@ import com.tuxundown.android.core.QuietHours
 import com.tuxundown.android.core.ThunderLink
 import com.tuxundown.android.core.ProxySettings
 import com.tuxundown.android.core.PublicStorage
+import com.tuxundown.android.core.Reconcile
 import com.tuxundown.android.core.ScheduleTime
 import com.tuxundown.android.core.ShortLinkExpander
 import com.tuxundown.android.core.SniffHistory
@@ -4327,6 +4328,46 @@ fun FilesScreen(onBack: () -> Unit) {
     var dupConfirm by remember { mutableStateOf(false) }
     val dupCancelFlag = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
 
+    // ---- v6.7.0 Step B: 一键对账 — report only, every
+    // disposition is a user tap (see Reconcile). Probe + scan
+    // run on a background thread, only when the user taps. ----
+    var recRunning by remember { mutableStateOf(false) }
+    var recReport by remember { mutableStateOf<Reconcile.Report?>(null) }
+    var recDismissed by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var recGhostDelete by remember { mutableStateOf<Reconcile.RecordSnap?>(null) }
+    var recAdopt by remember { mutableStateOf<Reconcile.ScanEntry?>(null) }
+    var recPair by remember { mutableStateOf<Reconcile.PossiblePair?>(null) }
+    var recRename by remember { mutableStateOf<Reconcile.Rename?>(null) }
+
+    fun startReconcile() {
+        recRunning = true
+        recReport = null
+        recDismissed = emptySet()
+        Thread {
+            val snaps = DownloadCenter.store.tasks
+                .filter { it.status == TaskStatus.DONE && it.savedUri.isNotBlank() }
+                .map { t ->
+                    Reconcile.RecordSnap(
+                        id = t.id,
+                        savedUri = t.savedUri,
+                        savedName = t.savedName.ifBlank { t.fileName },
+                        size = if (t.totalSize > 0) t.totalSize else t.downloaded,
+                    )
+                }
+            val scanned = runCatching { PublicStorage.scanDownloadedFiles(context) }
+                .getOrDefault(emptyList())
+            val probes = PublicStorage.probeRecords(context, snaps, scanned)
+            val scanEntries = scanned.map {
+                Reconcile.ScanEntry(it.uri.toString(), it.name, it.size, it.modifiedAt)
+            }
+            val report = Reconcile.reconcile(snaps, probes, scanEntries)
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                recRunning = false
+                recReport = report
+            }
+        }.start()
+    }
+
     fun startDupScan() {
         dupGroups = null
         dupChecked = emptySet()
@@ -4504,6 +4545,165 @@ fun FilesScreen(onBack: () -> Unit) {
                 }
             }
         }
+        // ---- v6.7.0 Step B: reconciliation controls + report ----
+        item(key = "f-reconcile") {
+            Column {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (recRunning) {
+                        Text(
+                            "正在对账…",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        OutlinedButton(
+                            onClick = { startReconcile() },
+                            enabled = !loading,
+                        ) { Text("对账") }
+                        if (recReport != null) {
+                            TextButton(onClick = { recReport = null }) { Text("收起报告") }
+                        }
+                    }
+                }
+                val report = recReport
+                if (report != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "对账范围：只查现在这个下载位置。" +
+                            "「按类型分文件夹」关着的时候，以前分进子文件夹的文件不在这次范围里；" +
+                            "用的是自定义文件夹时，只查所选文件夹里面的；" +
+                            "文件被移到下载目录外面的，这次找不到。" +
+                            "对账只报告、不自动处理任何一条，每条都要你点。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (report.unknownCount > 0) {
+                        Text(
+                            "有 ${report.unknownCount} 条暂时查不到（可能文件夹授权失效或系统暂时查不到），" +
+                                "这次没有把它们算作「文件已不在」。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (report.isClean && report.unknownCount == 0) {
+                        Text(
+                            "对账结果：记录和文件都对得上，没有幽灵记录、没有无主文件。",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                    val pairedScanUris = report.pairs.map { it.scan.uri }.toSet()
+                    val ghostsShown = report.ghosts.filter { "ghost:${it.id}" !in recDismissed }
+                    val unclaimedShown = report.unclaimed.filter {
+                        it.uri !in pairedScanUris && "scan:${it.uri}" !in recDismissed
+                    }
+                    val pairsShown = report.pairs.filter {
+                        "pair:${it.ghost.id}:${it.scan.uri}" !in recDismissed
+                    }
+                    val renamesShown = report.renames.filter { "rename:${it.record.id}" !in recDismissed }
+                    if (ghostsShown.isNotEmpty()) {
+                        Text(
+                            "幽灵记录（记录还在、文件已不在）${ghostsShown.size} 条：",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                        for (g in ghostsShown) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(top = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    "${g.savedName}（${Format.size(g.size)}）",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                TextButton(onClick = { recGhostDelete = g }) { Text("删记录") }
+                                TextButton(onClick = {
+                                    recDismissed = recDismissed + "ghost:${g.id}"
+                                }) { Text("保留") }
+                            }
+                        }
+                    }
+                    if (pairsShown.isNotEmpty()) {
+                        Text(
+                            "疑似同一个文件（大小和扩展名都对上，只是线索、不能肯定）：",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                        for (p in pairsShown) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(top = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    "记录「${p.ghost.savedName}」可能是同一个文件：" +
+                                        "现在叫「${p.scan.name}」（${Format.size(p.scan.size)}）",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                TextButton(onClick = { recPair = p }) { Text("认领新位置并删旧记录") }
+                                TextButton(onClick = {
+                                    recDismissed = recDismissed +
+                                        "pair:${p.ghost.id}:${p.scan.uri}"
+                                }) { Text("忽略") }
+                            }
+                        }
+                    }
+                    if (unclaimedShown.isNotEmpty()) {
+                        Text(
+                            "无主成品（文件还在、没有记录认领）${unclaimedShown.size} 个：",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                        for (s in unclaimedShown) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(top = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    "${s.name}（${Format.size(s.size)}）",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                TextButton(onClick = { recAdopt = s }) { Text("认领为已完成记录") }
+                                TextButton(onClick = {
+                                    recDismissed = recDismissed + "scan:${s.uri}"
+                                }) { Text("忽略") }
+                            }
+                        }
+                    }
+                    if (renamesShown.isNotEmpty()) {
+                        Text(
+                            "文件改过名字（文件还在，只是记录里还是旧名）：",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                        for (rn in renamesShown) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(top = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    "记录里是「${rn.record.savedName}」，现在叫「${rn.liveName}」",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                TextButton(onClick = { recRename = rn }) { Text("更新记录里的名字") }
+                                TextButton(onClick = {
+                                    recDismissed = recDismissed + "rename:${rn.record.id}"
+                                }) { Text("忽略") }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // ---- v3.1: duplicate results ----
         val dGroups = dupGroups
         if (dGroups != null) {
@@ -4639,6 +4839,120 @@ fun FilesScreen(onBack: () -> Unit) {
                 }
             }
         }
+    }
+
+    // ---- v6.7.0 Step B: reconciliation disposition dialogs.
+    // Every action below is user-tapped and confirmed; nothing
+    // here ever touches a file — the only deletion is a RECORD. ----
+    if (recGhostDelete != null) {
+        val g = recGhostDelete!!
+        AlertDialog(
+            onDismissRequest = { recGhostDelete = null },
+            title = { Text("删掉这条记录？") },
+            text = {
+                Text(
+                    "「${g.savedName}」的文件已经不在下载位置了（这次对账查不到它）。" +
+                        "这里删的只是任务记录，不会再去动任何文件；文件本来就已经不在了。",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    recGhostDelete = null
+                    DownloadCenter.store.byId(g.id)?.let { DownloadCenter.store.remove(it) }
+                    recDismissed = recDismissed + "ghost:${g.id}"
+                    reloadKey++
+                    Toast.makeText(context, "记录已删除", Toast.LENGTH_SHORT).show()
+                }) { Text("删记录") }
+            },
+            dismissButton = {
+                TextButton(onClick = { recGhostDelete = null }) { Text("取消") }
+            },
+        )
+    }
+    if (recAdopt != null) {
+        val s = recAdopt!!
+        AlertDialog(
+            onDismissRequest = { recAdopt = null },
+            title = { Text("认领这个文件？") },
+            text = {
+                Text(
+                    "把「${s.name}」（${Format.size(s.size)}）认领为一条已完成记录：" +
+                        "之后它在文件页和任务列表里都按已完成显示。" +
+                        "这个文件没有下载链接，认领不会联网、不会重新下载，只是补一条记录。",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    recAdopt = null
+                    DownloadCenter.store.insertBypass(Reconcile.buildAdopted(s))
+                    recDismissed = recDismissed + "scan:${s.uri}"
+                    reloadKey++
+                    Toast.makeText(context, "已认领为已完成记录", Toast.LENGTH_SHORT).show()
+                }) { Text("认领") }
+            },
+            dismissButton = {
+                TextButton(onClick = { recAdopt = null }) { Text("取消") }
+            },
+        )
+    }
+    if (recPair != null) {
+        val p = recPair!!
+        AlertDialog(
+            onDismissRequest = { recPair = null },
+            title = { Text("认领新位置并删旧记录？") },
+            text = {
+                Text(
+                    "两步一起做，请看清：\n" +
+                        "1）把现在的文件「${p.scan.name}」（${Format.size(p.scan.size)}）认领为一条已完成记录；\n" +
+                        "2）删掉旧的幽灵记录「${p.ghost.savedName}」（只删记录）。\n" +
+                        "它们大小和扩展名都对上，可能是同一个文件，但不能肯定——不是就点取消。",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    recPair = null
+                    DownloadCenter.store.insertBypass(Reconcile.buildAdopted(p.scan))
+                    DownloadCenter.store.byId(p.ghost.id)?.let {
+                        DownloadCenter.store.remove(it)
+                    }
+                    recDismissed = recDismissed +
+                        "pair:${p.ghost.id}:${p.scan.uri}" + "ghost:${p.ghost.id}"
+                    reloadKey++
+                    Toast.makeText(context, "已认领新位置，旧记录已删除", Toast.LENGTH_SHORT).show()
+                }) { Text("认领并删旧记录") }
+            },
+            dismissButton = {
+                TextButton(onClick = { recPair = null }) { Text("取消") }
+            },
+        )
+    }
+    if (recRename != null) {
+        val rn = recRename!!
+        AlertDialog(
+            onDismissRequest = { recRename = null },
+            title = { Text("更新记录里的名字？") },
+            text = {
+                Text(
+                    "文件现在叫「${rn.liveName}」，记录里还是旧名「${rn.record.savedName}」。" +
+                        "更新只是把记录里的名字改成现在的名字，文件本身不动。",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    recRename = null
+                    DownloadCenter.store.byId(rn.record.id)?.let { t ->
+                        t.savedName = rn.liveName
+                        DownloadCenter.store.saveNow()
+                    }
+                    recDismissed = recDismissed + "rename:${rn.record.id}"
+                    reloadKey++
+                    Toast.makeText(context, "记录里的名字已更新", Toast.LENGTH_SHORT).show()
+                }) { Text("更新名字") }
+            },
+            dismissButton = {
+                TextButton(onClick = { recRename = null }) { Text("取消") }
+            },
+        )
     }
 
     // ---- v3.1: duplicate deletion — same rule as the single
@@ -8216,7 +8530,10 @@ fun TaskCard(
         TaskStatus.DONE -> BarState.DONE
         TaskStatus.QUEUED -> BarState.IDLE
     }
-    val displayName = task.fileName.ifBlank { task.url }
+    // v6.7.0 Step B guard: an adopted record has url="" — fall
+    // back to the saved file name before the (blank) URL so the
+    // card never renders an empty title.
+    val displayName = task.fileName.ifBlank { task.savedName }.ifBlank { task.url }
     val kind = kindOfName(task.savedName.ifBlank { task.fileName })
 
     // ---- v1.8 swipe gestures: slide LEFT = pause/resume, slide

@@ -39,6 +39,11 @@ object ShareList {
         sb.append(headerLine(tasks.size)).append("\n")
         sb.append(HOW_TO_LINE).append("\n")
         for (t in tasks) {
+            // v6.7.0 Step B guard: a record with no URL (an
+            // adopted file, url="") has no link line to share —
+            // emitting a blank line plus a name would read as a
+            // broken entry on re-import, so it is skipped whole.
+            if (t.url.isBlank()) continue
             sb.append("\n")
             val name = t.fileName.ifBlank { t.savedName }
             if (name.isNotBlank()) sb.append(name).append("\n")

@@ -536,6 +536,19 @@ class TaskStore(context: Context) {
         return t
     }
 
+    /**
+     * v6.7.0 Step B: bypass insertion for a record that must NOT
+     * fire [onTaskAdded] — the same route [importJson] takes via
+     * addAll. Used by files-page reconciliation adoption: an
+     * adopted file has no URL (url=""), so the sidecar checksum
+     * hook hanging on onTaskAdded would have nothing to fetch
+     * from and must never run for it.
+     */
+    fun insertBypass(t: TaskRecord) {
+        tasks.add(t)
+        saveNow()
+    }
+
     fun remove(t: TaskRecord) {
         tasks.remove(t)
         fileOf(t).delete()

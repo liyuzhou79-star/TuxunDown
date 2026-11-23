@@ -41,6 +41,10 @@ object ServerProfile {
      * simply does not apply).
      */
     fun resumeText(task: TaskRecord): String? {
+        // v6.7.0 Step B guard: an adopted record (url="") has no
+        // server at all — claiming any resume story for it would
+        // be fabricated, so the row stays absent.
+        if (task.url.isBlank()) return null
         if (task.isHls) return null
         val engaged = task.startedAt > 0 || task.totalSize > 0
         if (!engaged) return null

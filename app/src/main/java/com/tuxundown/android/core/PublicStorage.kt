@@ -575,6 +575,96 @@ object PublicStorage {
         return out
     }
 
+    // ---------- v6.7.0 Step B: reconciliation probes ----------
+
+    /**
+     * Three-state existence probe for DONE records' savedUris
+     * (audit round 52 calibers). Runs ONLY when the caller asks
+     * (reconciliation, page load) on a background thread — never
+     * from any periodic tick.
+     *
+     * MediaStore path: one resolver query per Uri (_ID +
+     * DISPLAY_NAME + SIZE) — 0 rows = MISSING, a row = EXISTS
+     * with the live name/size, a throwing/null query = UNKNOWN.
+     * SAF path: scan membership is positive proof of life; else
+     * DocumentFile.exists(); when the tree itself is unreadable
+     * EVERY verdict is UNKNOWN (a dead grant must not turn the
+     * whole library into ghosts at once).
+     */
+    fun probeRecords(
+        context: Context,
+        records: List<Reconcile.RecordSnap>,
+        scan: List<ScannedFile>,
+    ): Map<String, Reconcile.Probe> {
+        val out = HashMap<String, Reconcile.Probe>()
+        val custom = DownloadCenter.downloadDirUri
+        if (custom.isNotBlank()) {
+            val tree = runCatching {
+                DocumentFile.fromTreeUri(context, Uri.parse(custom))
+            }.getOrNull()
+            if (tree == null || !tree.canRead()) {
+                for (r in records) out[r.savedUri] = Reconcile.Probe(Reconcile.Verdict.UNKNOWN)
+                return out
+            }
+            val scanByUri = scan.associateBy { it.uri.toString() }
+            for (r in records) {
+                val inScan = scanByUri[r.savedUri]
+                if (inScan != null) {
+                    out[r.savedUri] = Reconcile.Probe(
+                        Reconcile.Verdict.EXISTS, inScan.name, inScan.size,
+                    )
+                    continue
+                }
+                out[r.savedUri] = runCatching {
+                    val doc = DocumentFile.fromSingleUri(context, Uri.parse(r.savedUri))
+                    when {
+                        doc == null -> Reconcile.Probe(Reconcile.Verdict.UNKNOWN)
+                        doc.exists() -> Reconcile.Probe(
+                            Reconcile.Verdict.EXISTS, doc.name, runCatching { doc.length() }.getOrNull(),
+                        )
+                        else -> Reconcile.Probe(Reconcile.Verdict.MISSING)
+                    }
+                }.getOrDefault(Reconcile.Probe(Reconcile.Verdict.UNKNOWN))
+            }
+            return out
+        }
+        for (r in records) {
+            out[r.savedUri] = probeMediaStoreUri(context, r.savedUri)
+        }
+        return out
+    }
+
+    private fun probeMediaStoreUri(context: Context, uriString: String): Reconcile.Probe {
+        val uri = runCatching { Uri.parse(uriString) }.getOrNull()
+            ?: return Reconcile.Probe(Reconcile.Verdict.UNKNOWN)
+        val cursor = runCatching {
+            context.contentResolver.query(
+                uri,
+                arrayOf(
+                    MediaStore.Downloads._ID,
+                    MediaStore.Downloads.DISPLAY_NAME,
+                    MediaStore.Downloads.SIZE,
+                ),
+                null, null, null,
+            )
+        }.getOrNull() ?: return Reconcile.Probe(Reconcile.Verdict.UNKNOWN)
+        cursor.use {
+            return runCatching {
+                if (!it.moveToFirst()) {
+                    Reconcile.Probe(Reconcile.Verdict.MISSING)
+                } else {
+                    val nameIdx = it.getColumnIndex(MediaStore.Downloads.DISPLAY_NAME)
+                    val sizeIdx = it.getColumnIndex(MediaStore.Downloads.SIZE)
+                    Reconcile.Probe(
+                        Reconcile.Verdict.EXISTS,
+                        if (nameIdx >= 0) it.getString(nameIdx) else null,
+                        if (sizeIdx >= 0) it.getLong(sizeIdx) else null,
+                    )
+                }
+            }.getOrDefault(Reconcile.Probe(Reconcile.Verdict.UNKNOWN))
+        }
+    }
+
     /** Delete one file by its Uri string; false when refused. */
     fun deleteByUri(context: Context, uriString: String): Boolean {
         val uri = runCatching { Uri.parse(uriString) }.getOrNull() ?: return false
