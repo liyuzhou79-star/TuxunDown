@@ -316,29 +316,52 @@ class DownloadService : Service() {
     }
 
     private fun headRequestCode(task: TaskRecord, method: String): Int {
-        val c = ProxyState.open(java.net.URL(task.url))
-        try {
-            c.connectTimeout = 8_000
-            c.readTimeout = 8_000
-            c.instanceFollowRedirects = true
-            c.requestMethod = method
-            c.setRequestProperty(
-                "User-Agent",
-                UserAgents.resolve(task.headers["User-Agent"], DownloadCenter.userAgent),
-            )
-            task.headers["Cookie"]?.let { c.setRequestProperty("Cookie", it) }
-            task.headers["Referer"]?.let { c.setRequestProperty("Referer", it) }
-            if (method == "GET") c.setRequestProperty("Range", "bytes=0-0")
-            return c.responseCode
-        } finally {
-            // v4.1 (step A): same keep-alive discipline as the
-            // engine's releaseConnection — a HEAD reply has no
-            // body and the GET fallback's body is a single byte,
-            // so drain-and-close returns the socket to the pool
-            // instead of the old unconditional disconnect. A body
-            // too big to drain (Range ignored) or an error stream
-            // that will not open is disconnected, as before.
-            releaseProbeConnection(c)
+        // v8.2 audit round 67: redirects are followed MANUALLY
+        // (see AuxRedirect). This probe carries the task's
+        // Cookie; a platform-followed hop would re-send it to
+        // whatever host the Location names. Each hop re-asks
+        // SessionScope against the task's original url, so the
+        // Cookie only ever reaches the task's own host.
+        var current = task.url
+        var redirects = 0
+        while (true) {
+            val c = ProxyState.open(java.net.URL(current))
+            var next: String? = null
+            try {
+                c.connectTimeout = 8_000
+                c.readTimeout = 8_000
+                c.instanceFollowRedirects = false
+                c.requestMethod = method
+                c.setRequestProperty(
+                    "User-Agent",
+                    UserAgents.resolve(task.headers["User-Agent"], DownloadCenter.userAgent),
+                )
+                SessionScope.cookieFor(task.headers["Cookie"], task.url, current)
+                    ?.let { c.setRequestProperty("Cookie", it) }
+                task.headers["Referer"]?.let { c.setRequestProperty("Referer", it) }
+                if (method == "GET") c.setRequestProperty("Range", "bytes=0-0")
+                val code = c.responseCode
+                if (!AuxRedirect.isRedirect(code)) return code
+                next = AuxRedirect.nextUrl(
+                    current, c.getHeaderField("Location"), redirects,
+                )
+                if (next == null) return code
+            } finally {
+                if (next == null) {
+                    // v4.1 (step A): same keep-alive discipline as the
+                    // engine's releaseConnection — a HEAD reply has no
+                    // body and the GET fallback's body is a single byte,
+                    // so drain-and-close returns the socket to the pool
+                    // instead of the old unconditional disconnect. A body
+                    // too big to drain (Range ignored) or an error stream
+                    // that will not open is disconnected, as before.
+                    releaseProbeConnection(c)
+                } else {
+                    runCatching { c.disconnect() }
+                }
+            }
+            current = next
+            redirects++
         }
     }
 
@@ -1173,36 +1196,59 @@ class DownloadService : Service() {
                     // a proxy configured in the meantime — in
                     // which case the pooled socket is the
                     // proxy's, equally harmless).
-                    val c = ProxyState.open(java.net.URL(target.url))
-                    conn = c
-                    c.connectTimeout = 15_000
-                    c.readTimeout = 30_000
-                    c.instanceFollowRedirects = true
-                    c.setRequestProperty(
-                        "User-Agent",
-                        UserAgents.resolve(
-                            task.headers["User-Agent"], DownloadCenter.userAgent
-                        ),
-                    )
-                    c.setRequestProperty("Accept-Encoding", "identity")
-                    task.headers["Cookie"]?.let {
-                        c.setRequestProperty("Cookie", it)
+                    // v8.2 audit round 67: redirects are followed
+                    // MANUALLY (see AuxRedirect) — the warm carries
+                    // the task's Cookie, and a platform-followed hop
+                    // would re-send it to the Location's host. Each
+                    // hop re-asks SessionScope against the task's
+                    // original url; redirect hops are disconnected,
+                    // never pooled.
+                    var current = target.url
+                    var redirects = 0
+                    while (true) {
+                        val c = ProxyState.open(java.net.URL(current))
+                        conn = c
+                        c.connectTimeout = 15_000
+                        c.readTimeout = 30_000
+                        c.instanceFollowRedirects = false
+                        c.setRequestProperty(
+                            "User-Agent",
+                            UserAgents.resolve(
+                                task.headers["User-Agent"], DownloadCenter.userAgent
+                            ),
+                        )
+                        c.setRequestProperty("Accept-Encoding", "identity")
+                        SessionScope.cookieFor(task.headers["Cookie"], task.url, current)
+                            ?.let { c.setRequestProperty("Cookie", it) }
+                        task.headers["Referer"]?.let {
+                            c.setRequestProperty("Referer", it)
+                        }
+                        c.setRequestProperty("Range", "bytes=0-0")
+                        val code = c.responseCode
+                        if (AuxRedirect.isRedirect(code)) {
+                            val next = AuxRedirect.nextUrl(
+                                current, c.getHeaderField("Location"), redirects,
+                            )
+                            if (next != null) {
+                                runCatching { c.disconnect() }
+                                conn = null
+                                current = next
+                                redirects++
+                                continue
+                            }
+                        }
+                        // Only a 206's 1-byte body may be pooled;
+                        // anything else is disconnected by
+                        // releaseProbeConnection's cap discipline
+                        // or directly here. A stale target's socket
+                        // is never pooled (see the doc above).
+                        poolIt = code == 206 && QueuePreheat.stillTarget(
+                            store.tasks, System.currentTimeMillis(),
+                            target.taskId, target.host,
+                        )
+                        if (!poolIt) runCatching { c.disconnect() }
+                        break
                     }
-                    task.headers["Referer"]?.let {
-                        c.setRequestProperty("Referer", it)
-                    }
-                    c.setRequestProperty("Range", "bytes=0-0")
-                    val code = c.responseCode
-                    // Only a 206's 1-byte body may be pooled;
-                    // anything else is disconnected by
-                    // releaseProbeConnection's cap discipline
-                    // or directly here. A stale target's socket
-                    // is never pooled (see the doc above).
-                    poolIt = code == 206 && QueuePreheat.stillTarget(
-                        store.tasks, System.currentTimeMillis(),
-                        target.taskId, target.host,
-                    )
-                    if (!poolIt) runCatching { c.disconnect() }
                 } finally {
                     if (poolIt) {
                         conn?.let { releaseProbeConnection(it) }

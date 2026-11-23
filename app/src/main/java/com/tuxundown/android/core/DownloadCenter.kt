@@ -307,20 +307,43 @@ object DownloadCenter {
     private fun fetchSidecarBody(task: TaskRecord, sidecarUrl: String): String? {
         var conn: java.net.HttpURLConnection? = null
         return try {
-            val c = ProxyState.open(java.net.URL(sidecarUrl))
+            // v8.2 audit round 67: redirects are followed MANUALLY
+            // (see AuxRedirect). This fetch carries the task's
+            // Cookie; a platform-followed hop would re-send it to
+            // whatever host the Location names. Each hop re-asks
+            // SessionScope against the task's original url, so the
+            // Cookie only ever reaches the task's own host.
+            var current = sidecarUrl
+            var redirects = 0
+            while (true) {
+            val c = ProxyState.open(java.net.URL(current))
             conn = c
             c.connectTimeout = SidecarChecksum.TIMEOUT_MS
             c.readTimeout = SidecarChecksum.TIMEOUT_MS
-            c.instanceFollowRedirects = true
+            c.instanceFollowRedirects = false
             c.requestMethod = "GET"
             c.setRequestProperty(
                 "User-Agent",
                 UserAgents.resolve(task.headers["User-Agent"], userAgent),
             )
-            task.headers["Cookie"]?.let { c.setRequestProperty("Cookie", it) }
+            SessionScope.cookieFor(task.headers["Cookie"], task.url, current)
+                ?.let { c.setRequestProperty("Cookie", it) }
             task.headers["Referer"]?.let { c.setRequestProperty("Referer", it) }
-            if (c.responseCode != 200) return null
-            c.inputStream.use { input ->
+            val code = c.responseCode
+            if (AuxRedirect.isRedirect(code)) {
+                val next = AuxRedirect.nextUrl(
+                    current, c.getHeaderField("Location"), redirects,
+                )
+                if (next != null) {
+                    runCatching { c.disconnect() }
+                    conn = null
+                    current = next
+                    redirects++
+                    continue
+                }
+            }
+            if (code != 200) return null
+            return c.inputStream.use { input ->
                 val out = java.io.ByteArrayOutputStream()
                 val buf = ByteArray(4096)
                 // Read at most the cap + 1 byte; anything past
@@ -339,6 +362,7 @@ object DownloadCenter {
                     bytes
                 }
                 String(bounded, Charsets.UTF_8)
+            }
             }
         } catch (e: Exception) {
             null
