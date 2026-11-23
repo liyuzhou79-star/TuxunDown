@@ -7256,7 +7256,7 @@ fun TaskCard(
     // are NOT composable context) can use it — the diagnostics
     // copy button below needs it.
     val context = LocalContext.current
-    val pct = Format.percent(task.progress)
+    val pct = WidgetState.taskPercent(task)
     val barState = when (task.status) {
         TaskStatus.RUNNING -> BarState.RUNNING
         TaskStatus.PAUSED -> BarState.PAUSED

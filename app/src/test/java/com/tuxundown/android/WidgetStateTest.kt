@@ -215,6 +215,61 @@ class WidgetStateTest {
         )
     }
 
+    // ---- v5.3 (audit round 38): single-task percent ----
+
+    @Test
+    fun taskPercentUsesLongMathNotTheFloatRatio() {
+        // The round-38 divergence: 29/100 through the Float
+        // ratio truncates to 28 (the Float nearest 0.29, times
+        // 100), while the aggregate Long math says 29 — with a
+        // single running task the card/notification (Float) and
+        // the widget/summary card (Long) disagreed about the
+        // SAME task. taskPercent is the Long verdict.
+        val t = task(TaskStatus.RUNNING, total = 100, downloaded = 29)
+        assertEquals(29, WidgetState.taskPercent(t))
+        // And it agrees with the aggregate over the same task.
+        assertEquals(
+            WidgetState.summary(listOf(t)).totalPct,
+            WidgetState.taskPercent(t),
+        )
+    }
+
+    @Test
+    fun taskPercentLargeFileMatchesAggregate() {
+        val total = 268_435_456L
+        val done = total * 29 / 100 + 1
+        val t = task(TaskStatus.RUNNING, total = total, downloaded = done)
+        assertEquals(29, WidgetState.taskPercent(t))
+    }
+
+    @Test
+    fun taskPercentUnknownSizeIsZero() {
+        val t = task(TaskStatus.RUNNING, total = -1, downloaded = 12345)
+        assertEquals(0, WidgetState.taskPercent(t))
+    }
+
+    @Test
+    fun taskPercentHlsIsTheMergedSegmentFraction() {
+        // HLS totals are unknown while running; the percent is
+        // the merged fraction, in Long math like everything
+        // else (29 of 100 segments merged = 29, not the Float
+        // ratio's 28).
+        val t = TaskRecord(
+            url = "https://a.com/s.m3u8", status = TaskStatus.RUNNING,
+            totalSize = -1, isHls = true, hlsTotalSegments = 100,
+            hlsDone = BooleanArray(100) { it < 29 },
+        )
+        assertEquals(29, WidgetState.taskPercent(t))
+    }
+
+    @Test
+    fun taskPercentClampsAndCompletes() {
+        val done = task(TaskStatus.DONE, total = 100, downloaded = 100)
+        assertEquals(100, WidgetState.taskPercent(done))
+        val over = task(TaskStatus.RUNNING, total = 100, downloaded = 250)
+        assertEquals(100, WidgetState.taskPercent(over))
+    }
+
     @Test
     fun unknownSizesGiveZeroPctNotAFakeNumber() {
         val s = WidgetState.summary(

@@ -45,6 +45,33 @@ object WidgetState {
     }
 
     /**
+     * v5.3 (audit round 38): ONE task's integer percent, in the
+     * same Long arithmetic as [summary] — the single-task mirror
+     * the task card and the notification's per-task texts read.
+     * They used to go through the Float ratio
+     * (Format.percent(task.progress)), which can land one point
+     * BELOW the Long verdict on the same bytes (29/100: the
+     * Float nearest 0.29 times 100 truncates to 28), so with a
+     * single running task the card/notification said 28% while
+     * the widget and the summary card said 29% about the very
+     * same task. Semantics mirror TaskRecord.progress exactly:
+     * an HLS task's percent is its merged-segment fraction, an
+     * unknown size is 0 (the surfaces say 大小未知 instead of
+     * leaning on the number), and the result is clamped to
+     * 0..100. The Float [TaskRecord.progress] itself stays —
+     * it feeds the progress BAR, where a fraction is the right
+     * shape and one percent of fill is invisible.
+     */
+    fun taskPercent(task: TaskRecord): Int {
+        if (task.isHls && task.hlsTotalSegments > 0) {
+            val done = task.hlsDone.count { it }
+            return (done * 100L / task.hlsTotalSegments).toInt().coerceIn(0, 100)
+        }
+        if (task.totalSize <= 0) return 0
+        return (task.downloaded * 100 / task.totalSize).toInt().coerceIn(0, 100)
+    }
+
+    /**
      * v4.4: seconds until EVERYTHING is downloaded — the
      * aggregate mirror of TaskRecord.etaSeconds (the single-task
      *口径: remaining bytes / current speed, integer division,

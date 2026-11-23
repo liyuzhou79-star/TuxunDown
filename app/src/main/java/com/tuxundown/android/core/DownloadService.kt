@@ -1250,7 +1250,7 @@ class DownloadService : Service() {
                     notifyUpdate(
                         "等待登录 WiFi",
                         task.fileName,
-                        Format.percent(task.progress),
+                        WidgetState.taskPercent(task),
                     )
                     return false
                 }
@@ -1280,7 +1280,7 @@ class DownloadService : Service() {
                     notifyUpdate(
                         "网络断开，等待恢复",
                         task.fileName,
-                        Format.percent(task.progress),
+                        WidgetState.taskPercent(task),
                     )
                     return false
                 }
@@ -1307,7 +1307,7 @@ class DownloadService : Service() {
             notifyUpdate(
                 "下载失败，稍后自动重试",
                 "${task.fileName} · 第 ${task.autoRetriesUsed}/$limit 次",
-                Format.percent(task.progress),
+                WidgetState.taskPercent(task),
             )
             if (!sleepBackoff(waitMs, task)) return false
             // v2.1 audit (round 7, C2): a delete that landed DURING
@@ -1870,13 +1870,13 @@ class DownloadService : Service() {
             val text = buildString {
                 append(Format.speed(running.speedBps))
                 if (eta > 0) append(" · 还剩 ${Format.eta(eta)}")
-                append(" · 已完成 ${Format.percent(running.progress)}%")
+                append(" · 已完成 ${WidgetState.taskPercent(running)}%")
             }
             // v1.8: a single running task earns pause/cancel
             // buttons right on the notification.
             notifyUpdate(
                 "正在下载 · ${running.fileName}", text,
-                Format.percent(running.progress),
+                WidgetState.taskPercent(running),
                 actionTask = running,
             )
         } else {
@@ -1899,7 +1899,7 @@ class DownloadService : Service() {
             // that could only ever name one of them.
             val lines = active.take(5).joinToString("\n") { t ->
                 val name = t.fileName.ifBlank { t.url }
-                val pct = Format.percent(t.progress)
+                val pct = WidgetState.taskPercent(t)
                 if (t.status == TaskStatus.RUNNING) {
                     "$name · $pct% · ${Format.speed(t.speedBps)}"
                 } else {
