@@ -33,7 +33,7 @@
 
 一共申请 10 项系统权限，每项都有明确用途：联网下载（INTERNET）、判断当前是 WiFi 还是流量（ACCESS_NETWORK_STATE）、在后台继续下载的前台服务（FOREGROUND_SERVICE、FOREGROUND_SERVICE_DATA_SYNC）、发送下载进度与完成通知（POST_NOTIFICATIONS）、完成时震动（VIBRATE）、打开系统的电池白名单页面（REQUEST_IGNORE_BATTERY_OPTIMIZATIONS，App 自己不改任何系统设置）、扫码添加链接时用相机（CAMERA，只在扫码页面打开时用）、开机后恢复未完成任务（RECEIVE_BOOT_COMPLETED，只服务于默认关闭的那个开关）、下载传输期间保持处理器运行做到息屏不降速（WAKE_LOCK，只在真正传输时持有，设置里可关）。
 
-安装包保持小体积：现行正式版（6.4.0）签名包实测 1,397,375 字节（约 1.40 MB）；发布流程带有体积守门，签名包超过 1.5 MB（1,572,864 字节）就直接发布失败。
+安装包保持小体积：现行正式版（6.5.0）签名包实测 1,397,375 字节（约 1.40 MB）；发布流程带有体积守门，签名包超过 1.5 MB（1,572,864 字节）就直接发布失败。
 
 ## 不做的事
 
