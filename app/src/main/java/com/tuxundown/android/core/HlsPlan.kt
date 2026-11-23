@@ -22,11 +22,17 @@ package com.tuxundown.android.core
  *    limiting. A learned rate-limit cap for the host (HostMemory,
  *    raw — any positive value honoured, see below) and the
  *    segment count itself can only lower the max. The START
- *    width is the remembered per-host optimum when one exists,
- *    clamped to [MIN_START]..max; with no memory the start is
- *    [DEFAULT_START] (8 — twice the old fixed width: noticeably
- *    more aggressive, still far from the kind of burst that
- *    earns a 429).
+ *    width depends on the StartPlan.FULL_WIDTH_OPEN A/B switch
+ *    (v7.9, audit round 64 Step B — see [plan]): with the
+ *    switch ON it is the remembered per-host optimum when one
+ *    exists, clamped to [MIN_START]..max (the pre-v7.9 shape);
+ *    with the switch OFF (the factory default) a remembered
+ *    optimum is granted only up to [DEFAULT_START] up front —
+ *    the HLS burst width — and the scaler climbs from there to
+ *    the (unchanged) max. With no memory the start is
+ *    [DEFAULT_START] in both forms (8 — twice the old fixed
+ *    width: noticeably more aggressive, still far from the
+ *    kind of burst that earns a 429).
  *
  * 2. [HlsScaler] — the live width between start and max,
  *    re-judged once per sampler tick from evidence the HLS loop
@@ -67,15 +73,47 @@ object HlsPlan {
      *   for safety here.
      * @param totalSegments segment count of the playlist; the
      *   width can never usefully exceed it.
+     * @param fullWidthOpen the StartPlan.FULL_WIDTH_OPEN A/B
+     *   switch (defaults to the factory value, exactly like
+     *   StartPlan.decide). v7.9 (audit round 64, Step B): before
+     *   this parameter existed, a remembered host's HLS run
+     *   ALWAYS opened at its learned width at second 0 (up to
+     *   the 16 max) — the same instant-full-open shape v7.8
+     *   made switchable on the segmented path, but NOT governed
+     *   by the switch there: HlsPlan never read it, and the
+     *   GrowthRamp wrapped around runHls cannot smooth the
+     *   start either (its unsmoothed base grant is 32, above
+     *   every HLS width, so the start passes through whole).
+     *   Alignment, switch OFF (conservative form): the start is
+     *   min(remembered start, [DEFAULT_START]) — the exact
+     *   analogue of the segmented conservative form, where the
+     *   ramp grants only the burst width (32) up front and
+     *   climbs by stepFor; here [DEFAULT_START] (8) IS the HLS
+     *   burst width, and the climb is the HlsScaler's own
+     *   +2-per-2-starved-ticks rule up to maxWidth. The max is
+     *   NOT derived from the hint in either form, so no learned
+     *   ceiling is lost — only the arrival becomes gradual. A
+     *   hint at or below [DEFAULT_START] is granted whole in
+     *   both forms (min(hint, burst) == hint, as on the
+     *   segmented path). Switch ON: the pre-v7.9 shape,
+     *   byte-for-byte.
      */
-    fun plan(hint: Int, cap: Int, totalSegments: Int): Plan {
+    fun plan(
+        hint: Int,
+        cap: Int,
+        totalSegments: Int,
+        fullWidthOpen: Boolean = StartPlan.FULL_WIDTH_OPEN,
+    ): Plan {
         val total = totalSegments.coerceAtLeast(1)
         var maxWidth = minOf(DownloadEngine.HLS_MAX_PARALLEL, total)
         if (cap > 0) maxWidth = minOf(maxWidth, cap)
         maxWidth = maxWidth.coerceAtLeast(1)
         val startWidth = when {
             maxWidth <= MIN_START -> maxWidth
-            hint > 0 -> hint.coerceIn(MIN_START, maxWidth)
+            hint > 0 -> {
+                val remembered = hint.coerceIn(MIN_START, maxWidth)
+                if (fullWidthOpen) remembered else minOf(remembered, DEFAULT_START)
+            }
             else -> minOf(DEFAULT_START, maxWidth)
         }
         return Plan(startWidth = startWidth, maxWidth = maxWidth)

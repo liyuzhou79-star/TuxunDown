@@ -3,6 +3,7 @@ package com.tuxundown.android
 import com.tuxundown.android.core.DownloadEngine
 import com.tuxundown.android.core.HlsPlan
 import com.tuxundown.android.core.HlsScaler
+import com.tuxundown.android.core.StartPlan
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -30,7 +31,10 @@ class HlsPlanTest {
 
     @Test
     fun rememberedHintStartsAtTheHint() {
-        val p = HlsPlan.plan(hint = 12, cap = 0, totalSegments = 100)
+        // The full-width form (switch ON): the pre-v7.9 shape,
+        // pinned explicitly since the factory default is now
+        // the conservative form (see the Step B tests below).
+        val p = HlsPlan.plan(hint = 12, cap = 0, totalSegments = 100, fullWidthOpen = true)
         assertEquals(12, p.startWidth)
         assertEquals(16, p.maxWidth)
     }
@@ -39,8 +43,60 @@ class HlsPlanTest {
     fun hintAboveTheMaxIsClampedToTheMax() {
         // The HostMemory optimum is a SEGMENTED count (up to 64);
         // reused as an HLS hint it must land inside the HLS band.
-        val p = HlsPlan.plan(hint = 64, cap = 0, totalSegments = 100)
+        val p = HlsPlan.plan(hint = 64, cap = 0, totalSegments = 100, fullWidthOpen = true)
         assertEquals(16, p.startWidth)
+        assertEquals(16, p.maxWidth)
+    }
+
+    // ---- plan: FULL_WIDTH_OPEN alignment (v7.9, audit 64 Step B) ----
+
+    @Test
+    fun conservativeFormGrantsOnlyTheBurstWidthToARememberedHost() {
+        // Switch OFF: a remembered optimum above the HLS burst
+        // width (DEFAULT_START = 8) starts AT the burst width;
+        // the max is unchanged, so the scaler can still climb
+        // to the full learned band — only the arrival is gradual.
+        val p = HlsPlan.plan(hint = 12, cap = 0, totalSegments = 100, fullWidthOpen = false)
+        assertEquals(HlsPlan.DEFAULT_START, p.startWidth)
+        assertEquals(8, p.startWidth)
+        assertEquals(16, p.maxWidth)
+        val big = HlsPlan.plan(hint = 64, cap = 0, totalSegments = 100, fullWidthOpen = false)
+        assertEquals(8, big.startWidth)
+        assertEquals(16, big.maxWidth)
+    }
+
+    @Test
+    fun conservativeFormGrantsAHintAtOrBelowTheBurstWidthWhole() {
+        // min(hint, burst) == hint — the same shape as the
+        // segmented conservative grant (min(target, burst)).
+        val p = HlsPlan.plan(hint = 5, cap = 0, totalSegments = 100, fullWidthOpen = false)
+        assertEquals(5, p.startWidth)
+        assertEquals(16, p.maxWidth)
+        val floor = HlsPlan.plan(hint = 1, cap = 0, totalSegments = 100, fullWidthOpen = false)
+        assertEquals(2, floor.startWidth)
+    }
+
+    @Test
+    fun conservativeFormLeavesUnknownHostsAndTheMaxUntouched() {
+        val unknownOff = HlsPlan.plan(hint = 0, cap = 0, totalSegments = 100, fullWidthOpen = false)
+        val unknownOn = HlsPlan.plan(hint = 0, cap = 0, totalSegments = 100, fullWidthOpen = true)
+        assertEquals(unknownOn, unknownOff)
+        assertEquals(8, unknownOff.startWidth)
+        // A cap below the burst width still presses the start
+        // in the conservative form (the max wins over the burst).
+        val capped = HlsPlan.plan(hint = 12, cap = 4, totalSegments = 100, fullWidthOpen = false)
+        assertEquals(4, capped.maxWidth)
+        assertEquals(4, capped.startWidth)
+    }
+
+    @Test
+    fun defaultPlanCallUsesTheFactorySwitch() {
+        // The no-switch call (what runHls used before it passed
+        // the switch explicitly) must follow StartPlan's
+        // factory value — currently the conservative form.
+        val p = HlsPlan.plan(hint = 12, cap = 0, totalSegments = 100)
+        val expected = if (StartPlan.FULL_WIDTH_OPEN) 12 else 8
+        assertEquals(expected, p.startWidth)
         assertEquals(16, p.maxWidth)
     }
 

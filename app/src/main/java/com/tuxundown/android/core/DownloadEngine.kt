@@ -2582,6 +2582,10 @@ class DownloadEngine(
             hint = initialThreadsHint,
             cap = initialThreadsCap,
             totalSegments = segments.size,
+            // v7.9 (audit 64 Step B): the same FULL_WIDTH_OPEN
+            // switch that governs the segmented start also
+            // governs the HLS start width (see HlsPlan.plan).
+            fullWidthOpen = StartPlan.FULL_WIDTH_OPEN,
         )
         val hlsScaler = HlsScaler(hlsPlan.startWidth, hlsPlan.maxWidth)
         // v5.3: the same growth ramp the segmented path uses,
