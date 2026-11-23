@@ -125,6 +125,8 @@ import com.tuxundown.android.core.DownloadedFiles
 import com.tuxundown.android.core.DuplicateFinder
 import com.tuxundown.android.core.TaskPriority
 import com.tuxundown.android.core.Format
+import com.tuxundown.android.core.GhostMark
+import com.tuxundown.android.core.GhostSnapshot
 import com.tuxundown.android.core.HealthCheck
 import com.tuxundown.android.core.ThermalStatus
 import com.tuxundown.android.core.HostMemory
@@ -392,6 +394,75 @@ object AmoledState {
     var enabled by mutableStateOf(false)
 }
 
+/**
+ * v6.7.0 Step C: honest failure copy for the post-tap paths.
+ * The ghost snapshot cannot catch a file deleted AFTER the
+ * last probe, so open / install / share can still fail on a
+ * file that vanished a second ago. ActivityNotFoundException
+ * is the one failure that really means "no app can handle
+ * this"; every other failure (dead Uri, revoked grant, IO)
+ * must NOT be blamed on a missing viewer app — the likelier
+ * truth is the file itself is gone.
+ */
+fun openFailureText(e: Throwable): String =
+    if (e is android.content.ActivityNotFoundException) {
+        "没有能打开这个文件的应用"
+    } else {
+        "打开失败，文件可能已不存在"
+    }
+
+fun installFailureText(e: Throwable): String =
+    if (e is android.content.ActivityNotFoundException) {
+        "调起安装失败，可以去下载目录手动点这个文件安装"
+    } else {
+        "调起安装失败，文件可能已不存在"
+    }
+
+fun shareFailureText(e: Throwable): String =
+    if (e is android.content.ActivityNotFoundException) {
+        "没有可以接收分享的应用"
+    } else {
+        "分享失败，文件可能已不存在"
+    }
+
+/**
+ * v6.7.0 Step C: one batched ghost probe (see GhostSnapshot
+ * for the three — and only three — refresh moments). Runs on
+ * a background thread; NEVER called from the 1 s UI tick.
+ * Reuses Step B's PublicStorage.probeRecords verbatim.
+ */
+fun refreshGhostSnapshot(context: android.content.Context) {
+    if (!GhostSnapshot.tryStartProbe()) return
+    Thread {
+        try {
+            val snaps = DownloadCenter.store.tasks
+                .filter { it.status == TaskStatus.DONE && it.savedUri.isNotBlank() }
+                .map { t ->
+                    Reconcile.RecordSnap(
+                        id = t.id,
+                        savedUri = t.savedUri,
+                        savedName = t.savedName.ifBlank { t.fileName },
+                        size = if (t.totalSize > 0) t.totalSize else t.downloaded,
+                    )
+                }
+            if (snaps.isEmpty()) {
+                GhostSnapshot.update(emptyList(), emptyMap())
+            } else {
+                val scanned = runCatching {
+                    PublicStorage.scanDownloadedFiles(context)
+                }.getOrDefault(emptyList())
+                val probes = PublicStorage.probeRecords(context, snaps, scanned)
+                GhostSnapshot.update(snaps, probes)
+            }
+        } catch (t: Throwable) {
+            // A failed refresh leaves the previous snapshot
+            // alone — no verdict is better than a wrong one.
+        } finally {
+            GhostSnapshot.endProbe()
+        }
+    }.start()
+}
+
 /** Windows file-transfer palette. */
 object WinPalette {
     val Green = Color(0xFF06B025)        // Windows transfer green
@@ -571,6 +642,14 @@ fun DownApp() {
                 pm.isIgnoringBatteryOptimizations(context.packageName)
             }.getOrDefault(false)
         }
+    }
+
+    // ---- v6.7.0 Step C: ghost snapshot refresh moment 1 of 3
+    // — the task-list screen is entered. Batched probe on a
+    // background thread (see refreshGhostSnapshot); the 1 s
+    // tick above never probes. ----
+    LaunchedEffect(screen) {
+        if (screen == "home") refreshGhostSnapshot(context)
     }
 
     // ---- add-task dialog state ----
@@ -1581,7 +1660,13 @@ fun DownApp() {
             intent.setDataAndType(uri, mime)
         }
         runCatching { context.startActivity(Intent.createChooser(intent, "打开文件")) }
-            .onFailure { Toast.makeText(context, "没有能打开这个文件的应用", Toast.LENGTH_SHORT).show() }
+            .onFailure {
+                // v6.7.0 Step C: only ActivityNotFound really
+                // means "no viewer app" — anything else (e.g.
+                // the file was deleted after the last probe)
+                // says the file may be gone, not the app.
+                Toast.makeText(context, openFailureText(it), Toast.LENGTH_SHORT).show()
+            }
     }
 
     /** v1.4 item 9: one-tap install for a finished APK. */
@@ -1606,7 +1691,10 @@ fun DownApp() {
         }
         runCatching { context.startActivity(intent) }
             .onFailure {
-                Toast.makeText(context, "调起安装失败，可以去下载目录手动点这个文件安装", Toast.LENGTH_LONG).show()
+                // v6.7.0 Step C: same distinction as openFile —
+                // do not advise a manual install of a file that
+                // may no longer exist.
+                Toast.makeText(context, installFailureText(it), Toast.LENGTH_LONG).show()
             }
     }
 
@@ -1623,7 +1711,13 @@ fun DownApp() {
             val uri = FileProvider.getUriForFile(context, "com.tuxundown.android.files", f)
             intent.putExtra(Intent.EXTRA_STREAM, uri)
         }
-        context.startActivity(Intent.createChooser(intent, "分享文件"))
+        // v6.7.0 Step C: this used to fire blind — a dead
+        // savedUri (file deleted after the last probe) failed
+        // silently. Now the failure is caught and said out loud.
+        runCatching { context.startActivity(Intent.createChooser(intent, "分享文件")) }
+            .onFailure {
+                Toast.makeText(context, shareFailureText(it), Toast.LENGTH_SHORT).show()
+            }
     }
 
     fun deleteTask(task: TaskRecord) {
@@ -1658,6 +1752,10 @@ fun DownApp() {
     val TaskCardFor: @androidx.compose.runtime.Composable (TaskRecord) -> Unit = { task ->
         TaskCard(
             task = task,
+            // v6.7.0 Step C: reading the snapshot here subscribes
+            // this scope, so a finished probe re-renders the
+            // cards with their ghost marks (or clears them).
+            isGhost = GhostSnapshot.isGhost(task.id),
             liveTick = tick,
             selecting = selecting,
             selected = task.id in selectedIds,
@@ -2470,9 +2568,22 @@ fun DownApp() {
                                     overflow = TextOverflow.Ellipsis,
                                 )
                                 Text(
-                                    "${com.tuxundown.android.core.Format.size(f.size)} · 点开去「已下载文件」页",
+                                    // v6.7.0 Step C: a ghost file
+                                    // hit says so right here —
+                                    // 文件已不在 — instead of
+                                    // looking like a normal file.
+                                    "${com.tuxundown.android.core.Format.size(f.size)} · " +
+                                        if (GhostSnapshot.isGhost(f.taskId)) {
+                                            "文件已不在 · 点开去「已下载文件」页处理"
+                                        } else {
+                                            "点开去「已下载文件」页"
+                                        },
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    color = if (GhostSnapshot.isGhost(f.taskId)) {
+                                        WinPalette.Red
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
                                 )
                             }
                         }
@@ -4361,6 +4472,10 @@ fun FilesScreen(onBack: () -> Unit) {
                 Reconcile.ScanEntry(it.uri.toString(), it.name, it.size, it.modifiedAt)
             }
             val report = Reconcile.reconcile(snaps, probes, scanEntries)
+            // v6.7.0 Step C: ghost snapshot refresh moment 3 of
+            // 3 — reconciliation already probed, so its verdicts
+            // feed the shared snapshot instead of probing twice.
+            GhostSnapshot.update(snaps, probes)
             android.os.Handler(android.os.Looper.getMainLooper()).post {
                 recRunning = false
                 recReport = report
@@ -4419,13 +4534,32 @@ fun FilesScreen(onBack: () -> Unit) {
                         taskId = t.id,
                     )
                 }
-            val fromScan = runCatching { PublicStorage.scanDownloadedFiles(context) }
+            val scanned = runCatching { PublicStorage.scanDownloadedFiles(context) }
                 .getOrDefault(emptyList())
-                .map {
-                    DownloadedFiles.Entry(
-                        it.name, it.uri.toString(), it.size, it.modifiedAt, ""
-                    )
+            val fromScan = scanned.map {
+                DownloadedFiles.Entry(
+                    it.name, it.uri.toString(), it.size, it.modifiedAt, ""
+                )
+            }
+            // ---- v6.7.0 Step C: ghost snapshot refresh moment
+            // 2 of 3 — the files page's own load probes every
+            // DONE record (same background thread, reusing the
+            // scan just made) and back-fills the shared
+            // snapshot, so this page, the task cards and search
+            // all mark from the same verdicts. ----
+            if (GhostSnapshot.tryStartProbe()) {
+                try {
+                    val snaps = fromRecords.map { e ->
+                        Reconcile.RecordSnap(e.taskId, e.uri, e.name, e.size)
+                    }
+                    val probes = PublicStorage.probeRecords(context, snaps, scanned)
+                    GhostSnapshot.update(snaps, probes)
+                } catch (t: Throwable) {
+                    // Keep the previous snapshot on failure.
+                } finally {
+                    GhostSnapshot.endProbe()
                 }
+            }
             val merged = DownloadedFiles.merge(fromRecords, fromScan)
             android.os.Handler(android.os.Looper.getMainLooper()).post {
                 entries = merged
@@ -4443,7 +4577,10 @@ fun FilesScreen(onBack: () -> Unit) {
         }
         runCatching { context.startActivity(Intent.createChooser(intent, "打开文件")) }
             .onFailure {
-                Toast.makeText(context, "没有能打开这个文件的应用", Toast.LENGTH_SHORT).show()
+                // v6.7.0 Step C: same honest distinction as the
+                // task card — a file deleted after the snapshot
+                // must not be reported as "no viewer app".
+                Toast.makeText(context, openFailureText(it), Toast.LENGTH_SHORT).show()
             }
     }
 
@@ -4453,7 +4590,12 @@ fun FilesScreen(onBack: () -> Unit) {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             putExtra(Intent.EXTRA_STREAM, Uri.parse(e.uri))
         }
+        // v6.7.0 Step C: was runCatching with NO onFailure —
+        // a dead file failed silently. Now it says why.
         runCatching { context.startActivity(Intent.createChooser(intent, "分享文件")) }
+            .onFailure {
+                Toast.makeText(context, shareFailureText(it), Toast.LENGTH_SHORT).show()
+            }
     }
 
     val shown = DownloadedFiles.sort(entries, sortMode)
@@ -4476,16 +4618,29 @@ fun FilesScreen(onBack: () -> Unit) {
         }
         item(key = "f-summary") {
             Column {
+                // v6.7.0 Step C: the header total goes through
+                // GhostMark's split — it counts only files that
+                // are present; ghost bytes get their own line
+                // below instead of inflating the headline.
+                val totals = GhostMark.splitTotals(entries, GhostSnapshot.ghostIds)
                 Text(
                     when {
                         loading -> "正在扫描下载目录…"
                         entries.isEmpty() -> "还没有下好的文件"
-                        else -> "共 ${entries.size} 个文件 · 合计占用 " +
-                            Format.size(DownloadedFiles.totalSize(entries))
+                        else -> "共 ${totals.presentCount} 个文件 · 合计占用 " +
+                            Format.size(totals.presentBytes)
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                if (!loading && totals.ghostCount > 0) {
+                    Text(
+                        "另有 ${totals.ghostCount} 个文件已不在（记录里是 " +
+                            "${Format.size(totals.ghostBytes)}，不计入上面的合计）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = WinPalette.Red,
+                    )
+                }
                 Text(
                     "位置：${PublicStorage.locationLabel(context)}" +
                         "（含以前删过任务记录、只剩下文件本体的）",
@@ -4826,15 +4981,42 @@ fun FilesScreen(onBack: () -> Unit) {
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
+                            // v6.7.0 Step C: ghost mark on the
+                            // files page (snapshot verdict).
+                            if (GhostSnapshot.isGhost(e.taskId)) {
+                                Text(
+                                    "文件已不在",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = WinPalette.Red,
+                                )
+                            }
                         }
                     }
                     Row(
                         Modifier.padding(top = 8.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Button(onClick = { openEntry(e) }) { Text("打开") }
-                        OutlinedButton(onClick = { shareEntry(e) }) { Text("分享") }
+                        // v6.7.0 Step C: a ghost's open / share
+                        // are disabled up front; 删除 stays —
+                        // its dialog is ghost-aware (record only).
+                        Button(
+                            onClick = { openEntry(e) },
+                            enabled = !GhostSnapshot.isGhost(e.taskId),
+                        ) { Text("打开") }
+                        OutlinedButton(
+                            onClick = { shareEntry(e) },
+                            enabled = !GhostSnapshot.isGhost(e.taskId),
+                        ) { Text("分享") }
                         OutlinedButton(onClick = { deleteEntry = e }) { Text("删除") }
+                    }
+                    if (GhostSnapshot.isGhost(e.taskId)) {
+                        Text(
+                            "文件已不在，没法打开或分享；删除时只能删掉这条记录。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 6.dp),
+                        )
                     }
                 }
             }
@@ -5020,6 +5202,13 @@ fun FilesScreen(onBack: () -> Unit) {
         val task = if (e.taskId.isNotBlank()) {
             DownloadCenter.store.byId(e.taskId)
         } else null
+        // v6.7.0 Step C: a KNOWN ghost gets a different dialog
+        // entirely — one honest action. The old path tried to
+        // delete a file that is not there, deleteByUri returned
+        // false, the toast lied ("删除失败，系统没有允许")
+        // while the record was removed anyway. A ghost never
+        // walks that path now.
+        val ghostEntry = task != null && GhostSnapshot.isGhost(e.taskId)
         AlertDialog(
             onDismissRequest = { deleteEntry = null },
             title = { Text("删除") },
@@ -5027,38 +5216,54 @@ fun FilesScreen(onBack: () -> Unit) {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text(
                     "「${e.name}」（${Format.size(e.size)}）\n" +
-                        if (task != null) {
-                            "· 只删记录：任务记录去掉，文件保留在下载目录里，之后在本页显示为「仅剩文件」。\n" +
-                                "· 删文件：文件本体删掉，任务记录也一起清掉，不能恢复。"
-                        } else {
-                            "这个文件已经没有任务记录了，删除就是把文件本体删掉，不能恢复。"
+                        when {
+                            ghostEntry ->
+                                "这个文件已经不在了，删不掉一个不存在的文件。" +
+                                    "这里能删的只有任务记录——删掉后这条记录就没了，文件本来就已经不在了。"
+                            task != null ->
+                                "· 只删记录：任务记录去掉，文件保留在下载目录里，之后在本页显示为「仅剩文件」。\n" +
+                                    "· 删文件：文件本体删掉，任务记录也一起清掉，不能恢复。"
+                            else ->
+                                "这个文件已经没有任务记录了，删除就是把文件本体删掉，不能恢复。"
                         }
                 )
                 }
             },
             confirmButton = {
-                TextButton(onClick = {
-                    deleteEntry = null
-                    Thread {
-                        val ok = PublicStorage.deleteByUri(context, e.uri)
-                        if (task != null) {
-                            ChecksumVerifier.requestCancel(task.id)
-                            DownloadCenter.store.remove(task)
-                        }
-                        android.os.Handler(android.os.Looper.getMainLooper()).post {
-                            Toast.makeText(
-                                context,
-                                if (ok) "文件已删除" else "删除失败，系统没有允许",
-                                Toast.LENGTH_SHORT,
-                            ).show()
-                            reloadKey++
-                        }
-                    }.start()
-                }) { Text(if (task != null) "删文件（连记录）" else "删除文件") }
+                if (ghostEntry) {
+                    TextButton(onClick = {
+                        ChecksumVerifier.requestCancel(task!!.id)
+                        DownloadCenter.store.remove(task)
+                        deleteEntry = null
+                        reloadKey++
+                        Toast.makeText(
+                            context, "记录已删除（文件本来就已经不在了）", Toast.LENGTH_SHORT
+                        ).show()
+                    }) { Text("删记录") }
+                } else {
+                    TextButton(onClick = {
+                        deleteEntry = null
+                        Thread {
+                            val ok = PublicStorage.deleteByUri(context, e.uri)
+                            if (task != null) {
+                                ChecksumVerifier.requestCancel(task.id)
+                                DownloadCenter.store.remove(task)
+                            }
+                            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                Toast.makeText(
+                                    context,
+                                    if (ok) "文件已删除" else "删除失败，系统没有允许",
+                                    Toast.LENGTH_SHORT,
+                                ).show()
+                                reloadKey++
+                            }
+                        }.start()
+                    }) { Text(if (task != null) "删文件（连记录）" else "删除文件") }
+                }
             },
             dismissButton = {
                 Row {
-                    if (task != null) {
+                    if (task != null && !ghostEntry) {
                         TextButton(onClick = {
                             ChecksumVerifier.requestCancel(task.id)
                             DownloadCenter.store.remove(task)
@@ -8439,6 +8644,10 @@ fun InfoRow(label: String, value: String) {
 @androidx.compose.runtime.Composable
 fun TaskCard(
     task: TaskRecord,
+    // v6.7.0 Step C: true only when the latest ghost snapshot
+    // probed this DONE record's file as MISSING. UNKNOWN / not
+    // yet probed always arrive here as false.
+    isGhost: Boolean = false,
     liveTick: Int,
     selecting: Boolean,
     selected: Boolean,
@@ -8690,6 +8899,16 @@ fun TaskCard(
                             else -> MaterialTheme.colorScheme.onSurfaceVariant
                         },
                     )
+                    // v6.7.0 Step C: ghost mark — the snapshot
+                    // probed this DONE record's file as gone.
+                    if (isGhost && task.status == TaskStatus.DONE) {
+                        Text(
+                            "文件已不在",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = WinPalette.Red,
+                        )
+                    }
                 }
                 when (task.status) {
                     TaskStatus.RUNNING ->
@@ -9268,22 +9487,33 @@ fun TaskCard(
                 }
                 if (task.status == TaskStatus.DONE) {
                     // ---- quick actions (v1.4 item 9) ----
+                    // v6.7.0 Step C: a ghost's open / install /
+                    // share are disabled UP FRONT (the file is
+                    // probed gone — tapping could only fail),
+                    // with the reason written under the row.
                     Spacer(Modifier.height(6.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         val ext = displayName.substringAfterLast('.', "").lowercase()
                         if (ext == "apk") {
-                            Button(onClick = onInstall) { Text("安装") }
-                            OutlinedButton(onClick = onOpen) { Text("打开") }
+                            Button(onClick = onInstall, enabled = !isGhost) { Text("安装") }
+                            OutlinedButton(onClick = onOpen, enabled = !isGhost) { Text("打开") }
                         } else if (kind == "video" || kind == "audio") {
-                            Button(onClick = onOpen) { Text("播放") }
-                            OutlinedButton(onClick = onShare) { Text("分享") }
+                            Button(onClick = onOpen, enabled = !isGhost) { Text("播放") }
+                            OutlinedButton(onClick = onShare, enabled = !isGhost) { Text("分享") }
                         } else {
-                            OutlinedButton(onClick = onOpen) { Text("打开") }
-                            OutlinedButton(onClick = onShare) { Text("分享") }
+                            OutlinedButton(onClick = onOpen, enabled = !isGhost) { Text("打开") }
+                            OutlinedButton(onClick = onShare, enabled = !isGhost) { Text("分享") }
                         }
                         if (ext == "apk") {
-                            OutlinedButton(onClick = onShare) { Text("分享") }
+                            OutlinedButton(onClick = onShare, enabled = !isGhost) { Text("分享") }
                         }
+                    }
+                    if (isGhost) {
+                        Text(
+                            "文件已不在，没法打开、分享或安装；不需要这条记录时可以删掉它（只删记录）。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                     // v4.5: export the retained speed curve as
                     // CSV into the download folder (same door as
