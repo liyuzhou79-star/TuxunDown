@@ -6,6 +6,7 @@ import com.tuxundown.android.core.TaskStatus
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -191,6 +192,139 @@ class QueueOrderTest {
         assertEquals(eligibleA, QueueOrder.nextEligible(listOf(netParkedB, eligibleA), 0))
         val portalParkedB = hostTask("b.example.com").apply { portalDeferred = true }
         assertEquals(eligibleA, QueueOrder.nextEligible(listOf(portalParkedB, eligibleA), 0))
+    }
+
+    // ---- v7.1 (audit round 56): anti-starvation aging ----
+
+    private fun agingTask(
+        priority: Int,
+        queuedAt: Long,
+        createdAt: Long = queuedAt,
+        scheduledAt: Long = 0,
+    ): TaskRecord = TaskRecord(
+        url = "https://aging.example/f${System.nanoTime()}",
+        status = TaskStatus.QUEUED,
+        createdAt = createdAt,
+        scheduledAt = scheduledAt,
+        priority = priority,
+    ).apply { this.queuedAt = queuedAt }
+
+    @Test
+    fun agedLowRisesToNormalExactlyAtTheThreshold() {
+        val t0 = 200_000_000L
+        val low = agingTask(-1, queuedAt = t0)
+        val normal = agingTask(0, queuedAt = t0)
+        // Below the threshold the plain tier decides: NORMAL
+        // wins even though the LOW task is listed first.
+        val justBelow = t0 + QueueOrder.AGING_PROMOTE_MS - 1
+        assertEquals(-1, QueueOrder.agingTier(low, justBelow))
+        assertEquals(-1, QueueOrder.effectiveTier(low, justBelow))
+        assertEquals(normal, QueueOrder.nextEligible(listOf(low, normal), justBelow))
+        // At exactly T_age the LOW task is NORMAL tier; tied
+        // with the plain NORMAL task, list order now serves it.
+        val atThreshold = t0 + QueueOrder.AGING_PROMOTE_MS
+        assertEquals(0, QueueOrder.agingTier(low, atThreshold))
+        assertEquals(0, QueueOrder.effectiveTier(low, atThreshold))
+        assertEquals(low, QueueOrder.nextEligible(listOf(low, normal), atThreshold))
+    }
+
+    @Test
+    fun agingIsCappedAtNormalAndHighStillWins() {
+        val t0 = 200_000_000L
+        val now = t0 + 10 * QueueOrder.AGING_PROMOTE_MS
+        val agedLow = agingTask(-1, queuedAt = t0)
+        val high = agingTask(1, queuedAt = now)
+        // Even a very long wait never ages past NORMAL…
+        assertEquals(0, QueueOrder.agingTier(agedLow, now))
+        assertEquals(0, QueueOrder.effectiveTier(agedLow, now))
+        assertTrue(QueueOrder.agingTier(high, now) < 1)
+        // …so a plain HIGH task still goes first.
+        assertEquals(high, QueueOrder.nextEligible(listOf(agedLow, high), now))
+    }
+
+    @Test
+    fun jumpedBeatsAgedLow() {
+        val t0 = 200_000_000L
+        val now = t0 + 2 * QueueOrder.AGING_PROMOTE_MS
+        val agedLow = agingTask(-1, queuedAt = t0)
+        val jumped = agingTask(0, queuedAt = now).apply { jumpedAt = now }
+        // Both judge as NORMAL now; inside the tier the
+        // explicit jump beats the automatic aging, even listed
+        // behind the aged task.
+        assertEquals(jumped, QueueOrder.nextEligible(listOf(agedLow, jumped), now))
+    }
+
+    @Test
+    fun queuedAtZeroFallsBackToCreatedAt() {
+        val t0 = 200_000_000L
+        val legacy = agingTask(-1, queuedAt = 0, createdAt = t0)
+        assertEquals(t0, QueueOrder.waitStart(legacy))
+        assertEquals(
+            -1,
+            QueueOrder.effectiveTier(legacy, t0 + QueueOrder.AGING_PROMOTE_MS - 1),
+        )
+        assertEquals(
+            0,
+            QueueOrder.effectiveTier(legacy, t0 + QueueOrder.AGING_PROMOTE_MS),
+        )
+    }
+
+    @Test
+    fun agingNeverResurrectsParkedOrNotYetDueTasks() {
+        val t0 = 200_000_000L
+        val now = t0 + 10 * QueueOrder.AGING_PROMOTE_MS
+        val normal = agingTask(0, queuedAt = now)
+        val netParked = agingTask(-1, queuedAt = t0).apply { netDeferred = true }
+        assertEquals(normal, QueueOrder.nextEligible(listOf(netParked, normal), now))
+        assertNull(QueueOrder.nextEligible(listOf(netParked), now))
+        val portalParked = agingTask(-1, queuedAt = t0).apply { portalDeferred = true }
+        assertEquals(normal, QueueOrder.nextEligible(listOf(portalParked, normal), now))
+        assertNull(QueueOrder.nextEligible(listOf(portalParked), now))
+        val notDue = agingTask(-1, queuedAt = t0, scheduledAt = now + 60_000)
+        assertEquals(normal, QueueOrder.nextEligible(listOf(notDue, normal), now))
+        assertNull(QueueOrder.nextEligible(listOf(notDue), now))
+    }
+
+    @Test
+    fun scheduledWaitAccruesFromTheDueMomentNotFromQueueing() {
+        // Queued long ago, but its slot only arrived 5 minutes
+        // ago: the pre-due time was the user's own appointment,
+        // so it has NOT aged yet.
+        val dueAt = 200_000_000L
+        val low = agingTask(
+            -1,
+            queuedAt = dueAt - 10 * QueueOrder.AGING_PROMOTE_MS,
+            scheduledAt = dueAt,
+        )
+        assertEquals(dueAt, QueueOrder.waitStart(low))
+        val normal = agingTask(0, queuedAt = dueAt)
+        val fiveMinAfterDue = dueAt + 5 * 60_000L
+        assertEquals(-1, QueueOrder.effectiveTier(low, fiveMinAfterDue))
+        assertEquals(
+            normal,
+            QueueOrder.nextEligible(listOf(low, normal), fiveMinAfterDue),
+        )
+        // A full threshold AFTER the due moment it does age.
+        val agedAt = dueAt + QueueOrder.AGING_PROMOTE_MS
+        assertEquals(0, QueueOrder.effectiveTier(low, agedAt))
+        assertEquals(low, QueueOrder.nextEligible(listOf(low, normal), agedAt))
+    }
+
+    @Test
+    fun rotationBoundSequenceDrainsInThePinnedOrder() {
+        // Round 56 channel (c), the constructive bound check:
+        // Z1, Z2 and X share one host, Y1 / Y2 another. X is
+        // overtaken exactly twice (the bound min(2, 2)) and the
+        // whole drain order is pinned.
+        val z1 = hostTask("hx.example.com")
+        val z2 = hostTask("hx.example.com")
+        val x = hostTask("hx.example.com")
+        val y1 = hostTask("hy.example.com")
+        val y2 = hostTask("hy.example.com")
+        assertEquals(
+            listOf(z1, y1, z2, y2, x),
+            drainOrder(listOf(z1, z2, x, y1, y2)),
+        )
     }
 
     @Test

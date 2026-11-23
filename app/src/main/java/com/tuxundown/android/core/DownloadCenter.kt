@@ -1513,6 +1513,13 @@ object DownloadCenter {
 
     /** Queue a task and kick the foreground service. Returns false if blocked. */
     fun enqueue(task: TaskRecord): Boolean {
+        // v7.1 (audit round 56): this funnel head is THE stamp
+        // point for every manual (re-)queue — both exits below
+        // (the wifi-only branch and the normal one) inherit this
+        // one assignment, so the task's continuous QUEUED wait
+        // (QueueOrder aging) restarts here, beside the park-flag
+        // clearing that makes it a fresh start.
+        task.queuedAt = System.currentTimeMillis()
         task.autoRetriesUsed = 0
         task.netDeferred = false // v1.5: user action always wins over the outage park
         task.chargeDeferred = false // v3.9: same for the charge park
@@ -1761,6 +1768,10 @@ object DownloadCenter {
         if (hit.isEmpty()) return 0
         for (t in hit) {
             t.wasRunning = false
+            // v7.1: recovery IS a fresh queue entry — the aging
+            // wait restarts here (the interrupted run's wait
+            // ended when the process died with it).
+            t.queuedAt = System.currentTimeMillis()
             t.status = TaskStatus.QUEUED
             t.error = ""
             t.note = "上次下载被系统中断（重启或进程被杀），已自动重新排队继续。"

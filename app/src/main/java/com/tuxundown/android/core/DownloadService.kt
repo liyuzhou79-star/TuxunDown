@@ -1365,6 +1365,11 @@ class DownloadService : Service() {
                 if (NetRetry.shouldDefer(used)) {
                     portalAttempts[task.id] = used + 1
                     task.portalDeferred = true
+                    // v7.1: the park IS this wait's queue entry —
+                    // stamp it; the parked time itself counts as
+                    // waiting (the park never touches the stamp
+                    // again, and neither does its release).
+                    task.queuedAt = System.currentTimeMillis()
                     task.status = TaskStatus.QUEUED
                     task.note = "${PortalDetect.PARK_NOTE_PREFIX}" +
                         "（第 ${used + 1}/${NetRetry.MAX_ATTEMPTS} 次等待）"
@@ -1395,6 +1400,10 @@ class DownloadService : Service() {
                 if (NetRetry.shouldDefer(used)) {
                     netAttempts[task.id] = used + 1
                     task.netDeferred = true
+                    // v7.1: same stamp as the portal park — the
+                    // outage wait is a queue entry, and the parked
+                    // time counts toward aging (see QueueOrder).
+                    task.queuedAt = System.currentTimeMillis()
                     task.status = TaskStatus.QUEUED
                     task.note = "网络好像断了，先排队等网络恢复后自动继续" +
                         "（第 ${used + 1}/${NetRetry.MAX_ATTEMPTS} 次）。原因：${task.error}"
@@ -1462,6 +1471,11 @@ class DownloadService : Service() {
             // If the user took over meanwhile (paused / re-queued /
             // deleted), step aside and let the normal flow own it.
             if (store.byId(task.id) == null || task.status != TaskStatus.FAILED) return false
+            // v7.1: queuedAt is deliberately NOT stamped here —
+            // this backoff re-queue is internal to runOne's own
+            // retry loop: the task never released its claim (the
+            // drain excludes it by id), so its current wait
+            // never broke and must not restart (see QueueOrder).
             task.status = TaskStatus.QUEUED
             task.error = ""
         }
@@ -1536,6 +1550,10 @@ class DownloadService : Service() {
         // deliberately survive this reset; see TaskRecord).
         synchronized(task.sourceBytes) { task.sourceBytes.clear() }
         task.scheduledAt = next
+        // v7.1: stamp the re-queue; QueueOrder.waitStart takes
+        // max(queuedAt, scheduledAt), so the aging wait only
+        // accrues from tomorrow's slot, not from tonight.
+        task.queuedAt = System.currentTimeMillis()
         task.status = TaskStatus.QUEUED
         task.note = "每天定时：已排到下一次 ${Format.clockTime(next)} 开始。" +
             "上一次的文件已保存在下载目录里（重名时会自动改成带 (1) 的名字）。"

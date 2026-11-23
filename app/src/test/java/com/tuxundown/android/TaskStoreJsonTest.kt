@@ -106,6 +106,30 @@ class TaskStoreJsonTest {
     }
 
     @Test
+    fun roundTripKeepsQueuedAtAndOldRecordsDefaultZero() {
+        // v7.1 (audit round 56): the aging wait stamp rides the
+        // shared serializer like jumpedAt.
+        val t = TaskRecord(url = "https://a.b/f.bin", status = TaskStatus.QUEUED)
+        t.queuedAt = 1_700_000_456_000L
+        val back = TaskStore.deserialize(TaskStore.serialize(listOf(t)))
+        assertEquals(1, back.size)
+        assertEquals(1_700_000_456_000L, back[0].queuedAt)
+        // A pre-v7.1 record has no queuedAt key: 0 = no stamp
+        // (QueueOrder.waitStart then falls back to createdAt).
+        val legacy = TaskStore.deserialize(
+            """[{"id":"x","url":"https://e.com/f","status":"QUEUED"}]"""
+        )
+        assertEquals(1, legacy.size)
+        assertEquals(0L, legacy[0].queuedAt)
+        // A corrupt negative stamp clamps to the same 0.
+        val hostile = TaskStore.deserialize(
+            """[{"id":"y","url":"https://e.com/f","status":"QUEUED","queuedAt":-9}]"""
+        )
+        assertEquals(1, hostile.size)
+        assertEquals(0L, hostile[0].queuedAt)
+    }
+
+    @Test
     fun roundTripKeepsDailyPickAndOldRecordsDefaultUnknown() {
         // v6.4 (audit round 49): the daily HH:MM pick rides the
         // shared serializer, so disk AND backup round trips keep

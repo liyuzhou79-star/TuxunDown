@@ -12,6 +12,46 @@ package com.tuxundown.android.core
  * at the moment it commits to starting a task); every other caller
  * of [nextEligible] only reads, so all readers predict the same
  * pick the drain will make.
+ *
+ * v7.1 (audit round 56): anti-starvation AGING. The pre-v7.1
+ * chain had no wait-time term, so a steady stream of higher-tier
+ * tasks could starve a LOW task forever. Now a task's EFFECTIVE
+ * tier (see [effectiveTier]) is its own priority tier, raised by
+ * exactly one step — LOW to NORMAL — once its current continuous
+ * QUEUED wait reaches [AGING_PROMOTE_MS]. The aging ring is
+ * deliberately weak, and its bounds are part of the design:
+ *   - It is CAPPED at NORMAL: [agingTier] never produces HIGH,
+ *     so aging can never outrank a task the user (or the app)
+ *     actually marked 高.
+ *   - Strength order, strongest first: 插队 (jumped) > HIGH
+ *     tier > aged-to-NORMAL (exactly tied with a plain NORMAL
+ *     task, list order between them) > un-aged. Explicit user
+ *     actions always outrank this automatic help.
+ *   - ELIGIBILITY IS STILL JUDGED FIRST: aging never resurrects
+ *     a net-parked / portal-parked / not-yet-due task — those
+ *     are filtered out before any tier is computed.
+ *   - An aged task gains NO jumped identity and NO rotation
+ *     immunity; only the tier ring changes. Jumped, rotation
+ *     and list order below the tier ring are untouched.
+ * The wait clock is [TaskRecord.queuedAt] (persisted; stamped
+ * at enqueue, at the net / portal parks, at the daily
+ * reschedule and at interrupted-task recovery, and at creation
+ * via TaskStore.add; cleared when the engine really starts).
+ * The auto-retry backoff re-queue deliberately does NOT stamp
+ * it: that task never left its claim, so its wait never broke.
+ * Records with queuedAt == 0 (written before v7.1) fall back to
+ * createdAt — that over-estimates the wait, never under, and
+ * retires itself as records re-queue through the funnel.
+ * KNOWN RESIDUAL (round 56 channel (2d), recorded, NOT fixed
+ * here): within one tier the list order decides, and a NEW task
+ * is inserted at the list HEAD, so same-tier order is newest
+ * first, not arrival FIFO — a same-tier arrival stream can
+ * still overtake an older task, and aging (which only lifts
+ * LOW to NORMAL) does not reach that channel. TaskStore.add's
+ * head insertion is the app's display / persistence
+ * foundation and stays untouched; the mitigations are queue
+ * position visibility and the user's explicit remedy （插队） —
+ * explicit outranks automatic, as everywhere else here.
  */
 object QueueOrder {
 
@@ -22,6 +62,50 @@ object QueueOrder {
     @Volatile
     var lastServedHost: String? = null
         private set
+
+    /** v7.1: how long a LOW task must wait continuously in
+     *  QUEUED before aging lifts it one step to NORMAL
+     *  (30 minutes — far above the ~3-minute auto-retry backoff
+     *  scale, far below the "user forgot it" scale). */
+    const val AGING_PROMOTE_MS: Long = 1_800_000L
+
+    /**
+     * v7.1: when [t]'s current continuous QUEUED wait started,
+     * for aging purposes: its [TaskRecord.queuedAt] stamp, or
+     * [TaskRecord.createdAt] when the stamp is 0 (a pre-v7.1
+     * record) — and never earlier than [TaskRecord.scheduledAt]:
+     * time before a scheduled slot is the user's own
+     * appointment, not queue starvation, so a scheduled task's
+     * wait only accrues from the moment its slot arrives.
+     */
+    fun waitStart(t: TaskRecord): Long =
+        maxOf(if (t.queuedAt > 0) t.queuedAt else t.createdAt, t.scheduledAt)
+
+    /**
+     * v7.1: the tier AGING alone gives [t] at [now]: NORMAL
+     * when a LOW task's continuous wait (from [waitStart]) has
+     * reached [AGING_PROMOTE_MS], otherwise the task's own tier
+     * capped at NORMAL. The value is in {LOW, NORMAL} by
+     * construction — it NEVER produces HIGH: a HIGH result here
+     * could let a forgotten task outrank one the user actually
+     * marked 高. (A HIGH task's own tier still wins through
+     * [effectiveTier]'s max, from its priority, not from aging.)
+     */
+    fun agingTier(t: TaskRecord, now: Long): Int {
+        val base = TaskPriority.clamp(t.priority)
+        if (base == TaskPriority.LOW &&
+            now - waitStart(t) >= AGING_PROMOTE_MS
+        ) {
+            return TaskPriority.NORMAL
+        }
+        return base.coerceAtMost(TaskPriority.NORMAL)
+    }
+
+    /** v7.1: the tier the pick actually judges [t] by at [now]:
+     *  its own priority tier, or its aging tier when that is
+     *  higher. Only ever raises LOW to NORMAL (see [agingTier]). */
+    fun effectiveTier(t: TaskRecord, now: Long): Int =
+        maxOf(TaskPriority.clamp(t.priority), agingTier(t, now))
 
     /** Record that [task] was actually served (the drain loop
      *  calls this only once it has committed to starting the
@@ -58,15 +142,21 @@ object QueueOrder {
      * time (if any) has arrived, and not in [excludeIds].
      *
      * v3.1: among the eligible tasks the highest priority tier
-     * goes first (see TaskPriority); list order breaks ties, so
-     * within one tier the queue stays FIFO and 插队's physical
-     * move still matters. Eligibility is judged BEFORE priority:
-     * a scheduled 高 task never blocks a due 中 task behind it.
+     * goes first (see TaskPriority); list order breaks ties
+     * within one tier (list order is the queue order — for new
+     * tasks that means newest first, since creation inserts at
+     * the list head; it is NOT arrival FIFO), and 插队's
+     * physical move still matters. Eligibility is judged BEFORE
+     * priority: a scheduled 高 task never blocks a due 中 task
+     * behind it.
      *
      * v4.8 pick order (eligibility — status / excludeIds /
      * netDeferred / portalDeferred / scheduled time — is still
      * judged first, before everything):
-     *   1. highest tier (TaskPriority.clamp) among the eligible;
+     *   1. highest tier among the eligible — v7.1: the EFFECTIVE
+     *      tier ([effectiveTier]: own tier, with a LOW task
+     *      aged to NORMAL after [AGING_PROMOTE_MS] of continuous
+     *      waiting; never aged to HIGH);
      *   2. inside that tier, jumped tasks (jumpedAt > 0) first,
      *      in list order (the last jump sits physically first);
      *   3. among the rest, host rotation: when [lastServedHost]
@@ -93,8 +183,8 @@ object QueueOrder {
                 !(t.scheduledAt > 0 && t.scheduledAt > now)
         }
         if (eligible.isEmpty()) return null
-        val topTier = eligible.maxOf { TaskPriority.clamp(it.priority) }
-        val tier = eligible.filter { TaskPriority.clamp(it.priority) == topTier }
+        val topTier = eligible.maxOf { effectiveTier(it, now) }
+        val tier = eligible.filter { effectiveTier(it, now) == topTier }
         val jumped = tier.firstOrNull { it.jumpedAt > 0 }
         if (jumped != null) return jumped
         val served = lastServedHost

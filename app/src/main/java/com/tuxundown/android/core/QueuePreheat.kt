@@ -27,7 +27,9 @@ package com.tuxundown.android.core
  *   starts every gate judges again as usual. Queue ELIGIBILITY
  *   is the one queue-side input, and only because it defines
  *   WHICH task is "first in line" ([QueueOrder.nextEligible]
- *   order — priority first, FIFO within a tier, deferred /
+ *   order — priority first, list order within a tier (new
+ *   tasks sit at the list head, so within a tier the newest
+ *   task is first, not arrival FIFO), deferred /
  *   not-yet-due tasks are not in line at all). The one global
  *   gate that IS an input is the charge park (see the guard
  *   list below): it vetoes preheating altogether, not because

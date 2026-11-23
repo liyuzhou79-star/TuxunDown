@@ -160,6 +160,20 @@ class TaskRecord(
      *  jump is spent once the task really starts). Records
      *  written before v4.8 parse as 0 = never jumped. */
     var jumpedAt: Long = 0,
+    // ---- v7.1 additions (audit round 56) ----
+    /** When this task's CURRENT continuous QUEUED wait began
+     *  (epoch ms); 0 = no stamp (records written before v7.1 —
+     *  QueueOrder.waitStart then falls back to createdAt).
+     *  Persisted like [jumpedAt]: the anti-starvation aging in
+     *  QueueOrder must survive exactly the kill / restart /
+     *  recovery scenarios where a long wait matters. Stamped
+     *  at every (re-)queue entry (see the assignment list on
+     *  QueueOrder), deliberately NOT at the auto-retry backoff
+     *  re-queue (that wait never left the engine's claim), and
+     *  cleared by DownloadEngine.run() when the task actually
+     *  starts, beside [jumpedAt]. Parked time (net / portal
+     *  deferral) counts as waiting: the parks never touch it. */
+    var queuedAt: Long = 0,
     // ---- v2.1 additions ----
     /** Per-task speed cap in KB/s (0 = no cap of its own). Composes
      *  with the global budget via RateCap — the smaller limit wins.
@@ -530,6 +544,17 @@ class TaskStore(context: Context) {
     var onTaskAdded: ((TaskRecord) -> Unit)? = null
 
     fun add(t: TaskRecord): TaskRecord {
+        // v7.1: add() is the ONE funnel every task-creation
+        // entry passes through (home create / sniff / scan /
+        // in-app update — verified: no other QUEUED caller of
+        // add exists; import bypasses it via addAll and
+        // insertBypass only adopts DONE records), so a task
+        // born QUEUED starts its aging wait here, at creation.
+        // The enqueue() right after stamps it again at the
+        // funnel head — same wait, one continuous clock.
+        if (t.status == TaskStatus.QUEUED) {
+            t.queuedAt = System.currentTimeMillis()
+        }
         tasks.add(0, t)
         saveNow()
         runCatching { onTaskAdded?.invoke(t) }
@@ -685,6 +710,7 @@ class TaskStore(context: Context) {
                 o.put("failureKind", t.failureKind.name)
                 o.put("failureHttpCode", t.failureHttpCode)
                 o.put("jumpedAt", t.jumpedAt)
+                o.put("queuedAt", t.queuedAt)
                 o.put("scheduleDaily", t.scheduleDaily)
                 o.put("scheduleHour", t.scheduleHour)
                 o.put("scheduleMinute", t.scheduleMinute)
@@ -780,6 +806,7 @@ class TaskStore(context: Context) {
                         }.getOrDefault(FailureKind.UNKNOWN),
                         failureHttpCode = o.optInt("failureHttpCode", 0),
                         jumpedAt = o.optLong("jumpedAt", 0).coerceAtLeast(0),
+                        queuedAt = o.optLong("queuedAt", 0).coerceAtLeast(0),
                         scheduleDaily = o.optBoolean("scheduleDaily", false),
                         // v6.4: missing keys (pre-v6.4 records)
                         // parse as -1 = unknown pick; the pair

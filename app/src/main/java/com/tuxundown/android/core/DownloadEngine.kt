@@ -341,6 +341,11 @@ class DownloadEngine(
         // starts — clear it in this per-run reset so a later
         // re-queue does not inherit a stale first pick.
         task.jumpedAt = 0
+        // v7.1: same for the aging wait stamp — the wait is
+        // spent once the task actually starts, so a later
+        // re-queue starts a fresh wait instead of inheriting
+        // this run's (see QueueOrder.agingTier).
+        task.queuedAt = 0
         val runStartMs = System.currentTimeMillis()
         // v4.9 (audit round 34): hold the CPU awake for exactly
         // this transfer — see WakeGuard for the lifecycle proof
