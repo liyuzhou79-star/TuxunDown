@@ -136,6 +136,7 @@ import com.tuxundown.android.core.ThunderLink
 import com.tuxundown.android.core.ProxySettings
 import com.tuxundown.android.core.PublicStorage
 import com.tuxundown.android.core.ScheduleTime
+import com.tuxundown.android.core.ShortLinkExpander
 import com.tuxundown.android.core.SniffHistory
 import com.tuxundown.android.core.SpeedCurveExport
 import com.tuxundown.android.core.SpeedSchedule
@@ -615,6 +616,14 @@ fun DownApp() {
     var pendingScheduleAt by remember { mutableStateOf(0L) }
     var sniffing by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf("") }
+    // v6.3: short-link expansion opt-in (add dialog checkbox,
+    // default OFF — see ShortLinkExpander). [expanding] is the
+    // in-flight flag (the dialog shows progress and cannot be
+    // dismissed mid-chain); [expandNote] is the outcome line the
+    // dialog states after an expansion attempt.
+    var expandShortLink by remember { mutableStateOf(false) }
+    var expanding by remember { mutableStateOf(false) }
+    var expandNote by remember { mutableStateOf("") }
 
     // ---- sniff result dialog state (v1.4: multi-select + filter + sort) ----
     // v1.9: the list/page/total live in SniffSession (process
@@ -745,7 +754,11 @@ fun DownApp() {
                 // unfinished task for this link silences the
                 // prompt; DONE history does not (re-downloading
                 // it is allowed, so offering it is right).
-                if (!url.isNullOrBlank() && url != DownloadCenter.clipboardPrompted &&
+                // v6.3: the frequency verdict is now TWO layers
+                // (persisted slot OR this session's seen set —
+                // see ClipboardPrompt); the CreateDedup gate is
+                // unchanged.
+                if (!url.isNullOrBlank() && DownloadCenter.shouldPromptClipboard(url) &&
                     !CreateDedup.isDuplicate(store.tasks, url)
                 ) {
                     clipboardLink = url
@@ -1279,42 +1292,19 @@ fun DownApp() {
         }.start()
     }
 
-    fun startSmart(raw: String) {
-        var u = raw.trim()
-        if (u.isBlank() || sniffing) return
-        // v2.5: thunder:// links are envelopes, not addresses —
-        // decode them back to the real address IN PLACE first,
-        // so every path below (single, batch, probe, sniff)
-        // sees ordinary links. A paste whose thunder links ALL
-        // fail to decode says so plainly instead of sniffing
-        // the envelope.
-        if (ThunderLink.containsToken(u)) {
-            val prep = ThunderLink.replaceTokens(u)
-            if (prep.decoded == 0) {
-                message = "这个迅雷链接解不开（里面的地址不完整或已损坏），换一个链接试试。"
-                return
-            }
-            if (prep.failed > 0) {
-                Toast.makeText(
-                    context,
-                    "有 ${prep.failed} 个迅雷链接解不开，已跳过",
-                    Toast.LENGTH_LONG,
-                ).show()
-            }
-            u = prep.text.trim()
-        }
-        // v2.1: arbitrary text — a paragraph shared from a chat
-        // app, a forum post — can carry the link(s) inside prose.
-        // Extract first (LinkExtract): several links go down the
-        // batch path; exactly one embedded link continues as if it
-        // had been pasted bare; a bare link extracts to itself and
-        // nothing changes.
-        val foundLinks = LinkExtract.extract(u)
-        if (foundLinks.size > 1) {
-            startBatch(foundLinks.joinToString("\n"))
-            return
-        }
-        if (foundLinks.size == 1 && foundLinks[0] != u) u = foundLinks[0]
+    /**
+     * v6.3: the tail of [startSmart] — everything after the
+     * input has been resolved to ONE link string (thunder
+     * envelope decoded, embedded link extracted, short-link
+     * expansion already finished when the dialog asked for it):
+     * scheduling, the multi-line batch branch, and the
+     * ftp / direct-file / probe / sniff routing. Declared
+     * BEFORE startSmart on purpose: startSmart's expansion
+     * callback references it, and a local fun may only be
+     * referenced by lambdas declared after it (the v2.4
+     * txt-import lesson, see below).
+     */
+    fun continueSmart(u: String) {
         if (scheduleMode == 1) {
             // v1.8: daily mode — validate the wall-clock time and
             // resolve it to the next occurrence.
@@ -1378,6 +1368,104 @@ fun DownApp() {
                 }
             }
         }.start()
+    }
+
+    fun startSmart(raw: String) {
+        var u = raw.trim()
+        if (u.isBlank() || sniffing || expanding) return
+        // v2.5: thunder:// links are envelopes, not addresses —
+        // decode them back to the real address IN PLACE first,
+        // so every path below (single, batch, probe, sniff)
+        // sees ordinary links. A paste whose thunder links ALL
+        // fail to decode says so plainly instead of sniffing
+        // the envelope.
+        if (ThunderLink.containsToken(u)) {
+            val prep = ThunderLink.replaceTokens(u)
+            if (prep.decoded == 0) {
+                message = "这个迅雷链接解不开（里面的地址不完整或已损坏），换一个链接试试。"
+                return
+            }
+            if (prep.failed > 0) {
+                Toast.makeText(
+                    context,
+                    "有 ${prep.failed} 个迅雷链接解不开，已跳过",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+            u = prep.text.trim()
+        }
+        // v2.1: arbitrary text — a paragraph shared from a chat
+        // app, a forum post — can carry the link(s) inside prose.
+        // Extract first (LinkExtract): several links go down the
+        // batch path; exactly one embedded link continues as if it
+        // had been pasted bare; a bare link extracts to itself and
+        // nothing changes.
+        val foundLinks = LinkExtract.extract(u)
+        if (foundLinks.size > 1) {
+            startBatch(foundLinks.joinToString("\n"))
+            return
+        }
+        if (foundLinks.size == 1 && foundLinks[0] != u) u = foundLinks[0]
+        // v6.3: short-link expansion (the add dialog's
+        // 「展开短链接」 checkbox, default off — unchecked this
+        // block never runs and nothing changes). ORDER CALIBER:
+        // expansion completes HERE, before continueSmart reaches
+        // createTask / createTaskWithHlsChoice, so the FINAL
+        // address is what the CreateDedup verdict inside
+        // createTask judges — dedup sees the address the task
+        // will actually carry, never the short one. Scope: ONE
+        // single-line http(s) main link, and only while the add
+        // dialog is the caller (showAdd) — multi-line pastes
+        // still go down the batch path unexpanded, mirrors are
+        // never expanded, ftp links have no HTTP redirects to
+        // follow, and the clipboard prompt's own create path
+        // (dialog closed) is untouched. The outcome is always
+        // stated (dialog note + toast): a fallback creates with
+        // the ORIGINAL address and says so — never a silent swap.
+        if (expandShortLink && showAdd &&
+            u.lines().count { it.isNotBlank() } == 1 &&
+            (u.startsWith("http://") || u.startsWith("https://"))
+        ) {
+            expanding = true
+            expandNote = ""
+            val original = u
+            Thread {
+                val outcome = runCatching { ShortLinkExpander.expand(original) }
+                    .getOrElse {
+                        ShortLinkExpander.Outcome.FellBack(
+                            "打开链接失败：${Errors.human(it)}"
+                        )
+                    }
+                activity.runOnUiThread {
+                    expanding = false
+                    when (outcome) {
+                        is ShortLinkExpander.Outcome.Expanded -> {
+                            expandNote = "已展开短链接，最终地址：${outcome.finalUrl}"
+                            urlText = outcome.finalUrl
+                            Toast.makeText(
+                                context, "已展开短链接，按最终地址新建",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                            continueSmart(outcome.finalUrl)
+                        }
+                        ShortLinkExpander.Outcome.Direct -> {
+                            expandNote = "这个链接没有跳转，按原链接新建。"
+                            continueSmart(original)
+                        }
+                        is ShortLinkExpander.Outcome.FellBack -> {
+                            expandNote = "没能展开（${outcome.reason}），按原链接建任务。"
+                            Toast.makeText(
+                                context, "没能展开短链接，按原链接建任务",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                            continueSmart(original)
+                        }
+                    }
+                }
+            }.start()
+            return
+        }
+        continueSmart(u)
     }
 
     // ---- v2.4: import links from a .txt file (batch create) ----
@@ -2580,7 +2668,7 @@ fun DownApp() {
 
     if (showAdd) {
         AlertDialog(
-            onDismissRequest = { if (!sniffing) showAdd = false },
+            onDismissRequest = { if (!sniffing && !expanding) showAdd = false },
             title = { Text("新建下载") },
             text = {
                 // v6.2 audit round 47: this is the longest
@@ -2609,6 +2697,29 @@ fun DownApp() {
                         label = { Text("镜像地址（可不填，一行一个，必须是同一个文件）") },
                         modifier = Modifier.fillMaxWidth(),
                     )
+                    // v6.3: short-link expansion opt-in. Default
+                    // OFF: unchecked means zero behaviour change
+                    // and zero extra network. Checked: the main
+                    // link's redirect chain is followed first and
+                    // the task is created with the final address
+                    // (mirrors are not expanded); the outcome —
+                    // expanded / no jump / could not expand — is
+                    // stated below and by toast, never silent
+                    // (see ShortLinkExpander / startSmart).
+                    Row(
+                        Modifier.fillMaxWidth()
+                            .clickable { expandShortLink = !expandShortLink },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(
+                            checked = expandShortLink,
+                            onCheckedChange = { expandShortLink = it },
+                        )
+                        Text(
+                            "展开短链接（先跟随跳转拿到最终地址，再按最终地址建任务）",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
                     Spacer(Modifier.height(8.dp))
                     Text(
                         "预约开始：",
@@ -2674,6 +2785,18 @@ fun DownApp() {
                     if (sniffing) {
                         Spacer(Modifier.height(8.dp))
                         Text("正在识别链接…")
+                    }
+                    if (expanding) {
+                        Spacer(Modifier.height(8.dp))
+                        Text("正在展开短链接…")
+                    }
+                    if (expandNote.isNotBlank()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            expandNote,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                     // ---- sniff history (v1.4 item 16) ----
                     val history = DownloadCenter.sniffHistory
@@ -2762,7 +2885,7 @@ fun DownApp() {
                 TextButton(onClick = { startSmart(urlText) }) { Text("开始") }
             },
             dismissButton = {
-                TextButton(onClick = { if (!sniffing) showAdd = false }) { Text("取消") }
+                TextButton(onClick = { if (!sniffing && !expanding) showAdd = false }) { Text("取消") }
             },
         )
     }
@@ -3846,7 +3969,7 @@ fun DownApp() {
     if (clipboardLink.isNotBlank()) {
         AlertDialog(
             onDismissRequest = {
-                DownloadCenter.clipboardPrompted = clipboardLink
+                DownloadCenter.markClipboardPrompted(clipboardLink)
                 clipboardLink = ""
             },
             title = { Text("剪贴板里有链接") },
@@ -3860,7 +3983,7 @@ fun DownApp() {
             confirmButton = {
                 TextButton(onClick = {
                     val u = clipboardLink
-                    DownloadCenter.clipboardPrompted = u
+                    DownloadCenter.markClipboardPrompted(u)
                     clipboardLink = ""
                     urlText = u
                     startSmart(u)
@@ -3868,7 +3991,7 @@ fun DownApp() {
             },
             dismissButton = {
                 TextButton(onClick = {
-                    DownloadCenter.clipboardPrompted = clipboardLink
+                    DownloadCenter.markClipboardPrompted(clipboardLink)
                     clipboardLink = ""
                 }) { Text("不用了") }
             },

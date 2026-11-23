@@ -370,6 +370,42 @@ object DownloadCenter {
         get() = pString("clipboardPrompted", "")
         set(v) { prefs().edit().putString("clipboardPrompted", v).apply() }
 
+    /**
+     * v6.3: session-scoped companion of [clipboardPrompted] —
+     * every clipboard link prompted about (or dismissed) during
+     * THIS process run. Memory only, never persisted: the set
+     * dies with the process. It closes the single slot's one
+     * hole (A -> B -> A re-prompted A within a session, because
+     * the slot only holds the most recent link) WITHOUT
+     * weakening the slot's cross-session suppression — the
+     * verdict is slot-hit OR session-hit (see ClipboardPrompt
+     * for the full caliber). Guarded by its own monitor: the
+     * prompt decision and the marks both happen on the UI
+     * thread today, but the set costs nothing to keep honest.
+     */
+    private val clipboardSessionSeen = mutableSetOf<String>()
+
+    /** The one prompt verdict: persisted slot OR session set. */
+    fun shouldPromptClipboard(url: String): Boolean =
+        ClipboardPrompt.shouldPrompt(
+            url,
+            clipboardPrompted,
+            synchronized(clipboardSessionSeen) { clipboardSessionSeen.toSet() },
+        )
+
+    /**
+     * Record that [url] was prompted about — shown and answered,
+     * confirmed, or dismissed all count the same (the user has
+     * seen it; asking again this session would be nagging).
+     * Writes BOTH layers: the session set (this run) and the
+     * persisted slot (its existing cross-session job).
+     */
+    fun markClipboardPrompted(url: String) {
+        if (url.isBlank()) return
+        synchronized(clipboardSessionSeen) { clipboardSessionSeen.add(url) }
+        clipboardPrompted = url
+    }
+
     /** v1.4: how many tasks may download at the same time (1–5). */
     var maxConcurrent: Int
         get() = pInt("maxConcurrent", 1).coerceIn(1, 5)
