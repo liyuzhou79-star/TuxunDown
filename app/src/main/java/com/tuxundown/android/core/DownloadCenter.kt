@@ -26,6 +26,10 @@ object DownloadCenter {
 
     fun isClaimed(taskId: String): Boolean = engineClaims.isClaimed(taskId)
 
+    /** v7.4 (audit round 59, Step C): how many engine claims
+     *  are held right now — read-only, for diagnostics. */
+    fun claimedCount(): Int = engineClaims.size()
+
     var wifiOnly: Boolean
         get() = pBool("wifiOnly", false)
         set(v) { prefs().edit().putBoolean("wifiOnly", v).apply() }

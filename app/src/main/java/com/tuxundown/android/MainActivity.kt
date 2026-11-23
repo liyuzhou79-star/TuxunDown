@@ -130,7 +130,9 @@ import com.tuxundown.android.core.Format
 import com.tuxundown.android.core.GhostMark
 import com.tuxundown.android.core.GhostSnapshot
 import com.tuxundown.android.core.HealthCheck
+import com.tuxundown.android.core.IllegalTransitions
 import com.tuxundown.android.core.SecurityStatus
+import com.tuxundown.android.core.StatusDistribution
 import com.tuxundown.android.core.StorageHealth
 import com.tuxundown.android.core.HelpTopics
 import com.tuxundown.android.core.ThermalStatus
@@ -6779,6 +6781,46 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
             if (storageLines.isNotEmpty()) {
                 SettingsGroup("存储健康") {
                     for ((label, value) in storageLines) {
+                        InfoRow(label, value)
+                    }
+                }
+            }
+        }
+        // ---- v7.4 (audit round 59, Step C): 任务状态分布 — a
+        // read-only snapshot of where the task list stands,
+        // all from runtime reads made once for this page
+        // visit: the per-status and park counts come off the
+        // loaded store's current records (status plus the
+        // three @Transient park flags), the claimed count is
+        // the live EngineClaims set size, and the illegal-
+        // transition figure is Step B's process-local counter
+        // (this process only — the row says so). A read that
+        // fails drops its row; if every read fails the whole
+        // group is absent (see StatusDistribution). ----
+        item(key = "d-status") {
+            val statusLines = remember {
+                StatusDistribution.lines(
+                    StatusDistribution.Snapshot(
+                        records = runCatching {
+                            DownloadCenter.store.tasks.map {
+                                StatusDistribution.factOf(it)
+                            }
+                        }.getOrNull(),
+                        claimedCount = runCatching {
+                            DownloadCenter.claimedCount()
+                        }.getOrNull(),
+                        illegalCount = runCatching {
+                            IllegalTransitions.count
+                        }.getOrNull(),
+                        lastIllegal = runCatching {
+                            IllegalTransitions.last
+                        }.getOrNull(),
+                    )
+                )
+            }
+            if (statusLines.isNotEmpty()) {
+                SettingsGroup("任务状态分布") {
+                    for ((label, value) in statusLines) {
                         InfoRow(label, value)
                     }
                 }

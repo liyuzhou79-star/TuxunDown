@@ -32,4 +32,8 @@ class EngineClaims {
     }
 
     fun isClaimed(taskId: String): Boolean = claimed.contains(taskId)
+
+    /** v7.4 (audit round 59, Step C): how many claims are held
+     *  right now — read-only, for the diagnostics page. */
+    fun size(): Int = claimed.size
 }
