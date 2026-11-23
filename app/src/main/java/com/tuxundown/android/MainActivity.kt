@@ -636,7 +636,7 @@ fun DownApp() {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "4.9.0"
+        }.getOrNull() ?: "5.0.0"
     }
     var showGuide by remember {
         // v2.2 safe mode: after 2+ consecutive crashes, first-
@@ -6686,9 +6686,9 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 息屏不降速：以前息屏后手机会让处理器睡过去，下载容易变慢、变不稳。现在真正下载时会保持处理器运行，息屏下大文件下得更稳；这个开关在设置里可以关，代价是开着时更费电，排队等待的任务不会占用\n" +
-            "· 切到后台更省电：App 切到后台、界面看不见时，界面不再每秒刷新，白白唤醒处理器的次数少了，后台更省电；切回来会立刻刷新\n" +
-            "· 多个任务一起下，通知栏会写全部下完还剩多久：以前只有单个任务时通知才带剩余时间，现在多个任务一起下时，通知栏也会按总进度写明全部下完大约还要多久",
+            "· 这是 4.1 以来的整合版：这一版把 4.x 的功能做了一次全面交叉检查和回归核对，确认该在的功能都在、旧修复没有回退\n" +
+            "· 修了两个藏在功能交叉处的问题：没插电、任务只能等充电时，不再白白提前预热连接耗电；需要登录的镜像没法确认是不是同一个文件时，不再误报成对不上，只会说明没能确认、先不用它\n" +
+            "· 4.x 的提速都在：单个任务连接最多 64 条、新任务爆发开局、诊断页能对比实测选最快档、流媒体下载并发自适应、任务详情能看服务器画像、息屏下载不降速",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
             "· 文件直链 → 直接开始多线程下载，还能预先改好保存文件名\n" +
@@ -7747,7 +7747,7 @@ fun TaskCard(
                     val version = runCatching {
                         ctx.packageManager.getPackageInfo(ctx.packageName, 0)
                             .versionName
-                    }.getOrNull() ?: "4.9.0"
+                    }.getOrNull() ?: "5.0.0"
                     val cm = ctx.getSystemService(
                         android.content.Context.CLIPBOARD_SERVICE,
                     ) as android.content.ClipboardManager
