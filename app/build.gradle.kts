@@ -26,7 +26,7 @@ android {
         // packaged locales to default + en + zh variants strips those
         // dead translations from the arsc while keeping every string
         // a Chinese or English system can actually resolve.
-        resConfigs += listOf("en", "zh", "zh-rCN", "zh-rTW", "zh-rHK")
+        resConfigs("en", "zh", "zh-rCN", "zh-rTW", "zh-rHK")
     }
 
     // Release signing is injected by CI from repository secrets (the
