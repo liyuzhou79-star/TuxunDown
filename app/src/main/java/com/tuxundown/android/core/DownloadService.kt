@@ -51,6 +51,14 @@ class DownloadService : Service() {
     private val completionLock = Object()
     private var recentCompletions: List<CompletionMerge.Done> = emptyList()
 
+    /** v6.8: recent FINAL failures, for the merge window (see
+     *  FailureNotify). Its own list + lock, mirroring the
+     *  completions pair above — failures and completions merge
+     *  separately and post under separate notification ids, so
+     *  neither summary can erase the other. */
+    private val failureLock = Object()
+    private var recentFailures: List<FailureNotify.Failed> = emptyList()
+
     /**
      * v2.1 audit (round 7, C1): start the ONE drain loop, atomically.
      * onStartCommand and the connectivity callback both used to do
@@ -551,6 +559,18 @@ class DownloadService : Service() {
         when (intent?.action) {
             ACTION_PAUSE -> intent.getStringExtra(EXTRA_TASK_ID)?.let { id ->
                 DownloadCenter.store.byId(id)?.let { DownloadCenter.pauseTask(it) }
+            }
+            // v6.8: the failure notification's 重试 button. It
+            // re-queues through DownloadCenter.enqueue — the
+            // exact entry the task card's plain 重试 button
+            // uses (NOT retryWithStrategy's change-of-tactics
+            // path). A task that is gone, or no longer FAILED,
+            // is a silent no-op, like pause/cancel above.
+            ACTION_RETRY -> intent.getStringExtra(EXTRA_TASK_ID)?.let { id ->
+                val t = DownloadCenter.store.byId(id)
+                if (t != null && t.status == TaskStatus.FAILED) {
+                    DownloadCenter.enqueue(t)
+                }
             }
             ACTION_CANCEL -> intent.getStringExtra(EXTRA_TASK_ID)?.let { id ->
                 val t = DownloadCenter.store.byId(id)
@@ -1400,6 +1420,16 @@ class DownloadService : Service() {
                 RetryPolicy.needsUserAction(task) ||
                 !RetryPolicy.shouldRetry(task.autoRetriesUsed, limit)
             ) {
+                // v6.8: this exit is the ONE choke point where an
+                // engine failure is FINAL — the portal / outage
+                // parks above already returned as QUEUED, and
+                // every per-attempt failure either re-enters the
+                // loop below or lands here only once its retries
+                // are spent (or never applicable: needsUserAction,
+                // auto-retry off). A FAILED status here therefore
+                // earns the failure notification; PAUSED (the
+                // other way to reach this guard) does not.
+                if (task.status == TaskStatus.FAILED) notifyFailure(task)
                 return false
             }
             // v5.8: jittered form (see BackoffJitter) — tasks that
@@ -1719,6 +1749,12 @@ class DownloadService : Service() {
             // verdict at the same time, like the engine does.
             task.failureKind = FailureKind.TARGET_GONE
             task.note = ""
+            // v6.8: the finalize path's own final failure — the
+            // transfer reported DONE, so no engine retry loop
+            // ever sees this FAILED; it is terminal the moment
+            // it is set. notifyFailure itself refuses a task
+            // whose record was deleted meanwhile.
+            notifyFailure(task)
             notifyAggregate()
         } catch (e: Exception) {
             task.note = "下载完成，但改名失败（${Errors.human(e)}），" +
@@ -1914,6 +1950,92 @@ class DownloadService : Service() {
             }
             // The widget's "last completed" state rides along,
             // like it does on progress posts.
+            com.tuxundown.android.widget.WidgetUpdater.refresh(this)
+        }
+    }
+
+    // ---------- v6.8: failure notifications ----------
+
+    /**
+     * Post a FINAL failure on the completion channel (see the
+     * v6.8 audit, Step A item (1): a final failure is a terminal
+     * RESULT event, the same class as a completion) but under
+     * its OWN notification id, so a failure and a completion
+     * summary coexist instead of replacing each other.
+     *
+     * Silence caliber (Step A item (4), decided in B): the post
+     * goes into the shade at any hour — quiet hours included,
+     * never suppressed, never deferred — and it NEVER vibrates,
+     * rings or heads-ups: the channel is LOW and this method
+     * makes no feedback call at all. The completeVibrate /
+     * completeSound switches are NOT reused — their settings
+     * wording governs completion feedback only.
+     *
+     * Callers are the two final-failure choke points only (the
+     * auto-retry guard exit in runOneClaimed, and the finalize
+     * path's TargetGone catch); per-attempt failures never reach
+     * here. A task whose record was deleted earns nothing (the
+     * FinalizeGate lesson). Whole body runCatching, in
+     * notifyCompletion's shape: with the notification permission
+     * denied the system silently drops the post and nothing
+     * compensates for it; the widget still refreshes.
+     */
+    private fun notifyFailure(task: TaskRecord) {
+        if (DownloadCenter.store.byId(task.id) == null) return
+        runCatching {
+            val now = System.currentTimeMillis()
+            val needsUserAction = RetryPolicy.needsUserAction(task)
+            val item = FailureNotify.Failed(
+                name = task.fileName.ifBlank { task.url },
+                taskId = task.id,
+                reason = FailureNotify.shortReason(task.error),
+                needsUserAction = needsUserAction,
+                advice = if (needsUserAction) {
+                    FailureAdvice.forTask(task)?.text
+                } else {
+                    null
+                },
+                atMs = now,
+            )
+            val merged: List<FailureNotify.Failed>
+            synchronized(failureLock) {
+                recentFailures = FailureNotify.add(recentFailures, item, now)
+                merged = recentFailures
+            }
+            val nm = getSystemService(NotificationManager::class.java)
+            if (FailureNotify.isMerged(merged)) {
+                // Summary: names only, tap opens the task list,
+                // no per-task retry action (each failure's fix
+                // is its own — see FailureNotify).
+                val b = NotificationCompat.Builder(this, COMPLETE_CHANNEL)
+                    .setSmallIcon(android.R.drawable.stat_notify_error)
+                    .setContentTitle(FailureNotify.title(merged))
+                    .setContentText("点开查看失败原因")
+                    .setStyle(
+                        NotificationCompat.BigTextStyle()
+                            .bigText(FailureNotify.summaryText(merged))
+                    )
+                    .setContentIntent(appPendingIntent())
+                    .setAutoCancel(true)
+                nm.notify(FAIL_NOTIF_ID, b.build())
+            } else {
+                val body = FailureNotify.singleBody(item)
+                val b = NotificationCompat.Builder(this, COMPLETE_CHANNEL)
+                    .setSmallIcon(android.R.drawable.stat_notify_error)
+                    .setContentTitle(FailureNotify.singleTitle(item))
+                    .setContentText(body)
+                    .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+                    .setContentIntent(appPendingIntent())
+                    .setAutoCancel(true)
+                if (FailureNotify.retryAllowed(item)) {
+                    b.addAction(
+                        android.R.drawable.ic_menu_rotate, "重试",
+                        actionPendingIntent(ACTION_RETRY, task.id, 3),
+                    )
+                }
+                nm.notify(FAIL_NOTIF_ID, b.build())
+            }
+            // Like completions, the widget settles on the post.
             com.tuxundown.android.widget.WidgetUpdater.refresh(this)
         }
     }
@@ -2122,9 +2244,17 @@ class DownloadService : Service() {
         // foreground progress notification.
         private const val COMPLETE_CHANNEL = "download_complete"
         private const val COMPLETE_NOTIF_ID = 2
+        // v6.8: failure notifications ride COMPLETE_CHANNEL but
+        // post under their own id — sharing id 2 would let a
+        // failure erase a completion card (and vice versa).
+        private const val FAIL_NOTIF_ID = 3
         // v1.8: notification action buttons.
         const val ACTION_PAUSE = "com.tuxundown.android.action.PAUSE_TASK"
         const val ACTION_CANCEL = "com.tuxundown.android.action.CANCEL_TASK"
+        // v6.8: the failure notification's 重试 button (request
+        // code 3 in actionPendingIntent — 1 pause / 2 cancel /
+        // 101 / 102 completion actions are the codes in use).
+        const val ACTION_RETRY = "com.tuxundown.android.action.RETRY_TASK"
         // v2.6: explicit start from BootReceiver (setting-gated there
         // and re-checked in onStartCommand).
         const val ACTION_BOOT_RESUME = "com.tuxundown.android.action.BOOT_RESUME"
