@@ -437,6 +437,142 @@ class TaskStoreJsonTest {
         assertEquals(2_000L, r.downloaded)
     }
 
+    // ---- v7.3 (audit round 58, B1–B3): corrupt-file corpus for
+    // the pure load decision ----
+
+    private val goodBak = """
+        [
+          {"id":"a","url":"https://a.b/1.bin","status":"PAUSED"},
+          {"id":"b","url":"https://a.b/2.bin","status":"PAUSED"}
+        ]
+    """.trimIndent()
+
+    @Test
+    fun decideLoadTruncatedMainFallsBackToBak() {
+        // Truncated: the array never closes, so main cannot parse
+        // as a JSONArray at all — the .bak copy is the source.
+        val truncated = """[{"id":"a","url":"https://a.b/1.bin","status":"PAUSED"},{"id":"b","url":"""
+        val out = TaskStore.decideLoad(truncated, goodBak)
+        assertEquals(TaskStore.LoadSource.BAK, out.source)
+        assertEquals(listOf("a", "b"), out.records.map { it.id })
+        assertEquals(0, out.droppedRecords)
+        assertEquals(0, out.bakMergedRecords)
+        assertTrue(!out.doubleBad)
+    }
+
+    @Test
+    fun decideLoadGarbageBothFilesIsDoubleBad() {
+        val out = TaskStore.decideLoad("not json at all {{{", "### garbage ###")
+        assertEquals(TaskStore.LoadSource.EMPTY, out.source)
+        assertTrue(out.records.isEmpty())
+        assertTrue(out.doubleBad)
+        // Only ONE bad file present is not double-bad.
+        val oneBad = TaskStore.decideLoad("{{{", null)
+        assertEquals(TaskStore.LoadSource.EMPTY, oneBad.source)
+        assertTrue(!oneBad.doubleBad)
+        // Neither file present: legitimately empty, not bad.
+        val none = TaskStore.decideLoad(null, null)
+        assertEquals(TaskStore.LoadSource.EMPTY, none.source)
+        assertTrue(!none.doubleBad)
+    }
+
+    @Test
+    fun decideLoadTypeShiftedRecordMergesBackFromBak() {
+        // Type-shifted corpus: the middle array element is a bare
+        // number, not an object — per-record parsing drops exactly
+        // that one (raw length 3, parsed 2). The .bak holds the
+        // same record whole, so B3 merges it back by id.
+        val main = """
+            [
+              {"id":"a","url":"https://a.b/1.bin","status":"PAUSED"},
+              42,
+              {"id":"c","url":"https://a.b/3.bin","status":"PAUSED"}
+            ]
+        """.trimIndent()
+        val bak = """
+            [
+              {"id":"a","url":"https://a.b/1.bin","status":"PAUSED"},
+              {"id":"b","url":"https://a.b/2.bin","status":"PAUSED"},
+              {"id":"c","url":"https://a.b/3.bin","status":"PAUSED"}
+            ]
+        """.trimIndent()
+        val out = TaskStore.decideLoad(main, bak)
+        assertEquals(TaskStore.LoadSource.MAIN, out.source)
+        assertEquals(1, out.droppedRecords)
+        assertEquals(1, out.bakMergedRecords)
+        assertEquals(setOf("a", "b", "c"), out.records.map { it.id }.toSet())
+        assertTrue(!out.doubleBad)
+    }
+
+    @Test
+    fun decideLoadBrokenRecordMergesBackFromBak() {
+        // A record object missing its url is dropped by the
+        // per-record guard; its .bak twin (same id, whole) is
+        // merged back.
+        val main = """
+            [
+              {"id":"a","url":"https://a.b/1.bin","status":"PAUSED"},
+              {"id":"broken"}
+            ]
+        """.trimIndent()
+        val bak = """
+            [
+              {"id":"a","url":"https://a.b/1.bin","status":"PAUSED"},
+              {"id":"broken","url":"https://a.b/2.bin","status":"PAUSED"}
+            ]
+        """.trimIndent()
+        val out = TaskStore.decideLoad(main, bak)
+        assertEquals(1, out.droppedRecords)
+        assertEquals(1, out.bakMergedRecords)
+        assertEquals(setOf("a", "broken"), out.records.map { it.id }.toSet())
+    }
+
+    @Test
+    fun decideLoadCleanMainNeverConsultsBak() {
+        // No drops in main -> no merge, even though .bak holds an
+        // extra record main does not have.
+        val out = TaskStore.decideLoad(goodBak, goodBak.replace("\"b\"", "\"z\""))
+        assertEquals(TaskStore.LoadSource.MAIN, out.source)
+        assertEquals(0, out.droppedRecords)
+        assertEquals(0, out.bakMergedRecords)
+        assertEquals(listOf("a", "b"), out.records.map { it.id })
+        // A valid "[]" is a legitimately empty main.
+        val empty = TaskStore.decideLoad("[]", goodBak)
+        assertEquals(TaskStore.LoadSource.MAIN, empty.source)
+        assertTrue(empty.records.isEmpty())
+    }
+
+    @Test
+    fun decideLoadAbsurdValuesAndBadHexSurviveAsRecord() {
+        // Absurd-value corpus: near-Long.MAX total with 1-byte
+        // chunks and a non-hex chunk bitmap. The record must
+        // survive (bitmap degraded to empty by B4, counts
+        // clamped) instead of being dropped whole.
+        val main = """
+            [
+              {"id":"big","url":"https://a.b/evil.bin","totalSize":9223372036854775806,"chunkSize":1,"chunkDone":"zz","status":"PAUSED"}
+            ]
+        """.trimIndent()
+        val out = TaskStore.decideLoad(main, null)
+        assertEquals(TaskStore.LoadSource.MAIN, out.source)
+        assertEquals(0, out.droppedRecords)
+        assertEquals(1, out.records.size)
+        assertTrue(out.records[0].chunkDone.none { it })
+    }
+
+    @Test
+    fun bakGuardOnlyAllowsParseableMain() {
+        // B2: the .bak copy may only be overwritten by a main
+        // that still parses as a JSON array.
+        assertTrue(TaskStore.canOverwriteBak(goodBak))
+        assertTrue(TaskStore.canOverwriteBak("[]"))
+        assertTrue(!TaskStore.canOverwriteBak("not json {{{"))
+        assertTrue(!TaskStore.canOverwriteBak(""))
+        assertTrue(!TaskStore.canOverwriteBak(null))
+        // A JSON object is valid JSON but not the store's array.
+        assertTrue(!TaskStore.canOverwriteBak("""{"id":"a"}"""))
+    }
+
     @Test
     fun oldFormatWithoutV14FieldsStillLoads() {
         // A v1.3-era record: none of the v1.4 keys exist.

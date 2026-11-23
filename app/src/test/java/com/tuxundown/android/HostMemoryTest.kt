@@ -268,4 +268,30 @@ class HostMemoryTest {
         org.junit.Assert.assertSame(cleared, cache.get(""))
         assertEquals(3, cache.version)
     }
+
+    @Test
+    fun parseWithLossCountsDroppedLines() {
+        // v7.3 (audit round 58, B5): the loss-reporting variant
+        // returns the same records as parse plus the number of
+        // non-blank lines dropped. Corpus: one good 5-field row,
+        // one legacy 4-field row, a bad field count, an
+        // unparseable number, a blank host, and a trailing
+        // newline (blank lines are NOT counted as loss).
+        val text = "a.com\t16\t0\t1000\t0\n" +
+            "b.com\t8\t1\t2000\n" +
+            "too\tfew\n" +
+            "c.com\tNaN\t0\t3000\t0\n" +
+            "\t4\t0\t4000\t0\n"
+        val (entries, dropped) = HostMemory.parseWithLoss(text)
+        assertEquals(listOf("a.com", "b.com"), entries.map { it.host })
+        assertEquals(3, dropped)
+        assertEquals(entries, HostMemory.parse(text))
+        // Blank input loses nothing.
+        assertEquals(0, HostMemory.parseWithLoss("").second)
+        assertEquals(0, HostMemory.parseWithLoss("\n\n").second)
+        // The parse cache surfaces the same count per re-parse.
+        val cache = com.tuxundown.android.core.HostMemoryParseCache()
+        cache.get(text)
+        assertEquals(3, cache.lastDropped)
+    }
 }

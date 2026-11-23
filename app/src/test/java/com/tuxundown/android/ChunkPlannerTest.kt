@@ -113,6 +113,28 @@ class ChunkPlannerTest {
         assertEquals(ChunkPlanner.MAX_CHUNKS, bits.size)
     }
 
+    @Test
+    fun decodeBitsetBadHexDegradesToEmptyNeverThrows() {
+        // v7.3 (audit round 58, B4): non-hex input used to throw
+        // and cost the WHOLE task record at the parse door. Now
+        // it degrades to an empty bitset of the clamped size.
+        val bad = ChunkPlanner.decodeBitset("zz", 8)
+        assertEquals(8, bad.size)
+        assertTrue(bad.none { it })
+        // One bad byte poisons the bitmap, not the record: the
+        // whole decode reads as empty rather than half-trusted.
+        val mixed = ChunkPlanner.decodeBitset("ffzz", 16)
+        assertEquals(16, mixed.size)
+        assertTrue(mixed.none { it })
+        // Odd-length hex cannot form its last byte either.
+        val odd = ChunkPlanner.decodeBitset("f", 8)
+        assertEquals(8, odd.size)
+        assertTrue(odd.none { it })
+        // Valid hex still decodes exactly as before.
+        val good = ChunkPlanner.decodeBitset("05", 3)
+        assertTrue(booleanArrayOf(true, false, true).contentEquals(good))
+    }
+
     // ---------- v4.2: two-zone ChunkGrid ----------
 
     /** The tiling contract every grid must satisfy: ranges are

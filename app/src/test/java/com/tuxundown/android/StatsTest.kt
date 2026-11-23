@@ -1,5 +1,6 @@
 package com.tuxundown.android
 
+import com.tuxundown.android.core.DaySeries
 import com.tuxundown.android.core.HostStats
 import com.tuxundown.android.core.StatsMath
 import org.junit.Assert.assertEquals
@@ -69,6 +70,35 @@ class StatsTest {
         val entries = listOf(HostStats.Entry("a.com", 10, 1))
         assertEquals(entries, HostStats.record(entries, "", 100))
         assertEquals(entries, HostStats.record(entries, "b.com", 0))
+    }
+
+    @Test
+    fun parseWithLossCountsDroppedLines() {
+        // v7.3 (audit round 58, B5): DaySeries and HostStats gain
+        // the same loss-reporting variant as HostMemory — same
+        // records as parse, plus the dropped non-blank line count.
+        val days = "2026-11-22\t100\n" +
+            "garbage line\n" +
+            "2026-11-23\tNaN\n" +
+            "2026-11-24\t300\n"
+        val (dayEntries, dayDropped) = DaySeries.parseWithLoss(days)
+        assertEquals(
+            listOf(DaySeries.Day("2026-11-22", 100), DaySeries.Day("2026-11-24", 300)),
+            dayEntries,
+        )
+        assertEquals(2, dayDropped)
+        assertEquals(dayEntries, DaySeries.parse(days))
+        assertEquals(0, DaySeries.parseWithLoss("").second)
+
+        val hosts = "a.com\t100\t2\n" +
+            "b.com\tbroken\t1\n" +
+            "too\tfew\n" +
+            "c.com\t50\t1\n"
+        val (hostEntries, hostDropped) = HostStats.parseWithLoss(hosts)
+        assertEquals(listOf("a.com", "c.com"), hostEntries.map { it.host })
+        assertEquals(2, hostDropped)
+        assertEquals(hostEntries, HostStats.parse(hosts))
+        assertEquals(0, HostStats.parseWithLoss("").second)
     }
 
     @Test
