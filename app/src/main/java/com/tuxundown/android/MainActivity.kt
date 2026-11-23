@@ -661,6 +661,13 @@ fun DownApp() {
     var batchRenameOpen by remember { mutableStateOf(false) }
     // v3.7: batch strategy-retry dialog (multi-select, FAILED only).
     var retryStrategyOpen by remember { mutableStateOf(false) }
+    // v5.3: explicit target set for the SAME dialog when it is
+    // opened from the 异常 tab's batch entry — the ids of
+    // AbnormalFilter.failedSubset. null = the original
+    // multi-select source (targets come from selectedIds).
+    // Cleared on every dialog exit so the multi-select path is
+    // never polluted by a stale abnormal-tab target set.
+    var retryTargetIds by remember { mutableStateOf<Set<String>?>(null) }
     var retryUaChoice by remember { mutableStateOf(-1) } // -1 = 不改 UA
     var retrySingleThread by remember { mutableStateOf(false) }
     var batchFind by remember { mutableStateOf("") }
@@ -1590,6 +1597,10 @@ fun DownApp() {
     // The tab's count and the tab's list share ONE predicate
     // (AbnormalFilter.count is literally its filter's size).
     val abnormalCount = AbnormalFilter.count(store.tasks, abnormalGates)
+    // v5.3: the FAILED subset of that same abnormal list — the
+    // 异常 tab's batch entry targets exactly these (parked tasks
+    // wait for a condition to recover; they are not retried).
+    val abnormalFailed = AbnormalFilter.failedSubset(store.tasks, abnormalGates)
     val anyAbnormal = abnormalCount >= 1
     // v5.2: never strand the user on an invisible tab — the
     // 异常 tab is hidden while searching (below) and disappears
@@ -2356,6 +2367,49 @@ fun DownApp() {
                 }
             }
 
+            // v5.3: the 异常 tab's batch entry — sits at the top
+            // of the abnormal list only (tab == 5; the tab itself
+            // never exists while searching, and globalResult is
+            // null-checked too, so this cannot leak onto another
+            // tab or into search results). Shown only at 2+
+            // FAILED (AbnormalFilter.showFailedBatch); the parked
+            // entries below it are deliberately NOT its targets —
+            // the subtitle says why. Opens the v3.7 strategy-
+            // retry dialog with the FAILED subset as its explicit
+            // target set (retryTargetIds).
+            if (tab == 5 && globalResult == null &&
+                AbnormalFilter.showFailedBatch(abnormalFailed.size)
+            ) {
+                item(key = "failedbatch") {
+                    Card(
+                        Modifier.fillMaxWidth().clickable {
+                            retryUaChoice = -1
+                            retrySingleThread = false
+                            retryTargetIds = abnormalFailed.map { it.id }.toSet()
+                            retryStrategyOpen = true
+                        },
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surface
+                        ),
+                    ) {
+                        Column(Modifier.padding(12.dp)) {
+                            Text(
+                                "失败任务批量处理（${abnormalFailed.size} 个）",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "只处理失败的任务；停泊中的在等网络/充电等条件恢复，" +
+                                    "不用重试，不在这里处理。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+
             // v1.6 item 7: on wide screens (landscape / tablet /
             // unfolded foldable) the tasks flow in TWO columns
             // inside the same single scrolling LazyColumn — cards
@@ -2971,16 +3025,29 @@ fun DownApp() {
     // The pure decisions live in RetryStrategy; applying them
     // (headers / single-thread / enqueue) is
     // DownloadCenter.retryWithStrategy.
+    // v5.3: the SAME dialog also serves the 异常 tab's batch
+    // entry — retryTargetIds (the FAILED subset's ids) is then
+    // the target source instead of the multi-selection. The
+    // dialog body, RetryStrategy and retryWithStrategy are
+    // unchanged; every exit below clears retryTargetIds so the
+    // multi-select path never inherits a stale target set, and
+    // the selection itself is cleared only on the multi-select
+    // path, exactly as before.
     if (retryStrategyOpen) {
+        val fromAbnormalTab = retryTargetIds != null
+        val targetIds = retryTargetIds ?: selectedIds
         val failedPicked = store.tasks.filter {
-            it.id in selectedIds && it.status == TaskStatus.FAILED
+            it.id in targetIds && it.status == TaskStatus.FAILED
         }
         // retryUaChoice: -1 = 不改 UA; 0..PRESETS.lastIndex picks that preset.
         val uaChoice = retryUaChoice
         val singleThread = retrySingleThread
         val canApply = uaChoice >= 0 || singleThread
         AlertDialog(
-            onDismissRequest = { retryStrategyOpen = false },
+            onDismissRequest = {
+                retryStrategyOpen = false
+                retryTargetIds = null
+            },
             title = { Text("换个方式重试（${failedPicked.size} 个失败任务）") },
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
@@ -3054,8 +3121,11 @@ fun DownApp() {
                             failedPicked, uaPreset, uaLabel, singleThread,
                         )
                         retryStrategyOpen = false
-                        selectedIds = emptySet()
-                        selecting = false
+                        retryTargetIds = null
+                        if (!fromAbnormalTab) {
+                            selectedIds = emptySet()
+                            selecting = false
+                        }
                         Toast.makeText(
                             context, "已让 $n 个失败任务换个方式重试",
                             Toast.LENGTH_SHORT,
@@ -3064,7 +3134,10 @@ fun DownApp() {
                 ) { Text("改好并重试") }
             },
             dismissButton = {
-                TextButton(onClick = { retryStrategyOpen = false }) { Text("取消") }
+                TextButton(onClick = {
+                    retryStrategyOpen = false
+                    retryTargetIds = null
+                }) { Text("取消") }
             },
         )
     }

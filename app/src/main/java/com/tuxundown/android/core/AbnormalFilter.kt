@@ -94,4 +94,28 @@ object AbnormalFilter {
      *  so the two can never drift apart. */
     fun count(tasks: List<TaskRecord>, gates: GateContext): Int =
         filter(tasks, gates).size
+
+    /**
+     * v5.3: the FAILED subset of the abnormal list — the target
+     * set of the 异常 tab's batch entry (「失败任务批量处理」),
+     * which reuses the v3.7 strategy-retry dialog. This is the
+     * SINGLE source for that subset: it goes through [filter]
+     * (so the archived exclusion and every other [isAbnormal]
+     * rule apply exactly as on the tab itself) and then keeps
+     * only status == FAILED. The parked entries the tab also
+     * shows (net / portal / gate holds) are NOT in here: they
+     * are waiting for a condition to recover, not failures to
+     * retry — the entry's copy says so.
+     */
+    fun failedSubset(tasks: List<TaskRecord>, gates: GateContext): List<TaskRecord> =
+        filter(tasks, gates).filter { it.status == TaskStatus.FAILED }
+
+    /**
+     * v5.3: whether the batch entry shows at all. A batch
+     * action for ONE failure is noise — the task card already
+     * has its own retry — so the entry appears only at 2+.
+     * Judged on the FAILED subset's size alone: any number of
+     * parked tasks does not count towards it.
+     */
+    fun showFailedBatch(failedCount: Int): Boolean = failedCount >= 2
 }

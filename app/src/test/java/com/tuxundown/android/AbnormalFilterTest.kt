@@ -185,4 +185,110 @@ class AbnormalFilterTest {
         assertEquals(0, AbnormalFilter.count(emptyList(), gates(wifiClosed = true)))
         assertTrue(AbnormalFilter.filter(emptyList(), gates()).isEmpty())
     }
+
+    // ---- v5.3: FAILED subset + batch-entry visibility ----
+
+    @Test
+    fun showFailedBatchBoundary() {
+        assertFalse(AbnormalFilter.showFailedBatch(0))
+        assertFalse(AbnormalFilter.showFailedBatch(1))
+        assertTrue(AbnormalFilter.showFailedBatch(2))
+        assertTrue(AbnormalFilter.showFailedBatch(5))
+    }
+
+    @Test
+    fun noFailedHidesEntryEvenWithManyParked() {
+        // Parks alone never earn the batch entry: they are
+        // waiting for a condition, not failures to retry.
+        val tasks = listOf(
+            task(netDeferred = true),
+            task(portalDeferred = true),
+            task(), // gate-held below
+            task(),
+        )
+        val subset = AbnormalFilter.failedSubset(tasks, gates(wifiClosed = true))
+        assertTrue(subset.isEmpty())
+        assertFalse(AbnormalFilter.showFailedBatch(subset.size))
+    }
+
+    @Test
+    fun oneFailedHidesEntryEvenWithManyParked() {
+        val tasks = listOf(
+            task(TaskStatus.FAILED),
+            task(netDeferred = true),
+            task(portalDeferred = true),
+            task(), // gate-held below
+        )
+        val subset = AbnormalFilter.failedSubset(tasks, gates(chargeClosed = true))
+        assertEquals(1, subset.size)
+        assertFalse(AbnormalFilter.showFailedBatch(subset.size))
+    }
+
+    @Test
+    fun twoFailedShowEntry() {
+        val tasks = listOf(
+            task(TaskStatus.FAILED),
+            task(TaskStatus.FAILED),
+            task(TaskStatus.DONE),
+        )
+        val subset = AbnormalFilter.failedSubset(tasks, gates())
+        assertEquals(2, subset.size)
+        assertTrue(AbnormalFilter.showFailedBatch(subset.size))
+    }
+
+    @Test
+    fun failedSubsetExcludesArchivedFailed() {
+        // The subset rides the same isAbnormal predicate, so
+        // an archived FAILED task is out — exactly like the tab.
+        val tasks = listOf(
+            task(TaskStatus.FAILED),
+            task(TaskStatus.FAILED, archived = true),
+            task(TaskStatus.FAILED),
+        )
+        val subset = AbnormalFilter.failedSubset(tasks, gates())
+        assertEquals(listOf(tasks[0], tasks[2]), subset)
+    }
+
+    @Test
+    fun failedSubsetExcludesParkedNonFailed() {
+        // Every park flavour is abnormal-tab material but NOT
+        // batch-retry material: only real failures are in.
+        val tasks = listOf(
+            task(netDeferred = true),
+            task(portalDeferred = true),
+            task(), // gate-held below
+            task(TaskStatus.FAILED),
+        )
+        val g = gates(wifiClosed = true)
+        // Sanity: all four really are on the abnormal tab…
+        assertEquals(4, AbnormalFilter.count(tasks, g))
+        // …yet the subset is exactly the one FAILED task.
+        assertEquals(listOf(tasks[3]), AbnormalFilter.failedSubset(tasks, g))
+    }
+
+    @Test
+    fun failedSubsetSizeMatchesFailedInFilter() {
+        val tasks = listOf(
+            task(TaskStatus.FAILED), // in subset
+            task(TaskStatus.FAILED, archived = true), // out: archived
+            task(TaskStatus.FAILED), // in subset
+            task(netDeferred = true), // abnormal, not FAILED
+            task(portalDeferred = true), // abnormal, not FAILED
+            task(), // abnormal via the closed gate, not FAILED
+            task(TaskStatus.PAUSED), // out entirely
+            task(TaskStatus.DONE), // out entirely
+        )
+        val g = gates(chargeClosed = true)
+        val filtered = AbnormalFilter.filter(tasks, g)
+        val subset = AbnormalFilter.failedSubset(tasks, g)
+        assertEquals(
+            filtered.count { it.status == TaskStatus.FAILED },
+            subset.size,
+        )
+        // And the subset is exactly those entries, in list order.
+        assertEquals(
+            filtered.filter { it.status == TaskStatus.FAILED },
+            subset,
+        )
+    }
 }
