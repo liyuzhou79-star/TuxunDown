@@ -89,4 +89,47 @@ class SizeProbeTest {
             sorted.map { it.name },
         )
     }
+
+    @Test
+    fun bySizeDescGroupsEveryUnknownAfterAllKnown() {
+        // v5.7 C-step caliber pin: with several unknowns mixed
+        // in, the known rows still come first in size order and
+        // EVERY unknown sits behind ALL of them as one block
+        // (name-ordered inside the block) — an unknown never
+        // tops the list posing as a big file, and it is never
+        // interleaved among the known rows as if it were the
+        // smallest measured file; its row label says 大小未知.
+        fun res(name: String, size: Long) =
+            SniffedResource(url = "https://x/$name", name = name, kind = "other", size = size)
+        val sorted = SniffSort.bySizeDesc(
+            listOf(
+                res("zeta.bin", -1),
+                res("tiny.bin", 1),
+                res("alpha.bin", -1),
+                res("huge.bin", 1_000_000),
+            )
+        )
+        assertEquals(
+            listOf("huge.bin", "tiny.bin", "alpha.bin", "zeta.bin"),
+            sorted.map { it.name },
+        )
+    }
+
+    @Test
+    fun bySizeDescWithAllSizesUnknownKeepsEveryRow() {
+        // v5.7 C-step caliber pin: when the probe measured
+        // nothing at all, size sorting must not drop, duplicate
+        // or invent rows — the whole list survives (name order
+        // inside the unknown block), each still labelled未知.
+        fun res(name: String) =
+            SniffedResource(url = "https://x/$name", name = name, kind = "other", size = -1)
+        val input = listOf(res("c.bin"), res("a.bin"), res("b.bin"))
+        val sorted = SniffSort.bySizeDesc(input)
+        assertEquals(3, sorted.size)
+        assertEquals(
+            listOf("a.bin", "b.bin", "c.bin"),
+            sorted.map { it.name },
+        )
+        assertEquals(input.toSet(), sorted.toSet())
+    }
 }

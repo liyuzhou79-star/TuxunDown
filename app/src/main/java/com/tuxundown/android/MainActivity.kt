@@ -693,7 +693,7 @@ fun DownApp() {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "5.6.0"
+        }.getOrNull() ?: "5.7.0"
     }
     var showGuide by remember {
         // v2.2 safe mode: after 2+ consecutive crashes, first-
@@ -7372,9 +7372,9 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 安装包瘦身了：从约 1.48 MB 降到约 1.38 MB。清掉的是随系统组件库附带、翻译成几十种语言却用不上的文案，和一份冗余的元数据，功能一个没少。App 界面与功能不受影响；使用其他系统语言时，系统组件附带的少数无障碍文案会显示默认英文，而不是该语言的译文\n" +
-            "· 关键判断的自动检查补齐了：上一版还没顾上的几个状态说法（校验状态、任务状态、代理类型、内存档位）和内存账本的兜底，都补上了自动检查，以后被改坏会当场拦下\n" +
-            "· 发布前多了一道体积守门：每次打包都会自动量一遍安装包大小，超过 1.5 MB 就发不出来，防止安装包不知不觉越做越大",
+            "· 嗅探更会抓了：现在很多网页用的响应式图片组、还有藏在脚本数据里、斜杠被转义过的媒体地址，都能抓出来了；file:// 这类根本下不了的假链接不再混进结果列表，在浏览器里点到时会当场说明原因。在内置浏览器里登录后嗅探到的文件，建任务时也会带上登录状态，不会再白白失败\n" +
+            "· 嗅探历史能一键重新嗅探：新建下载框里的历史记录旁多了「重新嗅探」按钮，点一下就用原来的网页地址重新抓一遍，结果和新嗅探一模一样；抓成功会顶到历史最前面，抓失败了原来的记录和上次的结果都不动\n" +
+            "· 测大小更讲礼貌，列表也更干净：测每个文件大小时，对同一个网站最多同时测 3 个，不给对方服务器添堵；同一个文件被页面用不同写法链接了几次，现在只列一行，不再重复出现",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
             "· 文件直链 → 直接开始多线程下载，还能预先改好保存文件名\n" +
@@ -8501,7 +8501,7 @@ fun TaskCard(
                     val version = runCatching {
                         ctx.packageManager.getPackageInfo(ctx.packageName, 0)
                             .versionName
-                    }.getOrNull() ?: "5.6.0"
+                    }.getOrNull() ?: "5.7.0"
                     val cm = ctx.getSystemService(
                         android.content.Context.CLIPBOARD_SERVICE,
                     ) as android.content.ClipboardManager
