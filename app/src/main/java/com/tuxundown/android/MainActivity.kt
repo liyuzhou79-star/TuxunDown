@@ -1414,6 +1414,11 @@ fun DownApp() {
             // is judged, so a link appearing twice in one batch
             // creates once and counts once as a duplicate.
             var dupSkipped = 0
+            // v7.7 (audit round 62, B-2): the whole loop is ONE
+            // store batch — its adds ride the coalesced save
+            // and flush once at the end instead of one full
+            // store write per created task (see BatchAddGate).
+            store.batchAdds {
             for (line in batchLines) {
                 val make: String? = when {
                     FtpClient.isFtpUrl(line) -> line
@@ -1439,6 +1444,7 @@ fun DownApp() {
                         CreateOutcome.REJECTED -> skipped++
                     }
                 }
+            }
             }
             activity.runOnUiThread {
                 Toast.makeText(
@@ -3540,12 +3546,16 @@ fun DownApp() {
                         // v5.4: batch summary names the duplicates
                         // it skipped (per-link toast quieted).
                         var dupSkipped = 0
+                        // v7.7 (B-2): a multi-select create is
+                        // one store batch (one final flush).
+                        store.batchAdds {
                         for (res in chosen) {
                             when (createTask(res.url, sniffPage, quietDuplicate = true)) {
                                 CreateOutcome.CREATED -> created++
                                 CreateOutcome.DUPLICATE -> dupSkipped++
                                 CreateOutcome.REJECTED -> Unit
                             }
+                        }
                         }
                         if (chosen.isEmpty()) {
                             Toast.makeText(context, "先勾选要下载的资源", Toast.LENGTH_SHORT).show()

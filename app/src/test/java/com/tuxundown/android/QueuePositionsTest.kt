@@ -336,6 +336,143 @@ class QueuePositionsTest {
         assertFalse(sig == QueueOrder.queuePositionsSignature(base, 0))
     }
 
+    // ---- v7.7 (B-1): the O(n + picks) simulation must equal
+    // ---- the old per-pick simulation, bit for bit ----
+
+    /** The OLD queuePositions algorithm, reproduced on the
+     *  public drain surface: repeatedly take [nextEligible]
+     *  (which reads the global rotation memory), noteServed
+     *  the pick, remove it. The old implementation ran exactly
+     *  this sequence of pickWithServed calls against a LOCAL
+     *  copy of the memory; driving the global memory through
+     *  the same picks is the same sequence. */
+    private fun oldSimulation(
+        tasks: List<TaskRecord>,
+        now: Long,
+        excludeIds: Set<String>,
+    ): Map<String, Int> {
+        val remaining = tasks.toMutableList()
+        val positions = LinkedHashMap<String, Int>()
+        var nextPosition = 1
+        while (true) {
+            val picked = QueueOrder.nextEligible(remaining, now, excludeIds) ?: break
+            positions[picked.id] = nextPosition++
+            QueueOrder.noteServed(picked)
+            remaining.remove(picked)
+        }
+        return positions
+    }
+
+    private fun setServedHost(host: String?) {
+        QueueOrder.clearServedMemory()
+        if (host != null) {
+            QueueOrder.noteServed(
+                TaskRecord(url = "https://$host/seed", status = TaskStatus.QUEUED),
+            )
+        }
+    }
+
+    /** One generated task set across every dimension the pick
+     *  chain reads: statuses, priorities (incl. out-of-range
+     *  values the clamp folds to NORMAL), aging on both sides
+     *  of the promote line (queuedAt stamped / unstamped),
+     *  jumped, all three park flags, not-yet-due and due
+     *  scheduled tasks, and a small host pool so rotation runs
+     *  (incl. same-host neighbours around a differing host)
+     *  actually form. List order is shuffled — it is an input. */
+    private fun generatedSet(
+        rnd: java.util.Random,
+        count: Int,
+        now: Long,
+    ): List<TaskRecord> {
+        val hosts = arrayOf(
+            "a.example.com", "a.example.com", "b.example.com",
+            "c.example.com", "d.example.com",
+        )
+        val statuses = TaskStatus.values()
+        val out = ArrayList<TaskRecord>(count)
+        for (i in 0 until count) {
+            val t = TaskRecord(
+                url = "https://${hosts[rnd.nextInt(hosts.size)]}/f$i",
+                status = if (rnd.nextInt(10) < 7) {
+                    TaskStatus.QUEUED
+                } else {
+                    statuses[rnd.nextInt(statuses.size)]
+                },
+                priority = intArrayOf(-1, 0, 1, 1, 0, -1, 2, -3)[rnd.nextInt(8)],
+                createdAt = now - rnd.nextInt(4_000_000),
+                scheduledAt = when (rnd.nextInt(4)) {
+                    0 -> now + rnd.nextInt(100_000)
+                    1 -> now - rnd.nextInt(100_000)
+                    else -> 0L
+                },
+            )
+            if (rnd.nextInt(4) > 0) t.queuedAt = now - rnd.nextInt(4_000_000)
+            if (rnd.nextInt(4) == 0) t.jumpedAt = 1L + rnd.nextInt(100_000)
+            if (rnd.nextInt(8) == 0) t.netDeferred = true
+            if (rnd.nextInt(8) == 0) t.portalDeferred = true
+            if (rnd.nextInt(8) == 0) t.chargeDeferred = true
+            out.add(t)
+        }
+        out.shuffle(rnd)
+        return out
+    }
+
+    @Test
+    fun newSimulationMatchesOldAlgorithmOnGeneratedSets() {
+        val now = 300_000_000L
+        for (seed in 1L..40L) {
+            val rnd = java.util.Random(seed)
+            val tasks = generatedSet(rnd, rnd.nextInt(61), now)
+            val excludeIds = tasks.filter { rnd.nextInt(5) == 0 }.map { it.id }.toSet()
+            val startHost = when (rnd.nextInt(4)) {
+                0 -> null
+                1 -> "a.example.com"
+                2 -> "b.example.com"
+                else -> "zzz.example.com"
+            }
+            setServedHost(startHost)
+            val expected = oldSimulation(tasks, now, excludeIds)
+            setServedHost(startHost)
+            val actual = QueueOrder.queuePositions(tasks, now, excludeIds)
+            assertEquals("seed $seed", expected, actual)
+        }
+    }
+
+    @Test
+    fun newSimulationMatchesOldAlgorithmOnALargeSet() {
+        val now = 300_000_000L
+        val rnd = java.util.Random(987_654_321L)
+        val tasks = generatedSet(rnd, 400, now)
+        val excludeIds = tasks.filter { rnd.nextInt(7) == 0 }.map { it.id }.toSet()
+        setServedHost("c.example.com")
+        val expected = oldSimulation(tasks, now, excludeIds)
+        setServedHost("c.example.com")
+        assertEquals(expected, QueueOrder.queuePositions(tasks, now, excludeIds))
+    }
+
+    @Test
+    fun rotationMergesSameHostNeighboursAroundAnEmptiedRun() {
+        // [A, A, B, A] with A just served: rotation takes B
+        // first, then the A tasks in list order — after B's
+        // run empties, the two A runs are ONE run for the
+        // "first host that differs" scan.
+        val a1 = hostTask("a.example.com")
+        val a2 = hostTask("a.example.com")
+        val b = hostTask("b.example.com")
+        val a3 = hostTask("a.example.com")
+        val tasks = listOf(a1, a2, b, a3)
+        setServedHost("a.example.com")
+        val expected = oldSimulation(tasks, 0, emptySet())
+        setServedHost("a.example.com")
+        val actual = QueueOrder.queuePositions(tasks, 0)
+        assertEquals(expected, actual)
+        assertEquals(1, actual[b.id])
+        assertEquals(2, actual[a1.id])
+        assertEquals(3, actual[a2.id])
+        assertEquals(4, actual[a3.id])
+    }
+
     @Test
     fun emptyOrNothingQueuedReturnsEmptyMap() {
         assertTrue(QueueOrder.queuePositions(emptyList(), 0).isEmpty())

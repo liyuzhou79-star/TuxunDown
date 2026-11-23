@@ -612,6 +612,33 @@ class TaskStore(context: Context) {
     @Volatile
     var onTaskAdded: ((TaskRecord) -> Unit)? = null
 
+    /**
+     * v7.7 (audit round 62, B-2): batch-add gate — see
+     * [BatchAddGate]. While a batch is open, [add] rides the
+     * coalesced [save] instead of flushing the whole store per
+     * record; [endBatchAdds] performs the batch's ONE [saveNow]
+     * when the outermost batch closes. Mirrors the [removeAll]
+     * single-flush precedent on the removal side.
+     */
+    private val batchAddGate = BatchAddGate()
+
+    fun beginBatchAdds() = batchAddGate.begin()
+
+    fun endBatchAdds() {
+        if (batchAddGate.end()) saveNow()
+    }
+
+    /** Run [block] as one batch of adds: exactly one full
+     *  flush, at the end, even when [block] throws. */
+    fun <T> batchAdds(block: () -> T): T {
+        beginBatchAdds()
+        try {
+            return block()
+        } finally {
+            endBatchAdds()
+        }
+    }
+
     fun add(t: TaskRecord): TaskRecord {
         // v7.1: add() is the ONE funnel every task-creation
         // entry passes through (home create / sniff / scan /
@@ -625,7 +652,11 @@ class TaskStore(context: Context) {
             t.queuedAt = System.currentTimeMillis()
         }
         tasks.add(0, t)
-        saveNow()
+        // v7.7 (B-2): inside a batch the add rides the
+        // coalesced save and the batch's end flushes once;
+        // a single (non-batch) add keeps its immediate
+        // saveNow, unchanged.
+        if (batchAddGate.inBatch()) save() else saveNow()
         runCatching { onTaskAdded?.invoke(t) }
         return t
     }

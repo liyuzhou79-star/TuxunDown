@@ -58,6 +58,26 @@ package com.tuxundown.android.core
  * it at init) and a budget is read ONCE at a run's start (the
  * engine snapshots it at construction); a running task's buffers
  * are NEVER resized mid-run.
+ *
+ * v7.7 (audit round 62): whole-process resource ceilings,
+ * re-counted over the full pool / thread / fd inventory and
+ * pinned here as numbers (comment only — the budgets above
+ * are the mechanism; round 62 confirmed NO unbounded-growth
+ * path anywhere, so no new guard was built):
+ *   threads: steady 138 (128 connection workers + 5 samplers
+ *     + 5 engine at the 128 cap, maxConcurrent 5); realistic
+ *     transient peak ~210-230 (GrowthRamp caps the initial
+ *     grant at <= 16 and steps by max(8, desired/4) per 2 s
+ *     tick, so the old ~250 burst no longer stacks); formal
+ *     stacked peak < ~550 — ~21% of the ~1000-thread 32-bit
+ *     pthread_create trouble zone, >= 4.7x headroom.
+ *   file descriptors: realistic ~210-260, formal stacked
+ *     ~490 — >= 4x / >= 2x under the 1024 soft limit.
+ *   memory: the three tier totals above are the whole-process
+ *     account — LOW ~111 MB, STANDARD ~185 MB (under the
+ *     192 MB floor; the formal 197 MB fat-1500 mix is
+ *     unreachable because the max segmented mix and the max
+ *     HLS mix are mutually exclusive), HIGH ~275 MB.
  */
 enum class MemoryTier { LOW, STANDARD, HIGH }
 

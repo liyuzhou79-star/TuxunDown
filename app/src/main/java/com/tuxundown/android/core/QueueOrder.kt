@@ -226,7 +226,10 @@ object QueueOrder {
      * the picked task from the local candidate list. There is
      * no second, approximate ordering anywhere: position 1 is
      * by construction what [nextEligible] would return for
-     * the same arguments.
+     * the same arguments. (v7.7: the simulation below computes
+     * that same sequence in O(n + picks) instead of re-running
+     * the pick core per pick — see the implementation comment;
+     * a randomized test pins the two sequences identical.)
      *
      * Only tasks the simulation actually picks get a position.
      * A QUEUED task that is not eligible right now — net-parked
@@ -264,15 +267,108 @@ object QueueOrder {
         now: Long,
         excludeIds: Set<String> = emptySet(),
     ): Map<String, Int> {
-        val remaining = tasks.toMutableList()
+        // v7.7 (audit round 62, B-1): this used to re-run
+        // [pickWithServed] over the whole remaining list for
+        // EVERY pick — O(picks x n), ~6.8M element visits plus
+        // ~4500 list allocations at 1500 all-QUEUED. The pick
+        // chain's inputs never change during a simulation —
+        // eligibility, effective tier, jumped and host are all
+        // fixed per task at [now], and a pick only REMOVES the
+        // picked task — so the eligible set is filtered ONCE
+        // and bucketed by effective tier (a small integer,
+        // TaskPriority's -1 / 0 / 1):
+        //   - picks always drain the highest remaining tier
+        //     first (the tier ring precedes jumped and
+        //     rotation), so buckets drain strictly in
+        //     descending tier order, carrying the local served
+        //     host across buckets;
+        //   - inside one tier, jumped tasks go first, in list
+        //     order (the jumped ring precedes rotation on
+        //     every pick, so they drain consecutively);
+        //   - the rest is a rotation simulation over RUNS of
+        //     equal host: a pick is the first run's head when
+        //     its host differs from the served host (or none
+        //     was served yet, or it is the only run), and the
+        //     second run's head when the first run's host IS
+        //     the served host (the whole first run is then
+        //     rotation-ineligible, and the second run's head
+        //     is the first element that differs). Runs are an
+        //     index-linked list, so each pick is O(1); a task
+        //     changes runs at most once (when an emptied second
+        //     run lets its same-host neighbours merge), which
+        //     keeps the whole simulation O(n + picks).
+        // Equivalence with the old per-pick [pickWithServed]
+        // simulation is pinned by a randomized test in
+        // QueuePositionsTest. [nextEligible] / [pickWithServed]
+        // themselves are UNCHANGED — the drain never takes
+        // this path.
+        val byTier = HashMap<Int, MutableList<TaskRecord>>()
+        for (t in tasks) {
+            if (t.status == TaskStatus.QUEUED && t.id !in excludeIds && !t.netDeferred &&
+                !t.portalDeferred && !(t.scheduledAt > 0 && t.scheduledAt > now)
+            ) {
+                byTier.getOrPut(effectiveTier(t, now)) { mutableListOf() }.add(t)
+            }
+        }
+        if (byTier.isEmpty()) return emptyMap()
         val positions = LinkedHashMap<String, Int>()
         var servedHost = lastServedHost
         var nextPosition = 1
-        while (true) {
-            val picked = pickWithServed(remaining, now, excludeIds, servedHost) ?: break
-            positions[picked.id] = nextPosition++
-            servedHost = HostMemory.hostOf(picked.url)
-            remaining.remove(picked)
+        for (tier in byTier.keys.sortedDescending()) {
+            val bucket = byTier.getValue(tier)
+            val plain = ArrayList<TaskRecord>(bucket.size)
+            for (t in bucket) {
+                if (t.jumpedAt > 0) {
+                    positions[t.id] = nextPosition++
+                    servedHost = HostMemory.hostOf(t.url)
+                } else {
+                    plain.add(t)
+                }
+            }
+            // Rotation over runs of equal host, index-linked.
+            class Run(
+                val host: String,
+                val items: java.util.ArrayDeque<TaskRecord>,
+                var next: Int = -1,
+            )
+            val runs = ArrayList<Run>()
+            for (t in plain) {
+                val host = HostMemory.hostOf(t.url)
+                val last = runs.lastOrNull()
+                if (last != null && last.host == host) {
+                    last.items.addLast(t)
+                } else {
+                    if (last != null) last.next = runs.size
+                    runs.add(Run(host, java.util.ArrayDeque<TaskRecord>().apply { addLast(t) }))
+                }
+            }
+            var head = if (runs.isEmpty()) -1 else 0
+            while (head >= 0) {
+                val first = runs[head]
+                val secondIdx = first.next
+                val pickSecond =
+                    servedHost != null && first.host == servedHost && secondIdx >= 0
+                val run = if (pickSecond) runs[secondIdx] else first
+                val picked = run.items.removeFirst()
+                positions[picked.id] = nextPosition++
+                servedHost = run.host
+                if (run.items.isEmpty()) {
+                    if (pickSecond) {
+                        first.next = run.next
+                        // An emptied second run can leave its
+                        // neighbours sharing one host (A B A):
+                        // for the next "first host that differs"
+                        // scan they are ONE run, so merge them.
+                        val newSecond = first.next
+                        if (newSecond >= 0 && runs[newSecond].host == first.host) {
+                            first.items.addAll(runs[newSecond].items)
+                            first.next = runs[newSecond].next
+                        }
+                    } else {
+                        head = run.next
+                    }
+                }
+            }
         }
         return positions
     }
@@ -340,8 +436,8 @@ object QueueOrder {
      * v7.6 (Step B-6): a single-entry memo over
      * [queuePositions], keyed by [queuePositionsSignature].
      * The UI recomputes positions on every live-tick beat;
-     * the simulation is O(picks × eligible scan) while the
-     * signature is one O(n) pass, so beats where nothing
+     * the simulation is O(n + picks) since v7.7 while the
+     * signature is one O(n) pass with smaller constants, so beats where nothing
      * queue-relevant changed (the common case while a
      * download runs) skip the simulation entirely. NOT
      * thread-safe by design: it exists for the single UI
