@@ -268,6 +268,26 @@ class SniffActivity : Activity() {
         super.onDestroy()
     }
 
+    /**
+     * v5.7 audit round 42 (item 5): the session headers a task
+     * created from inside this browser carries — the same set
+     * the download listener and the long-press path capture:
+     * the browser UA, the Cookie CookieManager holds FOR THE
+     * TARGET URL (per-domain by construction), and the page the
+     * user is standing on as Referer. The engine still scopes
+     * the Cookie per hop via SessionScope; capturing it here is
+     * what gives that scoping something to send on same-host
+     * hops.
+     */
+    private fun sessionHeaders(targetUrl: String, referer: String): Map<String, String> {
+        val headers = mutableMapOf<String, String>()
+        headers["User-Agent"] = web.settings.userAgentString ?: ""
+        runCatching { CookieManager.getInstance().getCookie(targetUrl) }
+            .getOrNull()?.let { headers["Cookie"] = it }
+        if (referer.isNotBlank()) headers["Referer"] = referer
+        return headers
+    }
+
     /** Only schemes the download engine can actually fetch. */
     private fun isDownloadableUrl(url: String): Boolean {
         val scheme = url.substringBefore(':').lowercase()
@@ -383,7 +403,19 @@ class SniffActivity : Activity() {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 when (result) {
                     is SniffResult.DirectFile -> {
-                        createTaskSmart(result.url) { outcome ->
+                        // v5.7 audit round 42 (item 5): the FAB
+                        // path used to create the task with NO
+                        // headers at all, while the download
+                        // listener and the long-press path both
+                        // capture the session (Cookie / Referer /
+                        // UA) — a login-walled direct file found
+                        // from inside the logged-in browser then
+                        // failed as if the user had never logged
+                        // in. Same capture here: the Cookie is
+                        // read for the TARGET url (CookieManager
+                        // scopes it per domain), Referer is the
+                        // page the user is standing on.
+                        createTaskSmart(result.url, sessionHeaders(result.url, pageUrl)) { outcome ->
                             when (outcome) {
                                 true -> Toast.makeText(
                                     this, "已新建下载任务", Toast.LENGTH_LONG,
@@ -415,7 +447,11 @@ class SniffActivity : Activity() {
                         dialog
                             .setItems(names) { _, which ->
                                 val res = result.resources[which]
-                                createTaskSmart(res.url) { outcome ->
+                                // v5.7 (item 5): same session
+                                // capture as the DirectFile arm.
+                                createTaskSmart(
+                                    res.url, sessionHeaders(res.url, pageUrl),
+                                ) { outcome ->
                                     when (outcome) {
                                         true -> Toast.makeText(
                                             this, "已新建下载任务", Toast.LENGTH_LONG,

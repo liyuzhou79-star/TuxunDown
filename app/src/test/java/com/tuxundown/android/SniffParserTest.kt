@@ -275,6 +275,101 @@ class SniffParserTest {
     }
 
     @Test
+    fun srcsetCandidatesAreExtracted() {
+        // v5.7 audit 42 (item 1): responsive images publish their
+        // real files ONLY in srcset; the single-value attribute
+        // pattern could never see them.
+        val page = """
+            <img src="/pics/small.jpg" srcset="/pics/mid.jpg 480w, /pics/big.jpg 800w">
+            <source srcset="https://cdn.example.com/v/thumb.webp 1x, https://cdn.example.com/v/thumb2x.webp 2x">
+        """.trimIndent()
+        val res = SniffParser.extract(page, "https://example.com/gallery/")
+        val urls = res.map { it.url }.toSet()
+        assertTrue("https://example.com/pics/mid.jpg" in urls)
+        assertTrue("https://example.com/pics/big.jpg" in urls)
+        assertTrue("https://cdn.example.com/v/thumb.webp" in urls)
+        assertTrue("https://cdn.example.com/v/thumb2x.webp" in urls)
+        assertTrue(res.filter { it.url.contains("mid.jpg") }.all { it.kind == "image" })
+    }
+
+    @Test
+    fun srcsetUrlsDropsDescriptors() {
+        assertEquals(
+            listOf("a.jpg", "b.jpg"),
+            SniffParser.srcsetUrls("a.jpg 480w, b.jpg 2x"),
+        )
+        assertEquals(listOf("only.png"), SniffParser.srcsetUrls("only.png"))
+        assertEquals(emptyList<String>(), SniffParser.srcsetUrls(" , "))
+    }
+
+    @Test
+    fun posterAndPreloadAreExtracted() {
+        // v5.7 audit 42 (item 1): poster rides the attribute pass
+        // and a preload link rides its href — pinned so a future
+        // pattern edit cannot silently drop either.
+        val page = """
+            <video poster="/media/cover.jpg" src="/media/clip.mp4"></video>
+            <link rel="preload" as="video" href="/media/next.mp4">
+        """.trimIndent()
+        val res = SniffParser.extract(page, "https://example.com/watch/")
+        val urls = res.map { it.url }.toSet()
+        assertTrue("https://example.com/media/cover.jpg" in urls)
+        assertTrue("https://example.com/media/clip.mp4" in urls)
+        assertTrue("https://example.com/media/next.mp4" in urls)
+    }
+
+    @Test
+    fun jsonEscapedMediaUrlIsFound() {
+        // v5.7 audit 42 (item 1): JSON embedded in the page
+        // escapes slashes; the media address inside must still
+        // be found by the plain-URL pass's unescaped second scan.
+        val page = """<script>var cfg = {"file":"https:\/\/cdn.example.com\/v\/clip.mp4"};</script>"""
+        val res = SniffParser.extract(page, "https://example.com/watch/9")
+        assertTrue(res.any { it.url == "https://cdn.example.com/v/clip.mp4" && it.kind == "video" })
+    }
+
+    @Test
+    fun undownloadableSchemesNeverEnterTheList() {
+        // v5.7 audit 42 (item 2): file:// DID resolve before the
+        // scheme gate and landed in the downloadable list, only
+        // failing silently at batch-create time. blob:/data:
+        // must stay out by RULE (the resolve gate), not by the
+        // accident of a missing protocol handler.
+        val page = """
+            <a href="file:///sdcard/Download/secret.zip">本地文件</a>
+            <a href="content://com.example.provider/files/app.apk">content</a>
+            <a href="blob:https://example.com/9f2c1d">blob</a>
+            <img src="data:image/png;base64,iVBORw0KGgo=">
+            <a href="/files/real.zip">真资源</a>
+        """.trimIndent()
+        val res = SniffParser.extract(page, "https://example.com/page/")
+        assertEquals(1, res.size)
+        assertEquals("https://example.com/files/real.zip", res[0].url)
+        // The gate itself, directly:
+        assertEquals(null, SniffParser.resolve("https://example.com/", "blob:https://example.com/x"))
+        assertEquals(null, SniffParser.resolve("https://example.com/", "file:///sdcard/x.zip"))
+        assertEquals(null, SniffParser.resolve("https://example.com/", "data:text/plain;base64,AAAA"))
+    }
+
+    @Test
+    fun sameResourceInDifferentSpellingsCollapsesToOneRow() {
+        // v5.7 audit 42 (item 3): fragment / host case / default
+        // port spellings of ONE file used to become separate
+        // rows; the dedupe key is now CreateDedup.normalize, the
+        // same caliber the create funnel judges by. The entry
+        // flag from any sighting survives the merge.
+        val page = """
+            <a href="https://EXAMPLE.com:443/files/app.apk#part">点击下载</a>
+            <img src="https://example.com/files/app.apk">
+            <a href="https://example.com/files/app.apk">mirror</a>
+        """.trimIndent()
+        val res = SniffParser.extract(page, "https://example.com/")
+        assertEquals(1, res.size)
+        assertEquals("apk", res[0].kind)
+        assertTrue(res[0].looksLikeDownloadEntry)
+    }
+
+    @Test
     fun entriesSortBeforeImages() {
         val page = """
             <img src="/a.png">

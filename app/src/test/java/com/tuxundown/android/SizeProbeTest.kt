@@ -36,6 +36,43 @@ class SizeProbeTest {
     }
 
     @Test
+    fun hostSlotsCapPerHostAndReleaseFrees() {
+        // v5.7 audit 42 (item 4): at most MAX_PER_HOST probes in
+        // flight per host; a release hands the slot back.
+        val slots = SizeProbe.HostSlots()
+        repeat(SizeProbe.MAX_PER_HOST) {
+            assertEquals(true, slots.tryAcquire("example.com"))
+        }
+        assertEquals(false, slots.tryAcquire("example.com"))
+        assertEquals(SizeProbe.MAX_PER_HOST, slots.inFlight("example.com"))
+        slots.release("example.com")
+        assertEquals(true, slots.tryAcquire("example.com"))
+    }
+
+    @Test
+    fun hostSlotsAreIndependentPerHost() {
+        val slots = SizeProbe.HostSlots(maxPerHost = 1)
+        assertEquals(true, slots.tryAcquire("a.example.com"))
+        assertEquals(false, slots.tryAcquire("a.example.com"))
+        // A different host has its own slot row.
+        assertEquals(true, slots.tryAcquire("b.example.com"))
+        assertEquals(1, slots.inFlight("a.example.com"))
+        assertEquals(1, slots.inFlight("b.example.com"))
+    }
+
+    @Test
+    fun hostSlotsReleaseNeverGoesNegative() {
+        val slots = SizeProbe.HostSlots(maxPerHost = 1)
+        slots.release("never-acquired.example.com")
+        assertEquals(0, slots.inFlight("never-acquired.example.com"))
+        assertEquals(true, slots.tryAcquire("never-acquired.example.com"))
+        slots.release("never-acquired.example.com")
+        slots.release("never-acquired.example.com")
+        assertEquals(0, slots.inFlight("never-acquired.example.com"))
+        assertEquals(true, slots.tryAcquire("never-acquired.example.com"))
+    }
+
+    @Test
     fun bySizeDescPutsKnownBigFirstAndUnknownLast() {
         fun res(name: String, size: Long) =
             SniffedResource(url = "https://x/$name", name = name, kind = "other", size = size)

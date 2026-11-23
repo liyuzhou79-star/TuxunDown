@@ -1,7 +1,9 @@
 package com.tuxundown.android.sniff
 
+import com.tuxundown.android.core.CreateDedup
 import com.tuxundown.android.core.DownloadEngine
 import com.tuxundown.android.core.Errors
+import com.tuxundown.android.core.SessionScope
 import com.tuxundown.android.core.ProxySettings
 import com.tuxundown.android.core.ProxyState
 import java.io.ByteArrayOutputStream
@@ -172,6 +174,24 @@ object SniffParser {
         """(?:href|src|poster|data-src|data-url|data-href|data-file)\s*=\s*["']([^"']+)["']""",
         RegexOption.IGNORE_CASE
     )
+    // v5.7 audit round 42 (item 1): srcset carries a LIST of
+    // candidates ("a.jpg 480w, b.jpg 800w"), so the single-value
+    // ATTR pattern can never match it — responsive images (the
+    // modern default on news / gallery / shop pages) were simply
+    // invisible to the static extractor. poster was already in
+    // ATTR and <link rel="preload"> rides its href, so srcset was
+    // the one real gap of the three; it gets its own pass below.
+    private val SRCSET = Regex(
+        """srcset\s*=\s*["']([^"']+)["']""",
+        RegexOption.IGNORE_CASE
+    )
+
+    /** One srcset attribute value -> its candidate URLs (the
+     *  first whitespace-separated token of each comma-separated
+     *  candidate; the "480w" / "2x" descriptors are dropped). */
+    fun srcsetUrls(value: String): List<String> =
+        value.split(',').map { it.trim().substringBefore(' ').substringBefore('\t') }
+            .filter { it.isNotEmpty() }
     private val ANCHOR = Regex(
         """<a\s+[^>]*href\s*=\s*["']([^"']+)["'][^>]*>(.*?)</a>""",
         setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
@@ -212,7 +232,24 @@ object SniffParser {
         if (r.isBlank() || r.startsWith("#") || r.startsWith("javascript:", true) ||
             r.startsWith("data:", true) || r.startsWith("mailto:", true)
         ) return null
-        return runCatching { URL(URL(base), r).toString() }.getOrNull()
+        val resolved = runCatching { URL(URL(base), r).toString() }.getOrNull()
+            ?: return null
+        // v5.7 audit round 42 (item 2): the scheme gate lives HERE,
+        // at extraction, not downstream by accident. Only schemes
+        // the engine can fetch (LinkSchemes' set: http / https /
+        // ftp) may enter a result list at all. Before this gate a
+        // file:///…x.zip reference DID resolve (java.net.URL knows
+        // the file protocol), entered the downloadable list, and
+        // only failed silently when the user ticked it and the
+        // batch create swallowed the rejection. blob: URLs died
+        // only because URL() has no blob handler — an accident,
+        // not a rule. Undownloadable schemes are excluded here;
+        // the surfaces where they arrive as a user action (the
+        // WebView download listener, the create funnel) refuse
+        // them with a plain reason instead.
+        val scheme = resolved.substringBefore(':').lowercase()
+        if (scheme != "http" && scheme != "https" && scheme != "ftp") return null
+        return resolved
     }
 
     /** The target of a <meta http-equiv="refresh"> jump, if the page has one. */
@@ -259,7 +296,7 @@ object SniffParser {
     }
 
     /**
-     * v4.3 parse budget. The four findAll passes below run over a
+     * v4.3 parse budget. The findAll passes below run over a
      * page body of up to 4 MB with no natural bound on their work:
      * a pathological page (tens of thousands of anchors, one anchor
      * whose text runs for megabytes under DOT_MATCHES_ALL) could
@@ -323,6 +360,18 @@ object SniffParser {
             if (!truncated && nowMs() > deadline) truncated = true
             return truncated
         }
+        // v5.7 audit round 42 (item 3): the dedupe key is the
+        // SAME normalization the task funnel judges duplicates
+        // by (CreateDedup.normalize: fragment dropped, scheme +
+        // host lowercased, default port dropped). Before this,
+        // the passes below keyed on the raw resolved string, so
+        // one file linked as "a.zip#part", "EXAMPLE.com/a.zip"
+        // and "example.com:443/a.zip" became THREE rows that the
+        // create funnel would then collapse to one task — the
+        // list and the funnel disagreed about what "the same
+        // resource" means. The row keeps the FIRST-seen URL
+        // string; the entry flag ORs across sightings and a
+        // later pass's real kind still wins over "other".
         val byUrl = linkedMapOf<String, SniffedResource>()
         fun add(url: String, kind: String?, entry: Boolean) {
             // v1.6: extensionless links on known file hosts (GitHub
@@ -330,10 +379,11 @@ object SniffParser {
             // count as downloadable entries via the site patterns.
             val patterned = if (kind == null) patternKind(url) else null
             if (kind == null && patterned == null && !entry) return
-            val prev = byUrl[url]
-            byUrl[url] = SniffedResource(
-                url = url,
-                name = DownloadEngine.fileNameFrom(null, url),
+            val key = CreateDedup.normalize(url)
+            val prev = byUrl[key]
+            byUrl[key] = SniffedResource(
+                url = prev?.url ?: url,
+                name = DownloadEngine.fileNameFrom(null, prev?.url ?: url),
                 kind = kind ?: patterned ?: (prev?.kind ?: "other"),
                 looksLikeDownloadEntry = entry || patterned != null ||
                     (prev?.looksLikeDownloadEntry == true),
@@ -371,19 +421,45 @@ object SniffParser {
                 add(resolved, kindOf(resolved), false)
             }
         }
-        // Finally raw URLs embedded in text or scripts (var downUrl = "http://...").
+        // v5.7 audit round 42 (item 1): srcset candidates — each
+        // comma-separated candidate's first token is a URL the
+        // browser would really fetch for this image.
         if (!passExpired()) {
-            for (m in PLAIN_URL.findAll(html)) {
+            for (m in SRCSET.findAll(html)) {
                 if (!budgetLeft()) break
-                val raw = m.value.trimEnd('.', ',', ';')
-                val resolved = resolve(baseUrl, raw) ?: continue
-                // Audit A13: a bare script/text URL counts as a download
-                // ENTRY only when it really points at a file. v1.2 marked
-                // ANY raw URL containing "download" as an entry, so one
-                // stray analytics/CDN URL could become the "single path"
-                // that layer 2 auto-follows instead of listing choices.
-                val kind = kindOf(resolved)
-                add(resolved, kind, kind != null && resolved.contains("download", true))
+                for (candidate in srcsetUrls(m.groupValues[1])) {
+                    val resolved = resolve(baseUrl, candidate) ?: continue
+                    add(resolved, kindOf(resolved), false)
+                }
+            }
+        }
+        // Finally raw URLs embedded in text or scripts (var downUrl = "http://...").
+        // v5.7 audit round 42 (item 1): JSON embedded in pages
+        // escapes its slashes ("https:\/\/cdn…\/a.zip"), which the
+        // plain pattern cannot see; a second scan over a copy with
+        // "\/" unescaped catches those. Truly runtime-built URLs
+        // (string concatenation, XHR responses assembled by JS)
+        // stay out of reach BY DESIGN — the static layer is not a
+        // JS engine; the WebView layer covers those when the user
+        // taps through to the real download (see CHECKPOINT).
+        if (!passExpired()) {
+            val unescaped = if (html.contains("\\/")) html.replace("\\/", "/") else null
+            val scans = listOfNotNull(html, unescaped)
+            for (scan in scans) {
+                if (passExpired()) break
+                for (m in PLAIN_URL.findAll(scan)) {
+                    if (!budgetLeft()) break
+                    val raw = m.value.trimEnd('.', ',', ';')
+                    val resolved = resolve(baseUrl, raw) ?: continue
+                    // Audit A13: a bare script/text URL counts as a download
+                    // ENTRY only when it really points at a file. v1.2 marked
+                    // ANY raw URL containing "download" as an entry, so one
+                    // stray analytics/CDN URL could become the "single path"
+                    // that layer 2 auto-follows instead of listing choices.
+                    val kind = kindOf(resolved)
+                    add(resolved, kind, kind != null && resolved.contains("download", true))
+                }
+                if (truncated) break
             }
         }
         // Download entries first, files before images, images last.
@@ -702,6 +778,51 @@ object SizeProbe {
     const val TIMEOUT_MS = 4_000
 
     /**
+     * v5.7 audit round 42 (item 4): per-host in-flight cap.
+     * Before this, the pool's 8 threads were the ONLY limit, and
+     * a page whose 50 probed resources all live on ONE host —
+     * the common case — got 8 concurrent probes, each of which
+     * is up to TWO requests (HEAD, then the Range fallback):
+     * ~8 requests in the first instant and up to ~100 inside the
+     * budget, all at the very host the user is about to download
+     * from. A per-IP rate limiter on that host would then punish
+     * the user's real downloads. Three in flight per host keeps
+     * probing polite (different hosts still parallelise up to
+     * the pool's 8) at no honest cost: 50 same-host probes at
+     * 3-wide finish well inside the 45 s budget on any server
+     * that answers in the 4 s timeout at all.
+     */
+    const val MAX_PER_HOST = 3
+
+    /**
+     * Pure per-host slot counter behind [MAX_PER_HOST]:
+     * [tryAcquire] hands out at most [maxPerHost] concurrent
+     * slots per host key, hosts are independent, [release]
+     * returns a slot and never drives a count negative.
+     * Synchronized — safe to share across the probe pool.
+     */
+    class HostSlots(private val maxPerHost: Int = MAX_PER_HOST) {
+        private val counts = HashMap<String, Int>()
+
+        @Synchronized
+        fun tryAcquire(host: String): Boolean {
+            val n = counts[host] ?: 0
+            if (n >= maxPerHost) return false
+            counts[host] = n + 1
+            return true
+        }
+
+        @Synchronized
+        fun release(host: String) {
+            val n = (counts[host] ?: 0) - 1
+            if (n <= 0) counts.remove(host) else counts[host] = n
+        }
+
+        @Synchronized
+        fun inFlight(host: String): Int = counts[host] ?: 0
+    }
+
+    /**
      * v4.3: overall wall-clock budget for one [probeAll] run.
      * Before this cap, the worst case stacked up badly: each
      * future was awaited for up to TIMEOUT_MS * 3 = 12 s one by
@@ -743,16 +864,45 @@ object SizeProbe {
         val targets = resources.take(MAX_PROBED)
         val pool = java.util.concurrent.Executors.newFixedThreadPool(THREADS)
         try {
+            // v5.7 (item 4): the deadline is fixed BEFORE the
+            // futures are submitted so a probe thread waiting for
+            // a per-host slot waits only within the same budget
+            // the await loop below enforces.
+            val deadline = System.currentTimeMillis() + TOTAL_BUDGET_MS
+            val slots = HostSlots()
             val futures = targets.map { res ->
                 pool.submit(java.util.concurrent.Callable {
-                    res.copy(size = probeOne(res.url, userAgent))
+                    // Host key: SessionScope's lowercased host
+                    // parse; an unparseable URL keys on itself, so
+                    // it can only ever crowd its own slot row.
+                    val host = SessionScope.hostOf(res.url) ?: res.url
+                    var acquired = false
+                    try {
+                        while (!acquired) {
+                            if (slots.tryAcquire(host)) {
+                                acquired = true
+                            } else if (remainingMs(
+                                    deadline, System.currentTimeMillis(),
+                                ) <= 0
+                            ) {
+                                // Budget spent waiting politely:
+                                // stay unmeasured, as any probe
+                                // that runs out of budget does.
+                                return@Callable res
+                            } else {
+                                Thread.sleep(25)
+                            }
+                        }
+                        res.copy(size = probeOne(res.url, userAgent))
+                    } finally {
+                        if (acquired) slots.release(host)
+                    }
                 })
             }
             // v4.3: each future is awaited only for what is left
             // of the overall budget (and never more than the old
             // per-future cap); once the budget is spent the rest
             // stay unmeasured instead of stacking up waits.
-            val deadline = System.currentTimeMillis() + TOTAL_BUDGET_MS
             val probed = futures.map { f ->
                 val wait = minOf(
                     TIMEOUT_MS * 3L,
@@ -766,8 +916,12 @@ object SizeProbe {
                     }.getOrNull()
                 }
             }
-            val byUrl = probed.filterNotNull().associateBy { it.url }
-            return resources.map { byUrl[it.url] ?: it }
+            // v5.7 (item 3): the merge back into the shown list
+            // uses the same normalized key as extraction and
+            // task dedupe, never the raw string.
+            val byUrl = probed.filterNotNull()
+                .associateBy { CreateDedup.normalize(it.url) }
+            return resources.map { byUrl[CreateDedup.normalize(it.url)] ?: it }
         } finally {
             pool.shutdownNow()
         }
