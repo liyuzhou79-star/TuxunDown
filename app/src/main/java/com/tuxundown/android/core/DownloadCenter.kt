@@ -752,6 +752,18 @@ object DownloadCenter {
             syncProxyState()
         }
 
+    /**
+     * v7.2 (audit round 57, Step C): the proxy password's
+     * storage MODE for the diagnostics 「安全现状」 section,
+     * classified from the raw stored form's shape only
+     * (see SecurityStatus.proxyPassStorageOf). This reads
+     * the stored value's prefix / blankness and nothing
+     * else — it never decrypts it and never hands the
+     * value (or any part of it) to the caller.
+     */
+    fun proxyPassStorageStatus(): SecurityStatus.ProxyPassStorage =
+        SecurityStatus.proxyPassStorageOf(pString("proxyPass", ""))
+
     fun proxySettings(): ProxySettings = ProxySettings(
         enabled = proxyEnabled,
         type = proxyType,

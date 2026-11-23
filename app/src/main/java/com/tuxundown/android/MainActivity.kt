@@ -130,6 +130,7 @@ import com.tuxundown.android.core.Format
 import com.tuxundown.android.core.GhostMark
 import com.tuxundown.android.core.GhostSnapshot
 import com.tuxundown.android.core.HealthCheck
+import com.tuxundown.android.core.SecurityStatus
 import com.tuxundown.android.core.HelpTopics
 import com.tuxundown.android.core.ThermalStatus
 import com.tuxundown.android.core.HostMemory
@@ -6610,6 +6611,60 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
                 )
                 if (startupText != null) {
                     InfoRow("上次启动耗时", startupText)
+                }
+            }
+        }
+        // ---- v7.2 (audit round 57, Step C): 安全现状 — a
+        // read-only snapshot, all from runtime reads made
+        // once for this page visit: the permissions this app
+        // declares and the exported-component count come
+        // from the PackageManager's record of THIS install,
+        // and the proxy-password row reports only HOW the
+        // password is stored (its value is never read for
+        // display). A read that fails drops its row; if
+        // every read fails the whole group is absent (see
+        // SecurityStatus for the pinned caliber). ----
+        item(key = "d-security") {
+            val securityLines = remember {
+                val pm = context.packageManager
+                val permissionNames = runCatching {
+                    @Suppress("DEPRECATION")
+                    pm.getPackageInfo(
+                        context.packageName,
+                        android.content.pm.PackageManager.GET_PERMISSIONS,
+                    ).requestedPermissions?.toList()
+                }.getOrNull()
+                val exportedCount = runCatching {
+                    @Suppress("DEPRECATION")
+                    val pi = pm.getPackageInfo(
+                        context.packageName,
+                        android.content.pm.PackageManager.GET_ACTIVITIES or
+                            android.content.pm.PackageManager.GET_SERVICES or
+                            android.content.pm.PackageManager.GET_RECEIVERS or
+                            android.content.pm.PackageManager.GET_PROVIDERS,
+                    )
+                    val components =
+                        mutableListOf<android.content.pm.ComponentInfo>()
+                    pi.activities?.let { components.addAll(it) }
+                    pi.services?.let { components.addAll(it) }
+                    pi.receivers?.let { components.addAll(it) }
+                    pi.providers?.let { components.addAll(it) }
+                    components.count { it.exported }
+                }.getOrNull()
+                SecurityStatus.lines(
+                    SecurityStatus.Snapshot(
+                        permissionNames = permissionNames,
+                        exportedComponentCount = exportedCount,
+                        proxyPassStorage =
+                            DownloadCenter.proxyPassStorageStatus(),
+                    )
+                )
+            }
+            if (securityLines.isNotEmpty()) {
+                SettingsGroup("安全现状") {
+                    for ((label, value) in securityLines) {
+                        InfoRow(label, value)
+                    }
                 }
             }
         }
