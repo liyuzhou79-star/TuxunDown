@@ -6316,6 +6316,13 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
     // snapshot the results below are judged against, not a
     // live counter).
     var ccRunningAtStart by remember { mutableStateOf(0) }
+    // v8.1: when the current results finished (epoch ms), for
+    // the copy-text出口's 实测时间 line; 0 = no finished run.
+    // ccTestedUrl snapshots the link at start — the field can
+    // be edited after a run, and the copied text must name the
+    // link that was actually measured.
+    var ccFinishedAt by remember { mutableStateOf(0L) }
+    var ccTestedUrl by remember { mutableStateOf("") }
     var ccTestRef by remember { mutableStateOf<SpeedTest?>(null) }
     // Leaving the screen stops the comparison (same rule as the
     // speed-test page: it would keep burning data otherwise).
@@ -6337,6 +6344,8 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
         }
         ccRunning = true
         ccResults = emptyList()
+        ccFinishedAt = 0L
+        ccTestedUrl = url
         ccAppliedThreads = 0
         ccLiveBps = 0
         ccPhase = "准备实测…"
@@ -6371,6 +6380,9 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
             ccPost {
                 ccRunning = false
                 ccLiveBps = 0
+                if (out.isNotEmpty()) {
+                    ccFinishedAt = System.currentTimeMillis()
+                }
                 ccPhase = when {
                     test.cancelled -> "已取消（已测完的档位保留在下面）"
                     out.isEmpty() -> ""
@@ -7211,6 +7223,34 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
                                 modifier = Modifier.padding(top = 6.dp),
                             )
                         }
+                    }
+                    // v8.1: plain-text出口 for the finished run
+                    // (same显隐口径 as the apply button above:
+                    // results present and not running).
+                    if (!ccRunning) {
+                        Spacer(Modifier.height(10.dp))
+                        OutlinedButton(
+                            onClick = {
+                                runCatching {
+                                    val cm = context.getSystemService(
+                                        android.content.Context.CLIPBOARD_SERVICE
+                                    ) as android.content.ClipboardManager
+                                    cm.setPrimaryClip(
+                                        android.content.ClipData.newPlainText(
+                                            "连接数对比实测结果",
+                                            ConnCompare.copyText(
+                                                ccTestedUrl, ccResults, ccFinishedAt,
+                                            ),
+                                        )
+                                    )
+                                }
+                                Toast.makeText(
+                                    context, "实测结果已复制，去粘贴发送就行",
+                                    Toast.LENGTH_SHORT,
+                                ).show()
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("复制结果") }
                     }
                 }
                 Spacer(Modifier.height(12.dp))

@@ -99,6 +99,59 @@ object ConnCompare {
         return "开始实测时有 $runningAtStart 个任务正在下载，它们会抢带宽，这次结果会偏低。"
     }
 
+    /**
+     * v8.1: the plain-text form of a finished run, for the
+     * results区「复制结果」出口. Every number is rendered with
+     * the SAME formatter the screen itself uses ([Format.speed]
+     * and the same %.1f window seconds), so the copy can never
+     * disagree with what the user saw; the per-tier lines mirror
+     * the on-screen InfoRow wording, fastest tier marker
+     * included. The link passes through [Redact.forCopy] — the
+     * one redactor every copy出口 uses — so a signed link's
+     * query (token / key …) never leaves the device. The
+     * conclusion is the section's own verdict: [bestTier],
+     * or the screen's all-zero sentence verbatim when no tier
+     * moved. [testedAtMs] renders via [Format.dateTime]; a
+     * non-positive time drops the line instead of printing a
+     * fake one.
+     */
+    fun copyText(
+        url: String,
+        results: List<TierResult>,
+        testedAtMs: Long,
+    ): String {
+        val best = bestTier(results)
+        val sb = StringBuilder()
+        sb.append("连接数对比实测结果\n")
+        sb.append("被测链接：").append(Redact.forCopy(url.trim())).append('\n')
+        val whenText = Format.dateTime(testedAtMs)
+        if (whenText.isNotBlank()) {
+            sb.append("实测时间：").append(whenText).append('\n')
+        }
+        for (r in results) {
+            sb.append(r.connections).append(" 条连接：")
+            if (r.bps > 0) {
+                sb.append(Format.speed(r.bps))
+                    .append("（稳态约 ")
+                    .append("%.1f".format(r.windowMs / 1000.0))
+                    .append(" 秒）")
+                if (best != null && r.connections == best.connections) {
+                    sb.append(" ← 最快")
+                }
+            } else {
+                sb.append("没测出速度（链接可能不支持或已失效）")
+            }
+            sb.append('\n')
+        }
+        if (best != null) {
+            sb.append("结论：最快的是 ").append(best.connections)
+                .append(" 条连接（").append(Format.speed(best.bps)).append("）。")
+        } else {
+            sb.append("结论：各档都没测出速度：这个链接多半已经失效，或者服务器不给数据。")
+        }
+        return sb.toString()
+    }
+
     fun consentText(): String {
         val tiers = TIERS.joinToString("、")
         val seconds = PHASE_MS / 1000

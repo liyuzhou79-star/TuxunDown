@@ -2,7 +2,9 @@ package com.tuxundown.android
 
 import com.tuxundown.android.core.ConnCompare
 import com.tuxundown.android.core.DownloadEngine
+import com.tuxundown.android.core.Format
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -125,6 +127,73 @@ class ConnCompareTest {
         assertTrue(note.contains("抢带宽"))
         assertTrue(!note.contains("暂停"))
         assertTrue(!note.contains("让路"))
+    }
+
+    @Test
+    fun copyTextContainsEveryRunTierSpeedAndTheConclusion() {
+        // Only the tiers that actually ran appear — a partial
+        // run (cancelled at 32) must not invent the 64 / 128
+        // lines. Speeds render through Format.speed, the same
+        // formatter the screen uses, so copy and screen agree.
+        val results = listOf(
+            tier(4, 1_000_000),
+            tier(16, 4_000_000),
+            tier(32, 3_000_000),
+        )
+        val at = 1_763_800_000_000L
+        val text = ConnCompare.copyText("https://example.com/big.iso", results, at)
+        for (r in results) {
+            assertTrue(text.contains("${r.connections} 条连接：${Format.speed(r.bps)}"))
+        }
+        assertFalse(text.contains("64 条连接"))
+        assertFalse(text.contains("128 条连接"))
+        // The fastest tier is marked and named in the conclusion.
+        assertTrue(text.contains("16 条连接：${Format.speed(4_000_000)}"))
+        assertTrue(text.contains("← 最快"))
+        assertTrue(text.contains("结论：最快的是 16 条连接（${Format.speed(4_000_000)}）"))
+        // Link and measurement time are both in the text.
+        assertTrue(text.contains("被测链接：https://example.com/big.iso"))
+        assertTrue(text.contains("实测时间：${Format.dateTime(at)}"))
+    }
+
+    @Test
+    fun copyTextNeverLeaksSecretQueryParams() {
+        // A signed link: the token / key VALUES must not appear
+        // anywhere in the copied text (Redact.forCopy caliber —
+        // the query collapses to the hidden marker).
+        val url = "https://cdn.example.com/f.zip" +
+            "?token=SECRETTOKEN12345&access_token=AKIA-FAKE-999&key=hunter2hunter2"
+        val text = ConnCompare.copyText(
+            url, listOf(tier(4, 1_000_000)), 1_763_800_000_000L,
+        )
+        assertFalse(text.contains("SECRETTOKEN12345"))
+        assertFalse(text.contains("AKIA-FAKE-999"))
+        assertFalse(text.contains("hunter2hunter2"))
+        assertTrue(text.contains("参数已隐藏"))
+        // The non-secret part of the link still reads fine.
+        assertTrue(text.contains("https://cdn.example.com/f.zip"))
+    }
+
+    @Test
+    fun copyTextAllZeroTiersUsesTheNoSpeedConclusion() {
+        val text = ConnCompare.copyText(
+            "https://example.com/dead.bin",
+            listOf(tier(4, 0), tier(16, 0)),
+            1_763_800_000_000L,
+        )
+        assertTrue(text.contains("4 条连接：没测出速度（链接可能不支持或已失效）"))
+        assertTrue(
+            text.contains("结论：各档都没测出速度：这个链接多半已经失效，或者服务器不给数据。")
+        )
+        assertFalse(text.contains("最快的是"))
+    }
+
+    @Test
+    fun copyTextDropsTheTimeLineWhenTheTimeIsUnknown() {
+        val text = ConnCompare.copyText(
+            "https://example.com/big.iso", listOf(tier(4, 1_000_000)), 0L,
+        )
+        assertFalse(text.contains("实测时间"))
     }
 
     @Test
