@@ -54,6 +54,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -104,6 +106,7 @@ import com.tuxundown.android.core.BatchRename
 import com.tuxundown.android.core.ChargeGuard
 import com.tuxundown.android.core.BulkControl
 import com.tuxundown.android.core.CardFields
+import com.tuxundown.android.core.CardQuickMenu
 import com.tuxundown.android.core.Changelog
 import com.tuxundown.android.core.Checksum
 import com.tuxundown.android.core.ChunkMap
@@ -7950,6 +7953,51 @@ fun TaskCard(
     // are NOT composable context) can use it — the diagnostics
     // copy button below needs it.
     val context = LocalContext.current
+    // v6.2 step B: long-press quick menu open state.
+    var quickMenuOpen by remember(task.id) { mutableStateOf(false) }
+    // v6.2 step B: the two clipboard actions live ONCE here —
+    // the expanded-section diagnostics button below and the
+    // quick menu both call these, never a second copy of the
+    // logic. Declared up front: Kotlin local funs must be
+    // declared before any lambda that references them.
+    fun copyTaskDiagnostics() {
+        val ctx = context
+        val version = runCatching {
+            ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+                .versionName
+        }.getOrNull() ?: "6.1.0"
+        val cm = ctx.getSystemService(
+            android.content.Context.CLIPBOARD_SERVICE,
+        ) as android.content.ClipboardManager
+        cm.setPrimaryClip(
+            android.content.ClipData.newPlainText(
+                "TuxunDown 任务诊断",
+                com.tuxundown.android.core.TaskDiagnostics.build(
+                    task, version, DownloadCenter.userAgent,
+                ),
+            ),
+        )
+        Toast.makeText(
+            ctx,
+            "诊断信息已复制（链接已去参数、请求头只有名字没有值）",
+            Toast.LENGTH_LONG,
+        ).show()
+    }
+    // Copy-link rides the same clipboard idiom as the
+    // diagnostics copy above (no older card button existed
+    // for it); the payload is the task's own URL, verbatim.
+    fun copyTaskLink() {
+        val ctx = context
+        val cm = ctx.getSystemService(
+            android.content.Context.CLIPBOARD_SERVICE,
+        ) as android.content.ClipboardManager
+        cm.setPrimaryClip(
+            android.content.ClipData.newPlainText(
+                "TuxunDown 任务链接", task.url,
+            ),
+        )
+        Toast.makeText(ctx, "链接已复制", Toast.LENGTH_SHORT).show()
+    }
     val pct = WidgetState.taskPercent(task)
     val barState = when (task.status) {
         TaskStatus.RUNNING -> BarState.RUNNING
@@ -7965,9 +8013,11 @@ fun TaskCard(
     // RIGHT = delete (the caller confirms first). Raw horizontal
     // drag + an offset Animatable — no new dependency. The action
     // layer sits BEHIND the card and is revealed as it slides.
-    // Long-press multi-select is untouched (a press without
-    // horizontal movement never becomes a drag), and while
-    // selecting, swipes are off entirely. ----
+    // A press without horizontal movement never becomes a
+    // drag, so the swipes never fight the click / long-press
+    // below; while selecting, swipes are off entirely. The
+    // long-press itself changed hands in v6.2 step B — see
+    // the combinedClickable below. ----
     val swipeScope = rememberCoroutineScope()
     val swipeOffset = remember(task.id) { Animatable(0f) }
     val canPauseResume = task.status == TaskStatus.RUNNING ||
@@ -8054,7 +8104,16 @@ fun TaskCard(
             )
             .combinedClickable(
                 onClick = { if (selecting) onToggleSelect() },
-                onLongClick = { onToggleSelect() },
+                // v6.2 step B: outside selecting mode the
+                // long-press opens the quick menu (anchored
+                // below, after the Card); while selecting it
+                // stays the select toggle it has been since
+                // multi-select existed. The multi-select ENTRY
+                // survives as the menu's 多选 item, which calls
+                // this same onToggleSelect.
+                onLongClick = {
+                    if (selecting) onToggleSelect() else quickMenuOpen = true
+                },
             ),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
     ) {
@@ -8669,29 +8728,7 @@ fun TaskCard(
                 // bug reports (see TaskDiagnostics — link query
                 // and header VALUES never leave the phone).
                 Spacer(Modifier.height(6.dp))
-                OutlinedButton(onClick = {
-                    val ctx = context
-                    val version = runCatching {
-                        ctx.packageManager.getPackageInfo(ctx.packageName, 0)
-                            .versionName
-                    }.getOrNull() ?: "6.1.0"
-                    val cm = ctx.getSystemService(
-                        android.content.Context.CLIPBOARD_SERVICE,
-                    ) as android.content.ClipboardManager
-                    cm.setPrimaryClip(
-                        android.content.ClipData.newPlainText(
-                            "TuxunDown 任务诊断",
-                            com.tuxundown.android.core.TaskDiagnostics.build(
-                                task, version, DownloadCenter.userAgent,
-                            ),
-                        ),
-                    )
-                    Toast.makeText(
-                        ctx,
-                        "诊断信息已复制（链接已去参数、请求头只有名字没有值）",
-                        Toast.LENGTH_LONG,
-                    ).show()
-                }) {
+                OutlinedButton(onClick = { copyTaskDiagnostics() }) {
                     Text("复制诊断信息")
                 }
                 if (task.note.isNotBlank()) {
@@ -8788,6 +8825,109 @@ fun TaskCard(
                 }) {
                     Text(if (expanded) "较少详细信息 ▴" else "详细信息 ▾")
                 }
+            }
+        }
+    }
+    // v6.2 step B: long-press quick menu — aggregates ONLY
+    // the card's existing actions; every item calls the same
+    // handler / dialog the card's own buttons call, and
+    // CardQuickMenu (pure, unit-pinned) decides which items
+    // a state shows, with the same caliber as those buttons.
+    // Text-only items: a screen reader reads each label
+    // as-is, so no extra content descriptions are needed.
+    DropdownMenu(
+        expanded = quickMenuOpen,
+        onDismissRequest = { quickMenuOpen = false },
+    ) {
+        for (item in CardQuickMenu.itemsFor(task.status, selecting)) {
+            when (item) {
+                CardQuickMenu.Item.PAUSE ->
+                    DropdownMenuItem(
+                        text = { Text("暂停") },
+                        onClick = { quickMenuOpen = false; onPause() },
+                    )
+                CardQuickMenu.Item.RESUME ->
+                    DropdownMenuItem(
+                        text = { Text("继续") },
+                        onClick = { quickMenuOpen = false; onResume() },
+                    )
+                CardQuickMenu.Item.JUMP_QUEUE ->
+                    DropdownMenuItem(
+                        text = { Text("插队到最前") },
+                        onClick = { quickMenuOpen = false; onJumpQueue() },
+                    )
+                CardQuickMenu.Item.PRIORITY_HIGH ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                "优先级：高" +
+                                    if (TaskPriority.clamp(task.priority) ==
+                                        TaskPriority.HIGH
+                                    ) "（当前）" else "",
+                            )
+                        },
+                        onClick = {
+                            quickMenuOpen = false
+                            onPriority(TaskPriority.HIGH)
+                        },
+                    )
+                CardQuickMenu.Item.PRIORITY_NORMAL ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                "优先级：中" +
+                                    if (TaskPriority.clamp(task.priority) ==
+                                        TaskPriority.NORMAL
+                                    ) "（当前）" else "",
+                            )
+                        },
+                        onClick = {
+                            quickMenuOpen = false
+                            onPriority(TaskPriority.NORMAL)
+                        },
+                    )
+                CardQuickMenu.Item.PRIORITY_LOW ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                "优先级：低" +
+                                    if (TaskPriority.clamp(task.priority) ==
+                                        TaskPriority.LOW
+                                    ) "（当前）" else "",
+                            )
+                        },
+                        onClick = {
+                            quickMenuOpen = false
+                            onPriority(TaskPriority.LOW)
+                        },
+                    )
+                CardQuickMenu.Item.EDIT_NOTE ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(if (task.userNote.isBlank()) "加备注" else "改备注")
+                        },
+                        onClick = { quickMenuOpen = false; onUserNote() },
+                    )
+                CardQuickMenu.Item.COPY_LINK ->
+                    DropdownMenuItem(
+                        text = { Text("复制链接") },
+                        onClick = { quickMenuOpen = false; copyTaskLink() },
+                    )
+                CardQuickMenu.Item.COPY_DIAGNOSTICS ->
+                    DropdownMenuItem(
+                        text = { Text("复制诊断信息") },
+                        onClick = { quickMenuOpen = false; copyTaskDiagnostics() },
+                    )
+                CardQuickMenu.Item.DELETE ->
+                    DropdownMenuItem(
+                        text = { Text("删除任务") },
+                        onClick = { quickMenuOpen = false; onDelete() },
+                    )
+                CardQuickMenu.Item.MULTI_SELECT ->
+                    DropdownMenuItem(
+                        text = { Text("多选") },
+                        onClick = { quickMenuOpen = false; onToggleSelect() },
+                    )
             }
         }
     }
