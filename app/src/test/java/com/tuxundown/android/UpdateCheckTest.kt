@@ -167,6 +167,37 @@ class UpdateCheckTest {
     }
 
     @Test
+    fun compareVersions_8xBoundaryCasesPinThe8_0Upgrade() {
+        // v8.0 audit round 65 (release readiness): the exact
+        // cross-boundary pair this release crosses. The 7.x
+        // tests above pin 6.9 -> 7.0 and 9.9.9 -> 10.0.0 but
+        // never named 7.9 -> 8.0, and never swept the reverse
+        // direction for an installed 8.0.0.
+        // 7.9.0 -> 8.0.0: the upgrade every 7.9.0 install
+        // must be offered.
+        assertTrue(UpdateCheck.compareVersions("7.9.0", "8.0.0") < 0)
+        assertTrue(UpdateCheck.compareVersions("8.0.0", "7.9.0") > 0)
+        assertTrue(UpdateCheck.isNewer("8.0.0", "7.9.0"))
+        assertTrue(UpdateCheck.isNewer("v8.0.0", "7.9.0"))
+        assertFalse(UpdateCheck.isNewer("7.9.0", "8.0.0"))
+        // An installed 8.0.0 must NEVER be offered any
+        // <= 7.9.0 release as an "update" (no reverse offer),
+        // and 8.0.0 itself is not newer than 8.0.0.
+        val notNewerFor80 = listOf(
+            "1.2.0", "5.9.0", "6.9.0", "7.0.0", "7.7.0",
+            "7.8.0", "7.9.0", "8.0.0",
+        )
+        for (old in notNewerFor80) {
+            assertFalse(
+                "$old must not be offered to an 8.0.0 install",
+                UpdateCheck.isNewer(old, "8.0.0"),
+            )
+            assertTrue(UpdateCheck.isNewer("8.0.0", old) || old == "8.0.0")
+        }
+        assertEquals(0, UpdateCheck.compareVersions("8.0", "8.0.0"))
+    }
+
+    @Test
     fun parseLatest_picksTheApkAsset() {
         val json = """
             {

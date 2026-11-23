@@ -289,6 +289,44 @@ class MigrationPackTest {
     }
 
     @Test
+    fun migrationPackReExportDropsTargetUriButKeepsSavedUri() {
+        // v8.0 audit round 65: TaskStoreJsonTest pins targetUri
+        // stripping at the serializer level; this pins it through
+        // the whole v2 pack round trip — export (stripped
+        // serializer) -> parse -> re-export -> parse. The SAF
+        // targetUri (a document id encoding a local path) must
+        // never appear in either pack text and must stay empty
+        // after both hops, while savedUri (the same-device DONE
+        // open-file path) is not collateral damage.
+        val task = TaskRecord(
+            url = "https://example.com/f.bin",
+            fileName = "f.bin",
+            status = TaskStatus.DONE,
+        )
+        task.savedUri = "content://media/1"
+        task.targetUri = "content://media/2-secret-path"
+        val tasksJson = TaskStore.serialize(listOf(task), stripSensitiveHeaders = true)
+        val firstText = Backup.buildMigration(
+            tasksJson, JSONObject(), statsJson(), hostMemoryText(), 0L,
+        )
+        assertFalse(firstText.contains("content://media/2-secret-path"))
+        val first = Backup.parse(firstText)
+        val restoredFirst = TaskStore.deserialize(first.tasksJson!!).single()
+        assertEquals("", restoredFirst.targetUri)
+        assertEquals("content://media/1", restoredFirst.savedUri)
+        val secondText = Backup.buildMigration(
+            first.tasksJson!!, first.settings!!,
+            first.stats, first.hostMemory, 1L,
+        )
+        assertFalse(secondText.contains("content://media/2-secret-path"))
+        val restoredSecond = TaskStore.deserialize(
+            Backup.parse(secondText).tasksJson!!,
+        ).single()
+        assertEquals("", restoredSecond.targetUri)
+        assertEquals("content://media/1", restoredSecond.savedUri)
+    }
+
+    @Test
     fun blankSectionsAreOmittedNotStored() {
         val text = Backup.buildMigration("[]", JSONObject(), null, "  ", 0L)
         val parsed = Backup.parse(text)
