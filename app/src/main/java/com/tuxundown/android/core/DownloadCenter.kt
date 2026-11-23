@@ -972,8 +972,30 @@ object DownloadCenter {
 
     // ---- v1.5: per-host optimal thread memory (see HostMemory) ----
 
+    // v5.1 audit round 36: the serialized table is parsed ONCE
+    // per actual change, not on every read — hostThreadsCap is
+    // read from the task card's composition (1 s tick), and the
+    // old parse-per-read made every visible expanded card redo
+    // the full parse every second. Writers all funnel through
+    // saveHostEntries / clearHostMemory, which change the raw
+    // string, so the cache can never serve a stale table.
+    private val hostEntriesCache = HostMemoryParseCache()
+
     private fun hostEntries(): List<HostMemory.Entry> =
-        HostMemory.parse(pString("hostThreads", ""))
+        hostEntriesCache.get(pString("hostThreads", ""))
+
+    /** v5.1 audit round 36: bumps whenever the host table is
+     *  re-parsed (i.e. actually changed) — UI callers key a
+     *  `remember` on it so cached aggregations over the table
+     *  refresh exactly when the table moved. Reading it syncs
+     *  the cache first (a string compare against the pref; a
+     *  re-parse only when the table really changed), so a
+     *  change written by another thread is seen at once. */
+    val hostMemoryVersion: Int
+        get() {
+            hostEntries()
+            return hostEntriesCache.version
+        }
 
     private fun saveHostEntries(entries: List<HostMemory.Entry>) {
         prefs().edit().putString("hostThreads", HostMemory.serialize(entries)).apply()

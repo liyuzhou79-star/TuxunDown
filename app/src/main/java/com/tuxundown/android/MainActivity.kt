@@ -7627,9 +7627,33 @@ fun TaskCard(
                 // rows name hosts, never full mirror URLs (the
                 // TaskDiagnostics redaction discipline).
                 if (DownloadCenter.cardFieldShown(CardFields.SERVER_PROFILE)) {
-                    val profileRows = com.tuxundown.android.core.ServerProfile.rows(
-                        task, DownloadCenter.hostThreadsCap(task.url),
-                    )
+                    // v5.1 audit round 36: the profile is an
+                    // aggregation (per-source grouping + sort, a
+                    // host-table lookup) and this card recomposes
+                    // every second while visible — memoize it on
+                    // exactly the record fields it reads, plus
+                    // DownloadCenter.hostMemoryVersion for the
+                    // host cap. The sourceBytes fingerprint is
+                    // cheap arithmetic over <= MAX_SOURCES
+                    // entries (no URL parsing, no grouping), so
+                    // the expensive work runs only when an input
+                    // actually changed.
+                    val sourceBytesFingerprint = synchronized(task.sourceBytes) {
+                        task.sourceBytes.entries.fold(0L) { acc, (k, v) ->
+                            acc + k.hashCode() + v
+                        }
+                    }
+                    val profileRows = remember(
+                        task.id, task.peakBps, task.peakConns,
+                        task.totalSize, task.etag, task.lastModified,
+                        task.singleThreadOnly, task.startedAt, task.isHls,
+                        task.sources.size, sourceBytesFingerprint,
+                        DownloadCenter.hostMemoryVersion,
+                    ) {
+                        com.tuxundown.android.core.ServerProfile.rows(
+                            task, DownloadCenter.hostThreadsCap(task.url),
+                        )
+                    }
                     if (profileRows.isNotEmpty()) {
                         Spacer(Modifier.height(6.dp))
                         Text(

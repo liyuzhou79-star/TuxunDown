@@ -228,4 +228,44 @@ class HostMemoryTest {
         assertTrue(HostMemory.parse("garbage\n\t\t\n").isEmpty())
         assertTrue(HostMemory.parse("").isEmpty())
     }
+
+    // ---- v5.1 audit round 36: parse cache (see
+    // HostMemoryParseCache) — the host table must be parsed
+    // once per actual change, never per read. ----
+
+    @Test
+    fun parseCacheReturnsSameInstanceWhileTextUnchanged() {
+        val cache = com.tuxundown.android.core.HostMemoryParseCache()
+        val text = HostMemory.serialize(
+            HostMemory.recordSuccess(emptyList(), "a.com", 16, now)
+        )
+        val first = cache.get(text)
+        assertEquals(1, cache.version)
+        val second = cache.get(text)
+        org.junit.Assert.assertSame(first, second)
+        assertEquals(1, cache.version)
+        assertEquals(16, HostMemory.lookup(second, "a.com", now))
+    }
+
+    @Test
+    fun parseCacheReparsesOnlyWhenTextChanges() {
+        val cache = com.tuxundown.android.core.HostMemoryParseCache()
+        val t1 = HostMemory.serialize(
+            HostMemory.recordSuccess(emptyList(), "a.com", 16, now)
+        )
+        val t2 = HostMemory.serialize(
+            HostMemory.recordSuccess(emptyList(), "a.com", 8, now)
+        )
+        cache.get(t1)
+        val changed = cache.get(t2)
+        assertEquals(2, cache.version)
+        assertEquals(8, HostMemory.lookup(changed, "a.com", now))
+        // Clearing the table is a change like any other.
+        val cleared = cache.get("")
+        assertTrue(cleared.isEmpty())
+        assertEquals(3, cache.version)
+        // And an unchanged empty read stays cached.
+        org.junit.Assert.assertSame(cleared, cache.get(""))
+        assertEquals(3, cache.version)
+    }
 }

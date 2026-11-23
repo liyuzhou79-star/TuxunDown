@@ -224,3 +224,40 @@ object HostMemory {
         }
     }
 }
+
+/**
+ * v5.1 audit round 36: memoizing wrapper over [HostMemory.parse].
+ *
+ * The serialized host table lives in SharedPreferences and used
+ * to be re-parsed on EVERY read — including from the task card's
+ * 服务器画像 section on every recomposition (the home list ticks
+ * once a second), and from the engine's per-start hint/cap reads.
+ * The table changes only when a download settles, fails or is
+ * rate-limited, so parsing the same string again is pure waste.
+ *
+ * This cache returns the SAME list instance while the raw text
+ * is unchanged and re-parses only when it changes; [version]
+ * counts re-parses so UI callers can key a `remember` on it and
+ * refresh exactly when the underlying memory actually moved.
+ * Pure JVM logic — unit-tested.
+ */
+class HostMemoryParseCache {
+
+    private var raw: String? = null
+    private var parsed: List<HostMemory.Entry> = emptyList()
+
+    /** Number of times the text actually changed and was
+     *  re-parsed (the first read counts as one). */
+    @Volatile
+    var version: Int = 0
+        private set
+
+    @Synchronized
+    fun get(text: String): List<HostMemory.Entry> {
+        if (text == raw) return parsed
+        raw = text
+        parsed = HostMemory.parse(text)
+        version++
+        return parsed
+    }
+}
