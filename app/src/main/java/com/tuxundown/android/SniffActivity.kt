@@ -392,7 +392,23 @@ class SniffActivity : Activity() {
                         }.toTypedArray()
                     ) { _, which ->
                         val v = sorted[which]
-                        val ok = createTask(v.url, headers)
+                        // v8.1 audit round 66: the session
+                        // headers were captured for the MASTER
+                        // url, but the task's primary becomes
+                        // the VARIANT url — and the engine
+                        // scopes credentials by the task's
+                        // primary, so an unscoped copy would
+                        // re-own the master host's Cookie to a
+                        // variant host (often a CDN) that has
+                        // no claim on it. Scope the set to the
+                        // variant first (SessionScope.scopedFor);
+                        // a same-host variant keeps everything.
+                        val ok = createTask(
+                            v.url,
+                            com.tuxundown.android.core.SessionScope.scopedFor(
+                                headers, url, v.url,
+                            ),
+                        )
                         if (ok) {
                             // Force the HLS flag (a variant URL
                             // need not end in .m3u8) and record

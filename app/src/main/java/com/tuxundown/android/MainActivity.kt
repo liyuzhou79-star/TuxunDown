@@ -788,6 +788,14 @@ fun DownApp() {
     var sniffSort by remember { mutableStateOf(0) } // 0 默认 1 名称 2 类型 3 大小
     var sniffMinMB by remember { mutableStateOf(0) } // v3.1: minimum-size filter, MB (0 = off)
     var sniffProbing by remember { mutableStateOf(false) } // v1.6 size probe phase
+    // v8.1 audit round 66: generation of the CURRENT sniff
+    // session's size-probe phase. A probe can run for up to
+    // SizeProbe's 45 s budget — long enough for the user to
+    // sniff another page meanwhile. The landing callback only
+    // applies while its generation is still the session's, so
+    // a stale probe can never overwrite a newer session's list
+    // with the previous page's resources.
+    var sniffProbeSeq by remember { mutableStateOf(0) }
     var sniffShowNoise by remember { mutableStateOf(false) } // v1.9 noise folding
 
     // ---- HLS variant picker (v3.8): set when a single-create
@@ -1326,12 +1334,27 @@ fun DownApp() {
                 // background (limited, see SizeProbe) and swap the
                 // list in when they land; unknown stays unknown.
                 sniffProbing = true
+                val probeSeq = ++sniffProbeSeq
+                val probedList = result.resources
                 Thread {
-                    val sized = runCatching { Sniffer().probeSizes(result.resources) }
-                        .getOrDefault(result.resources)
+                    val sized = runCatching { Sniffer().probeSizes(probedList) }
+                        .getOrDefault(probedList)
                     activity.runOnUiThread {
-                        sniffProbing = false
-                        if (sniffList.isNotEmpty()) sniffList = sized
+                        // v8.1 audit round 66: land ONLY into
+                        // the session this probe belongs to —
+                        // same generation AND the session still
+                        // holding this very list. A newer sniff
+                        // (success OR failure, both keep/replace
+                        // by their own rules) makes this landing
+                        // a no-op; the newer session's own probe
+                        // owns the probing flag from then on. A
+                        // failed re-sniff keeps the old session,
+                        // whose identity still matches, so its
+                        // sizes still land as before.
+                        if (probeSeq == sniffProbeSeq) {
+                            sniffProbing = false
+                            if (sniffList === probedList) sniffList = sized
+                        }
                     }
                 }.start()
             }

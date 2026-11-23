@@ -234,6 +234,60 @@ class SessionScopeTest {
         )
     }
 
+    // v8.1 audit round 66: scopedFor — a captured header set
+    // re-based onto a different primary URL (the HLS variant
+    // pick). Credentials follow the cookie rule; the rest of
+    // the set rides unchanged.
+    @Test
+    fun scopedForKeepsCredentialsOnTheSameHost() {
+        val headers = mapOf(
+            "Cookie" to cookie,
+            "Authorization" to "Bearer tok",
+            "Referer" to "https://example.com/watch",
+            "User-Agent" to "UA",
+        )
+        val out = SessionScope.scopedFor(
+            headers, owner, "https://example.com/hls/variant.m3u8",
+        )
+        assertEquals(headers, out)
+    }
+
+    @Test
+    fun scopedForDropsCredentialsCrossHostButKeepsTheRest() {
+        val headers = mapOf(
+            "Cookie" to cookie,
+            "Authorization" to "Bearer tok",
+            "Referer" to "https://example.com/watch",
+            "User-Agent" to "UA",
+        )
+        // The variant lives on a CDN host: the master host's
+        // credentials must NOT be re-owned to it.
+        val out = SessionScope.scopedFor(
+            headers, owner, "https://cdn.other.net/hls/variant.m3u8",
+        )
+        assertNull(out["Cookie"])
+        assertNull(out["Authorization"])
+        // Referer is the anti-hotlink signal, scoped by design
+        // NOT to credentials' rule — it rides, as on a hop.
+        assertEquals("https://example.com/watch", out["Referer"])
+        assertEquals("UA", out["User-Agent"])
+        // The caller's map is untouched.
+        assertEquals(cookie, headers["Cookie"])
+    }
+
+    @Test
+    fun scopedForWithoutCredentialsIsIdentity() {
+        val headers = mapOf("Referer" to "https://example.com/watch")
+        assertEquals(
+            headers,
+            SessionScope.scopedFor(headers, owner, "https://cdn.other.net/x"),
+        )
+        assertEquals(
+            emptyMap<String, String>(),
+            SessionScope.scopedFor(emptyMap(), owner, "https://cdn.other.net/x"),
+        )
+    }
+
     @Test
     fun nullOrBlankCookieNeverSends() {
         assertFalse(SessionScope.maySendCookie(null, owner, "https://example.com/big.zip"))

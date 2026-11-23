@@ -121,6 +121,39 @@ object SessionScope {
         }
 
     /**
+     * v8.1 audit round 66: a captured header set re-based onto
+     * a DIFFERENT primary URL than the one its credentials were
+     * captured for. The HLS variant pick is the live case: the
+     * Cookie was read for the master playlist's URL, but the
+     * created task's primary is the chosen variant's URL — and
+     * the engine scopes credentials by the TASK's primary, so
+     * an unscoped copy would silently re-own the master host's
+     * Cookie to the variant's host (a CDN is a different host
+     * with no claim on the session). Returns [headers] with the
+     * Cookie / Authorization entries dropped unless they are
+     * releasable to [targetUrl] under the exact same rules as a
+     * request hop; every other header (Referer, UA) rides
+     * unchanged, as it does on a hop.
+     */
+    fun scopedFor(
+        headers: Map<String, String>,
+        ownerUrl: String?,
+        targetUrl: String?,
+    ): Map<String, String> {
+        if (headers.isEmpty()) return headers
+        val out = LinkedHashMap(headers)
+        out["Cookie"]?.let {
+            if (cookieFor(it, ownerUrl, targetUrl) == null) out.remove("Cookie")
+        }
+        out["Authorization"]?.let {
+            if (authorizationFor(it, ownerUrl, targetUrl) == null) {
+                out.remove("Authorization")
+            }
+        }
+        return out
+    }
+
+    /**
      * The Basic header built from THIS hop URL's own embedded
      * user:pass ([userInfo], still URL-encoded as it appears in
      * the URL), or null when this hop must not carry one:
