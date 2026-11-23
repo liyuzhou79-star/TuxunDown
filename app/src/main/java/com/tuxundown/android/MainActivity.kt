@@ -48,6 +48,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -571,6 +572,11 @@ fun DownApp() {
 
     // ---- navigation (v1.4: home / settings are separate screens) ----
     var screen by remember { mutableStateOf("home") }
+    // v6.9: help topic to scroll to when the help center is
+    // opened from a global-search help hit; null when opened
+    // from Settings (the usual way), which keeps the old
+    // behaviour of landing at the top.
+    var helpFocusTitle by remember { mutableStateOf<String?>(null) }
 
     // ---- settings state (mirrors DownloadCenter prefs) ----
     var wifiOnly by remember { mutableStateOf(DownloadCenter.wifiOnly) }
@@ -1925,10 +1931,11 @@ fun DownApp() {
 
     // v3.3: a non-blank query switches the home list into
     // GLOBAL search mode — tasks across all tabs (archived
-    // included), downloaded files and sniff history, in three
-    // groups INSTEAD of the tab-filtered list (see
-    // GlobalSearch). The task group honours the same sort
-    // modes as the flat list. Null = normal browsing.
+    // included), downloaded files, sniff history and help
+    // topics (v6.9), in four groups INSTEAD of the
+    // tab-filtered list (see GlobalSearch). The task group
+    // honours the same sort modes as the flat list.
+    // Null = normal browsing.
     val globalResult = if (query.isNotBlank()) {
         val r = com.tuxundown.android.core.GlobalSearch.search(
             store.tasks, DownloadCenter.sniffHistory, query,
@@ -2116,7 +2123,7 @@ fun DownApp() {
                 }
             },
             onShowGuide = { showGuide = true },
-            onShowHelp = { screen = "help" },
+            onShowHelp = { helpFocusTitle = null; screen = "help" },
             onShowDiag = { screen = "diag" },
             onExport = { exportLauncher.launch("tuxundown-backup.json") },
             onImport = { importLauncher.launch(arrayOf("application/json", "text/plain")) },
@@ -2132,7 +2139,20 @@ fun DownApp() {
     } else if (screen == "files") {
         FilesScreen(onBack = { screen = "home" })
     } else if (screen == "help") {
-        HelpScreen(onBack = { screen = "settings" })
+        HelpScreen(
+            // v6.9: opened from a search hit, 返回 goes back
+            // home (where the search was); opened from
+            // Settings, it still returns to Settings as before.
+            onBack = {
+                if (helpFocusTitle != null) {
+                    helpFocusTitle = null
+                    screen = "home"
+                } else {
+                    screen = "settings"
+                }
+            },
+            focusTitle = helpFocusTitle,
+        )
     } else if (screen == "diag") {
         DiagnosticsScreen(version = appVersion, onBack = { screen = "settings" })
     } else if (screen == "speedtest") {
@@ -2522,14 +2542,16 @@ fun DownApp() {
                 }
             }
 
-            // ---- v3.3: global search results (three groups) ----
+            // ---- v3.3: global search results (four groups) ----
             // Rendered INSTEAD of the tab list while a query is
             // present. A task hit is the full card (that is its
             // location — every action works right there); a
             // file hit jumps to the files page (the search does
             // not open files itself); a history hit re-opens
             // the add dialog with the page filled in, exactly
-            // like tapping the entry inside that dialog.
+            // like tapping the entry inside that dialog; a help
+            // hit (v6.9) opens the help center scrolled to
+            // that topic.
             if (globalResult != null) {
                 if (globalResult.isEmpty) {
                     item(key = "g-none") {
@@ -2613,6 +2635,43 @@ fun DownApp() {
                                 .clickable { urlText = h; showAdd = true }
                                 .padding(vertical = 14.dp),
                         )
+                    }
+                }
+                if (globalResult.help.isNotEmpty()) {
+                    item(key = "g-help-head") {
+                        Text(
+                            "帮助（${globalResult.help.size}）",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                    items(globalResult.help, key = { "hp-" + it.title }) { topic ->
+                        Card(
+                            Modifier.fillMaxWidth().clickable {
+                                helpFocusTitle = topic.title
+                                screen = "help"
+                            },
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surface
+                            ),
+                        ) {
+                            Column(Modifier.padding(12.dp)) {
+                                Text(
+                                    topic.title,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                )
+                                Text(
+                                    // Excerpt caliber: the body's
+                                    // first line (topics are built
+                                    // from one sentence per line).
+                                    topic.body.substringBefore("\n"),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -5795,12 +5854,24 @@ fun SpeedCompareChart(
  * the text says so instead of promising miracles.
  */
 @androidx.compose.runtime.Composable
-fun HelpScreen(onBack: () -> Unit) {
+fun HelpScreen(onBack: () -> Unit, focusTitle: String? = null) {
     val faqs = HelpTopics.topics
+    val listState = rememberLazyListState()
+    // v6.9: when opened from a global-search help hit, scroll
+    // to that topic once. The list starts with two fixed items
+    // (h-head, h-intro), so the topic's list index is its
+    // position in [faqs] plus 2. An unknown title simply
+    // leaves the list at the top — never a crash.
+    LaunchedEffect(focusTitle) {
+        val title = focusTitle ?: return@LaunchedEffect
+        val idx = faqs.indexOfFirst { it.title == title }
+        if (idx >= 0) listState.scrollToItem(idx + 2)
+    }
     LazyColumn(
         Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background),
+        state = listState,
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {

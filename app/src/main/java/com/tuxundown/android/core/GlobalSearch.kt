@@ -2,7 +2,7 @@ package com.tuxundown.android.core
 
 /**
  * Global search (v3.3): the home search box used to filter
- * only the task list. It now searches three things at once —
+ * only the task list. It now searches four things at once —
  *
  * - TASKS: file name, URL, the user's own note (v2.8) and the
  *   site (host) — across ALL tabs and including archived
@@ -17,17 +17,26 @@ package com.tuxundown.android.core
  * - SNIFF HISTORY: the recently sniffed page URLs. History
  *   stores URLs only (no page titles were ever recorded),
  *   so matching is on the URL and its host.
+ * - HELP TOPICS (v6.9): the help center's topics, matched on
+ *   title OR body (case-insensitive). A topic whose TITLE
+ *   matches ranks ahead of one that matches only in its
+ *   body; within each of those two tiers the help center's
+ *   own order is kept. At most [MAX_HELP_HITS] topics are
+ *   returned, so a very common word cannot flood the list.
  *
- * Pure matching — unit-tested. The UI renders the three
+ * Pure matching — unit-tested. The UI renders the four
  * groups; a task hit renders the full task card (that IS
  * the location), a file hit jumps to the files page, a
  * history hit re-opens the add dialog with the URL filled
- * in (the same thing tapping a history entry there does).
+ * in (the same thing tapping a history entry there does),
+ * and a help hit opens the help center scrolled to that
+ * topic.
  */
 object GlobalSearch {
 
     const val MAX_TASK_HITS = 50
     const val MAX_FILE_HITS = 20
+    const val MAX_HELP_HITS = 10
 
     /** One downloaded-file hit: display name + size + the
      *  task record it came from. */
@@ -37,9 +46,30 @@ object GlobalSearch {
         val tasks: List<TaskRecord>,
         val files: List<FileHit>,
         val history: List<String>,
+        val help: List<HelpTopics.Topic> = emptyList(),
     ) {
         val isEmpty: Boolean
-            get() = tasks.isEmpty() && files.isEmpty() && history.isEmpty()
+            get() = tasks.isEmpty() && files.isEmpty() && history.isEmpty() &&
+                help.isEmpty()
+    }
+
+    /**
+     * Help hits for [query] (already trimmed, non-blank):
+     * title hits first (in help-center order), then topics
+     * that match only in the body (also in help-center
+     * order), capped at [MAX_HELP_HITS].
+     */
+    fun helpHits(
+        query: String,
+        topics: List<HelpTopics.Topic> = HelpTopics.topics,
+    ): List<HelpTopics.Topic> {
+        if (query.isBlank()) return emptyList()
+        val titleHits = topics.filter { it.title.contains(query, ignoreCase = true) }
+        val bodyOnlyHits = topics.filter {
+            !it.title.contains(query, ignoreCase = true) &&
+                it.body.contains(query, ignoreCase = true)
+        }
+        return (titleHits + bodyOnlyHits).take(MAX_HELP_HITS)
     }
 
     /** Does [task] match [query] (already trimmed, non-blank)? */
@@ -59,9 +89,10 @@ object GlobalSearch {
         tasks: List<TaskRecord>,
         history: List<String>,
         rawQuery: String,
+        topics: List<HelpTopics.Topic> = HelpTopics.topics,
     ): Result {
         val q = rawQuery.trim()
-        if (q.isBlank()) return Result(emptyList(), emptyList(), emptyList())
+        if (q.isBlank()) return Result(emptyList(), emptyList(), emptyList(), emptyList())
         val taskHits = tasks.filter { taskMatches(it, q) }.take(MAX_TASK_HITS)
         val fileHits = tasks
             .filter {
@@ -80,6 +111,6 @@ object GlobalSearch {
             it.contains(q, ignoreCase = true) ||
                 HostMemory.hostOf(it).contains(q, ignoreCase = true)
         }
-        return Result(taskHits, fileHits, historyHits)
+        return Result(taskHits, fileHits, historyHits, helpHits(q, topics))
     }
 }
