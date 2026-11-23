@@ -4487,6 +4487,11 @@ fun StatsScreen(onBack: () -> Unit, onSpeedTest: () -> Unit, tick: Int) {
     val fastest = com.tuxundown.android.core.FastestRecords.top(
         DownloadCenter.store.tasks,
     )
+    // v8.3: the learned per-host table, read-only for display
+    // (see DownloadCenter.hostMemoryEntries). Empty until a
+    // host has actually been learned, and then the section
+    // below is omitted entirely — same caliber as 最快纪录.
+    val hostMemory = DownloadCenter.hostMemoryEntries()
     LazyColumn(
         Modifier
             .fillMaxSize()
@@ -4536,6 +4541,50 @@ fun StatsScreen(onBack: () -> Unit, onSpeedTest: () -> Unit, tick: Int) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 6.dp),
                 )
+            }
+        }
+        if (hostMemory.isNotEmpty()) {
+            item(key = "st-hostmem") {
+                SettingsGroup("按主机学习数据") {
+                    hostMemory.forEachIndexed { i, e ->
+                        if (i > 0) Spacer(Modifier.height(10.dp))
+                        Text(
+                            e.host,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        if (e.threads > 0) {
+                            Text(
+                                "最佳连接数：${e.threads}",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        }
+                        if (e.cap > 0) {
+                            Text(
+                                "限流上限：${e.cap}",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        }
+                        val learnedAt = Format.dateTime(e.updatedMs)
+                        if (learnedAt.isNotBlank()) {
+                            Text(
+                                "上次学习：$learnedAt",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        OutlinedButton(onClick = {
+                            DownloadCenter.forgetHost(e.host)
+                            refresh++
+                        }) { Text("忘掉这个站") }
+                    }
+                    Text(
+                        "忘掉某个站只清它一个：最佳连接数和限流上限一起清，下次从它下载重新试探；其他站不受影响。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                }
             }
         }
         item(key = "st-week") {

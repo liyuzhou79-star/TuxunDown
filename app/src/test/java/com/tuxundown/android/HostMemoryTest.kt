@@ -49,6 +49,51 @@ class HostMemoryTest {
         assertEquals(DownloadEngine.MAX_THREADS, HostMemory.lookup(entries, "a.com", now))
     }
 
+    // ---- v8.3: explicit per-host forget (stats screen) ----
+
+    @Test
+    fun forgetRemovesOnlyThatHost() {
+        var entries = HostMemory.recordSuccess(emptyList(), "a.com", 16, now)
+        entries = HostMemory.recordSuccess(entries, "b.com", 8, now)
+        entries = HostMemory.recordSuccess(entries, "c.com", 4, now)
+        val after = HostMemory.forget(entries, "b.com")
+        assertEquals(listOf("c.com", "a.com"), after.map { it.host })
+        assertEquals(16, HostMemory.lookup(after, "a.com", now))
+        assertEquals(4, HostMemory.lookup(after, "c.com", now))
+        assertEquals(0, HostMemory.lookup(after, "b.com", now))
+    }
+
+    @Test
+    fun forgetTakesTheCapWithIt() {
+        // Unlike recordFailure's cap-preserving forget, a user
+        // forget removes the whole entry, ceiling included.
+        var entries = HostMemory.recordSuccess(emptyList(), "a.com", 24, now)
+        entries = HostMemory.recordRateLimit(entries, "a.com", 24, now) // cap 12
+        assertEquals(12, HostMemory.capOf(entries, "a.com", now))
+        val after = HostMemory.forget(entries, "a.com")
+        assertTrue(after.isEmpty())
+        assertEquals(0, HostMemory.capOf(after, "a.com", now))
+    }
+
+    @Test
+    fun forgetUnknownOrBlankHostReturnsEntriesUnchanged() {
+        val entries = HostMemory.recordSuccess(emptyList(), "a.com", 16, now)
+        assertEquals(entries, HostMemory.forget(entries, "nope.com"))
+        assertEquals(entries, HostMemory.forget(entries, ""))
+        assertEquals(entries, HostMemory.forget(entries, "  "))
+    }
+
+    @Test
+    fun forgetSurvivesSerializationRoundTrip() {
+        var entries = HostMemory.recordSuccess(emptyList(), "a.com", 16, now)
+        entries = HostMemory.recordRateLimit(entries, "b.com", 32, now) // cap 16
+        entries = HostMemory.recordSuccess(entries, "c.com", 8, now)
+        val after = HostMemory.forget(entries, "b.com")
+        val back = HostMemory.parse(HostMemory.serialize(after))
+        assertEquals(after.sortedBy { it.host }, back.sortedBy { it.host })
+        assertEquals(0, HostMemory.capOf(back, "b.com", now))
+    }
+
     // ---- v2.8: rate-limit ceiling ----
 
     @Test

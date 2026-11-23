@@ -202,6 +202,21 @@ object HostMemory {
         }
     }
 
+    /**
+     * v8.3: the user explicitly forgets [host] from the stats
+     * screen — the WHOLE entry goes, rate-limit ceiling
+     * included, so the next download from this host starts
+     * completely fresh. This is a deliberate user forget, which
+     * is a different thing from [recordFailure]'s automatic
+     * forget: that one keeps the cap on purpose, because two
+     * ordinary failures say nothing about the host's rate
+     * limit. A blank or unknown host changes nothing.
+     */
+    fun forget(entries: List<Entry>, host: String): List<Entry> {
+        if (host.isBlank()) return entries
+        return entries.filter { it.host != host }
+    }
+
     /** One entry per line: host \t threads \t fails \t updatedMs
      *  \t cap. v2.8 appended the cap field; [parse] still accepts
      *  the pre-v2.8 four-field lines (cap = 0), so an upgrade

@@ -1544,6 +1544,18 @@ object DownloadCenter {
         prefs().edit().putString("hostThreads", "").apply()
     }
 
+    /** v8.3: read-only snapshot of the learned per-host table,
+     *  for the stats screen's per-host list (display only —
+     *  nothing new is collected or probed for it). */
+    fun hostMemoryEntries(): List<HostMemory.Entry> = hostEntries()
+
+    /** v8.3: forget ONE host's learned entry entirely (optimum
+     *  and rate-limit ceiling alike — see HostMemory.forget);
+     *  every other host's memory is untouched. */
+    fun forgetHost(host: String) {
+        saveHostEntries(HostMemory.forget(hostEntries(), host))
+    }
+
     fun recordHostFailure(url: String) {
         saveHostEntries(
             HostMemory.recordFailure(hostEntries(), HostMemory.hostOf(url), System.currentTimeMillis())
