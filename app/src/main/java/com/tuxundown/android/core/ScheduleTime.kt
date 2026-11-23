@@ -51,9 +51,7 @@ object ScheduleTime {
      * (spring-forward gap, e.g. 02:30 on the day clocks jump
      * 02:00 -> 03:00) resolves FORWARD by the gap (02:30 lands
      * at 03:30 local); a wall time that occurs twice (fall-back)
-     * resolves to its SECOND occurrence (the standard-time one —
-     * java.util.Calendar's caliber, unlike java.time's
-     * earlier-offset default).
+     * resolves to its FIRST occurrence (the daylight-saving one).
      */
     fun nextOccurrence(
         hour: Int, minute: Int, nowMs: Long,

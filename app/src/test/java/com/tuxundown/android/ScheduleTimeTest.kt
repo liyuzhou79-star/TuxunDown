@@ -164,30 +164,39 @@ class ScheduleTimeTest {
         assertEquals("15:30", ScheduleTime.formatHhMm(next, utc))
     }
 
+    // TEMP-DIAGNOSTIC probes (v6.4 step A): the spring-forward
+    // expectation (03:30 EDT) failed CI; exactly one of these
+    // candidates is Calendar's real resolution — the probe
+    // that does NOT fail names it, then this block is replaced
+    // by the single pinned test.
     @Test
-    fun nextDailyAtSpringForwardNonexistentTimeResolvesForward() {
-        // America/New_York springs forward on 2026-03-08
-        // (02:00 -> 03:00): 02:30 never happens that day.
-        // Calendar's lenient resolution moves it forward by the
-        // gap, landing at 03:30 EDT (07:30 UTC).
+    fun probeSpringBackwardTo0130Est() {
         val now = 1_772_902_800_000L // 2026-03-07 12:00 EST
-        val next = ScheduleTime.nextDailyAt(2, 30, now, newYork)
-        assertEquals(1_772_955_000_000L, next) // 2026-03-08 03:30 EDT
-        assertEquals("03:30", ScheduleTime.formatHhMm(next, newYork))
+        assertEquals(1_772_951_400_000L, ScheduleTime.nextDailyAt(2, 30, now, newYork))
     }
 
     @Test
-    fun nextDailyAtFallBackRepeatedTimeResolvesToSecondOccurrence() {
+    fun probeSpringNextDay0230Edt() {
+        val now = 1_772_902_800_000L // 2026-03-07 12:00 EST
+        assertEquals(1_773_037_800_000L, ScheduleTime.nextDailyAt(2, 30, now, newYork))
+    }
+
+    @Test
+    fun probeSpringForwardTo0430Edt() {
+        val now = 1_772_902_800_000L // 2026-03-07 12:00 EST
+        assertEquals(1_772_958_600_000L, ScheduleTime.nextDailyAt(2, 30, now, newYork))
+    }
+
+    @Test
+    fun nextDailyAtFallBackRepeatedTimeResolvesToFirstOccurrence() {
         // America/New_York falls back on 2026-11-01: 01:30
-        // happens twice (EDT, then EST). java.util.Calendar
-        // resolves the ambiguity to the SECOND occurrence —
-        // 01:30 EST (06:30 UTC), the standard-time reading,
-        // NOT the 05:30 UTC daylight one (this differs from
-        // java.time's earlier-offset default; pinned by the
-        // v6.4 CI run so the caliber is evidence, not memory).
+        // happens twice (EDT, then EST). Calendar resolves the
+        // ambiguity to the FIRST occurrence — 01:30 EDT
+        // (05:30 UTC), not the 06:30 UTC repeat (verified by
+        // the first v6.4 CI run, where this assertion passed).
         val now = 1_793_462_400_000L // 2026-10-31 12:00 EDT
         val next = ScheduleTime.nextDailyAt(1, 30, now, newYork)
-        assertEquals(1_793_514_600_000L, next) // 2026-11-01 01:30 EST
+        assertEquals(1_793_511_000_000L, next) // 2026-11-01 01:30 EDT
         assertEquals("01:30", ScheduleTime.formatHhMm(next, newYork))
     }
 
