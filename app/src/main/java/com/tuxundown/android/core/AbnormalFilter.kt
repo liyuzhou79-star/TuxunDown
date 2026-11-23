@@ -54,11 +54,6 @@ object AbnormalFilter {
         val nowMs: Long,
     )
 
-    /** No gate closed, at time [nowMs] — the context tests use
-     *  for "nothing is holding the queue". */
-    fun openGates(nowMs: Long): GateContext =
-        GateContext(wifiGateClosed = false, chargeGateClosed = false, nowMs = nowMs)
-
     /** True when [task]'s scheduled start has arrived. */
     private fun isDue(task: TaskRecord, nowMs: Long): Boolean =
         !(task.scheduledAt > 0 && task.scheduledAt > nowMs)

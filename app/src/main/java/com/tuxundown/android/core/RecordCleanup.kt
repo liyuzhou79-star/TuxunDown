@@ -20,9 +20,6 @@ object RecordCleanup {
 
     const val DAY_MS = ArchivePolicy.DAY_MS
 
-    /** The day options the settings UI offers. */
-    val DAY_OPTIONS = listOf(30, 90, 180)
-
     /**
      * When this record reached its terminal state, as best the
      * data knows. finishedAt is stamped at completion — and

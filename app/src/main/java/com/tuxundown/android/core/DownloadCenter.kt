@@ -1550,9 +1550,4 @@ object DownloadCenter {
         return hit.size
     }
 
-    fun nextQueued(): TaskRecord? =
-        QueueOrder.nextEligible(store.tasks, System.currentTimeMillis())
-
-    fun hasActiveWork(): Boolean =
-        store.tasks.any { it.status == TaskStatus.QUEUED || it.status == TaskStatus.RUNNING }
 }

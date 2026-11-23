@@ -16,14 +16,6 @@ object Format {
         else -> "$bytes B"
     }
 
-    /** Compact size for chart axis labels (no decimals beyond need). */
-    fun sizeShort(bytes: Long): String = when {
-        bytes >= 1024L * 1024 * 1024 -> "%.1f GB".format(bytes / 1024.0 / 1024.0 / 1024.0)
-        bytes >= 1024 * 1024 -> "%.0f MB".format(bytes / 1024.0 / 1024.0)
-        bytes >= 1024 -> "%.0f KB".format(bytes / 1024.0)
-        else -> "$bytes B"
-    }
-
     fun speed(bps: Long): String = when {
         bps < 0 -> "—"
         bps >= 1024L * 1024 * 1024 -> "%.2f GB/秒".format(bps / 1024.0 / 1024.0 / 1024.0)
