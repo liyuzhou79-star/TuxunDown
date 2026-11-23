@@ -1635,7 +1635,15 @@ class DownloadEngine(
     private fun sourceFor(ac: ActiveChunk, attempt: Int): String {
         val srcs = activeSources
         if (srcs.size <= 1) return task.url
-        return srcs[(ac.index + attempt - 1).mod(srcs.size)]
+        // v7.8 B-fix (audit round 63, theme 2 hardening): a RACED
+        // part ignores the attempt rotation — both racers pin to
+        // the SAME source for every attempt, so two writers can
+        // never interleave the raced span buffer-by-buffer from
+        // two different mirrors whose bytes might disagree (the
+        // only content defence would be the finalize hash, and
+        // only when an expected hash exists). Un-raced parts keep
+        // the exact pre-fix rotation.
+        return srcs[sourceIndexFor(ac.index, attempt, ac.race != null, srcs.size)]
     }
 
     /** Worker threads of this run still alive or not yet
@@ -1898,10 +1906,11 @@ class DownloadEngine(
                 .filter { it.race == null && it.pos < it.end }
                 .maxByOrNull { it.end - it.pos } ?: return null
             // Snapshot the owner's position under its own lock:
-            // downloadRange's counting block holds the same lock,
-            // so a write is counted either fully BEFORE the race
-            // (normal path, and this snapshot already includes
-            // it) or fully AFTER (ledger path) — never both.
+            // downloadRange's write + counting block holds the
+            // same lock (B-fix, audit round 63 B-1b), so a write
+            // is counted either fully BEFORE the race (normal
+            // path, and this snapshot already includes it) or
+            // fully AFTER (ledger path) — never both, never lost.
             val start: Long
             val ledger: TailRace.Ledger
             synchronized(owner) {
@@ -2013,15 +2022,27 @@ class DownloadEngine(
                     break
                 }
                 if (attempt >= 3) {
-                    // v4.4 (audit round 29): the segmented path
-                    // composes task.error ONLY from humanized /
-                    // Notes text, so the raw verdicts for the
-                    // service's parks are recorded HERE, where
-                    // the original exception still exists.
-                    // v4.5 (audit round 30): the structured
-                    // failure verdict joins them, same site.
-                    recordFailureVerdict(e)
-                    task.error = Errors.human(e)
+                    // v7.8 B-fix (audit round 63, B-1e): a racer
+                    // whose failure is not its own — cancelled as
+                    // the race loser, or stall-evicted repeatedly
+                    // while its partner went on to WIN the ledger —
+                    // must not leave a stale failure text / verdict
+                    // on a task the other racer completes (the DONE
+                    // branch never clears task.error). Chosen over
+                    // clearing task.error at DONE because it changes
+                    // nothing for un-raced parts: with race == null
+                    // the predicate is always false.
+                    if (!raceFailureIsStale(ac.raceCancelled, ac.race, ac.raceId)) {
+                        // v4.4 (audit round 29): the segmented path
+                        // composes task.error ONLY from humanized /
+                        // Notes text, so the raw verdicts for the
+                        // service's parks are recorded HERE, where
+                        // the original exception still exists.
+                        // v4.5 (audit round 30): the structured
+                        // failure verdict joins them, same site.
+                        recordFailureVerdict(e)
+                        task.error = Errors.human(e)
+                    }
                 }
                 // v5.8: jittered (see BackoffJitter) — every chunk
                 // that failed in the same hiccup must not retry in
@@ -2202,21 +2223,34 @@ class DownloadEngine(
                 val want = minOf(buf.size.toLong(), limit - pos).toInt()
                 val n = input.read(buf, 0, want)
                 if (n < 0) break
-                target.writeAt(pos, buf, 0, n)
-                pos += n
-                ac.pos = pos
-                ac.lastAdvanceMs = System.currentTimeMillis()
-                // v7.8 (Step A): counting. Un-raced: every byte
-                // counts, as always. Raced: the write and its
-                // accounting are atomic under the part's own
-                // lock (startRace snapshots the owner's pos
-                // under the same lock), and the ledger splits
-                // this write into credited (max口径 — the only
-                // part that may touch downloadedBytes) and
-                // duplicate (booked separately, never counted
-                // as progress or speed).
+                // v7.8 (Step A) + B-fix (audit round 63, B-1b):
+                // the write, the position advance AND the counting
+                // are ONE atomic step under the part's own lock.
+                // startRace snapshots the owner's pos under the
+                // same lock, so a write lands either fully BEFORE
+                // the race (counted on the normal path, and the
+                // snapshot already includes it) or fully INSIDE it
+                // (ledger path) — never in between. The pre-fix
+                // shape (write + pos outside the lock, counting
+                // inside) let a race starting in that gap swallow
+                // this buffer's credited bytes: the ledger began
+                // at the just-written pos, so the advance credited
+                // 0 and booked the whole buffer as duplicate, and
+                // a DONE task could report downloaded < totalSize
+                // by up to one buffer per race start. The network
+                // read above stays OUTSIDE the lock; the lock
+                // covers only this one write + its bookkeeping.
+                // Counting: un-raced, every byte counts, as
+                // always. Raced, the ledger splits this write into
+                // credited (max口径 — the only part that may touch
+                // downloadedBytes) and duplicate (booked
+                // separately, never counted as progress or speed).
                 var becameWinner = false
                 synchronized(ac) {
+                    target.writeAt(pos, buf, 0, n)
+                    pos += n
+                    ac.pos = pos
+                    ac.lastAdvanceMs = System.currentTimeMillis()
                     val r = ac.race
                     if (r == null) {
                         downloadedBytes.addAndGet(n.toLong())
@@ -4081,3 +4115,33 @@ class DownloadEngine(
         }
     }
 }
+
+/**
+ * v7.8 B-fix (audit round 63, theme 2 hardening): which validated
+ * source serves a part, as an index into the source list. Un-raced
+ * parts rotate by attempt exactly as before (a retry moves to the
+ * NEXT source). A raced part ([raced] = true) ignores the attempt:
+ * owner and shadow racer share the part's index, so both pin to
+ * the same source for every attempt and can never interleave the
+ * raced span from two different mirrors. Pure arithmetic — unit
+ * pinned by RaceFixTest.
+ */
+internal fun sourceIndexFor(index: Int, attempt: Int, raced: Boolean, sourceCount: Int): Int =
+    (index + if (raced) 0 else attempt - 1).mod(sourceCount)
+
+/**
+ * v7.8 B-fix (audit round 63, B-1e): is this part's final failure
+ * somebody else's win? True when the part was cancelled as the
+ * race loser, or when its ledger is finished and won by the OTHER
+ * racer — in both cases downloadActive's catch must not write
+ * task.error / a failure verdict for it, or a DONE task would
+ * carry a stale failure text. An un-raced part (ledger == null,
+ * never cancelled) is never stale, so the un-raced path is
+ * unchanged. Pure — unit pinned by RaceFixTest.
+ */
+internal fun raceFailureIsStale(
+    raceCancelled: Boolean,
+    ledger: TailRace.Ledger?,
+    raceId: Int,
+): Boolean =
+    raceCancelled || (ledger != null && ledger.finished && !ledger.isWinner(raceId))
