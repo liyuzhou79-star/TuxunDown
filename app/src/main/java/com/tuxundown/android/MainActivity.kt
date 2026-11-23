@@ -636,7 +636,7 @@ fun DownApp() {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "4.8.0"
+        }.getOrNull() ?: "4.9.0"
     }
     var showGuide by remember {
         // v2.2 safe mode: after 2+ consecutive crashes, first-
@@ -6686,9 +6686,9 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· FTP 也能多连接分片下了：以前 FTP 链接只有一条连接慢慢下。现在服务器支持断点续传时，最多 8 条连接同时下，卡片上会写明；不支持的服务器照旧单连接，卡片也会写清原因。以前用 FTP 下到一半的任务，升级后能接着下，不用重来\n" +
-            "· 排队按站点轮转，不再被同站长队饿着：同时下载个数有限时，以前排在前面的任务先下完才轮到后面的，一长串同一个网站的任务会把其它网站的任务一直往后挤。现在同优先级里不同网站轮流开始，一个网站下完一个，就先让另一个网站的任务上；你手动插队的任务仍然最优先\n" +
-            "· 任务记录和备份的一致性核对了一遍：最近几版陆续加的新字段（失败类型、峰值连接数、各下载源下了多少、速度记录等）逐项核对了存取和备份导入，老任务、老备份导进来都完整；顺带修了几个坏数据的小毛病，比如某个请求头写坏会连累整条任务记录丢失、重试计数被写成负数会多重试，现在都只跳过或修正坏的那一项",
+            "· 息屏不降速：以前息屏后手机会让处理器睡过去，下载容易变慢、变不稳。现在真正下载时会保持处理器运行，息屏下大文件下得更稳；这个开关在设置里可以关，代价是开着时更费电，排队等待的任务不会占用\n" +
+            "· 切到后台更省电：App 切到后台、界面看不见时，界面不再每秒刷新，白白唤醒处理器的次数少了，后台更省电；切回来会立刻刷新\n" +
+            "· 多个任务一起下，通知栏会写全部下完还剩多久：以前只有单个任务时通知才带剩余时间，现在多个任务一起下时，通知栏也会按总进度写明全部下完大约还要多久"
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
             "· 文件直链 → 直接开始多线程下载，还能预先改好保存文件名\n" +
@@ -7747,7 +7747,7 @@ fun TaskCard(
                     val version = runCatching {
                         ctx.packageManager.getPackageInfo(ctx.packageName, 0)
                             .versionName
-                    }.getOrNull() ?: "4.8.0"
+                    }.getOrNull() ?: "4.9.0"
                     val cm = ctx.getSystemService(
                         android.content.Context.CLIPBOARD_SERVICE,
                     ) as android.content.ClipboardManager
