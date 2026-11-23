@@ -121,6 +121,7 @@ import com.tuxundown.android.core.DuplicateFinder
 import com.tuxundown.android.core.TaskPriority
 import com.tuxundown.android.core.Format
 import com.tuxundown.android.core.HealthCheck
+import com.tuxundown.android.core.ThermalStatus
 import com.tuxundown.android.core.HostMemory
 import com.tuxundown.android.core.FtpClient
 import com.tuxundown.android.core.LinkExtract
