@@ -695,7 +695,7 @@ fun DownApp() {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "5.8.0"
+        }.getOrNull() ?: "5.9.0"
     }
     var showGuide by remember {
         // v2.2 safe mode: after 2+ consecutive crashes, first-
@@ -7452,9 +7452,9 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 新增「自动读取校验文件」（在设置里，默认关）：打开后，新建下载时会顺手看一眼网站有没有把 .sha256 / .md5 校验文件放在文件旁边，有就记下来，下完按网站给的值核对，卡片上会写明「已按网站给的校验值核对」；关着时不会发任何额外请求\n" +
-            "· 校验值粘贴更宽容了：从发布页把整行复制下来（带着文件名、带着「sha256:」前缀，或者另一种常见写法）现在都能认出来，不用自己动手删多余的部分；校验进行中改了校验值，旧结果也不会再错算到新值头上；删掉任务会顺手停掉正在跑的校验，不再白读一遍大文件\n" +
-            "· 重试会自己错峰了：网络或服务器抖动时，以前多个任务和连接会在同一瞬间齐刷刷重试，这一版给每次等待加了随机错峰，不再一拥而上；每次等待只会更短、不会更长，原来的等待上限不变",
+            "· 任务详情新增「连接预算」行：正在下载的任务现在会写明自己分到了几条连接，以及是被全局连接上限、站点限流还是单任务上限压住的，数字跟着实时刷新——连接开不满的时候，不用再猜是哪里卡住了\n" +
+            "· 测速改走代理了：以前配了代理时，测速会绕过代理直接连，测出来的数字跟实际下载对不上；现在测速和下载走同一条路，结果才作数。测速页也会提醒：有任务正在下载时测速会互相抢带宽，结果会偏低\n" +
+            "· 全局限速的分配口径说清了：开了全局限速后，总带宽按任务优先级切分，每个任务都有一份保底，慢任务暂时用不完的份额不会转借给别的任务——这是为了保证谁都不会被饿着；任务结束或暂停后，腾出来的带宽会在下一次写入时立即重新分配，连接数也会在几秒内跟上",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
             "· 文件直链 → 直接开始多线程下载，还能预先改好保存文件名\n" +
@@ -8598,7 +8598,7 @@ fun TaskCard(
                     val version = runCatching {
                         ctx.packageManager.getPackageInfo(ctx.packageName, 0)
                             .versionName
-                    }.getOrNull() ?: "5.8.0"
+                    }.getOrNull() ?: "5.9.0"
                     val cm = ctx.getSystemService(
                         android.content.Context.CLIPBOARD_SERVICE,
                     ) as android.content.ClipboardManager
