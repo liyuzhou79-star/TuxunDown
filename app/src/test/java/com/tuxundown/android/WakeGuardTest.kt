@@ -112,6 +112,48 @@ class WakeGuardTest {
     }
 
     @Test
+    fun underlyingAcquireFailureLeavesNoPhantomHold() {
+        // Audit round 46: if the platform acquire itself throws
+        // (PowerManager hand-off failure), the count must stay
+        // at zero — a phantom hold would keep the CPU awake
+        // forever, because no caller believes it holds one and
+        // nobody will ever release it. WakeGuard.acquireTransfer
+        // converts the throw into a false return, which is only
+        // sound if the counter is left exactly as it was.
+        val flaky = object : WakeLockHandle {
+            var fail = true
+            var acquires = 0
+            var releases = 0
+
+            override fun acquire() {
+                if (fail) throw RuntimeException("pm dead")
+                acquires++
+            }
+
+            override fun release() {
+                releases++
+            }
+        }
+        val counter = WakeLockCounter(flaky)
+        var threw = false
+        try {
+            counter.acquireIf(enabled = true)
+        } catch (e: RuntimeException) {
+            threw = true
+        }
+        assertTrue(threw)
+        assertEquals(0, counter.activeCount)
+        assertEquals(0, flaky.acquires)
+        // And the counter is fully usable afterwards.
+        flaky.fail = false
+        assertTrue(counter.acquireIf(enabled = true))
+        assertEquals(1, counter.activeCount)
+        counter.release()
+        assertEquals(0, counter.activeCount)
+        assertEquals(1, flaky.releases)
+    }
+
+    @Test
     fun concurrentRunsBalanceOut() {
         val fake = FakeHandle()
         val counter = WakeLockCounter(fake)
