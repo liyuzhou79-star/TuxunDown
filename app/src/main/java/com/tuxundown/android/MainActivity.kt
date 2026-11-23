@@ -108,6 +108,7 @@ import com.tuxundown.android.core.BulkControl
 import com.tuxundown.android.core.CardFields
 import com.tuxundown.android.core.CardQuickMenu
 import com.tuxundown.android.core.Changelog
+import com.tuxundown.android.core.ChartText
 import com.tuxundown.android.core.Checksum
 import com.tuxundown.android.core.ChunkMap
 import com.tuxundown.android.core.ChunkPlanner
@@ -9226,7 +9227,10 @@ fun WeekChart(days: List<DaySeries.Day>, modifier: Modifier = Modifier) {
         )
         val paint = android.graphics.Paint().apply {
             color = labelColor
-            textSize = 10.dp.toPx()
+            // v6.5 audit round 50 (A-F2): sp caliber via
+            // ChartText, so the labels follow the system
+            // font-size setting (10.dp ignored fontScale).
+            textSize = ChartText.labelPx(density, fontScale)
             isAntiAlias = true
         }
         drawContext.canvas.nativeCanvas.drawText(topLabel, 4.dp.toPx(), 11.dp.toPx(), paint)
@@ -9285,7 +9289,10 @@ fun SpeedChart(history: List<Long>, modifier: Modifier = Modifier) {
         // Axis labels via the native canvas.
         val paint = android.graphics.Paint().apply {
             color = labelColor
-            textSize = 10.dp.toPx()
+            // v6.5 audit round 50 (A-F2): sp caliber via
+            // ChartText, so the labels follow the system
+            // font-size setting (10.dp ignored fontScale).
+            textSize = ChartText.labelPx(density, fontScale)
             isAntiAlias = true
         }
         drawContext.canvas.nativeCanvas.drawText(topLabel, 4.dp.toPx(), 11.dp.toPx(), paint)
