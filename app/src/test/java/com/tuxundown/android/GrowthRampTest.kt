@@ -181,6 +181,43 @@ class GrowthRampTest {
         }
     }
 
+    // ---- v5.9 step B: the audit-44 reallocation bound, pinned ----
+
+    @Test
+    fun rampConstantsMatchTheAuditedBound() {
+        // The numbers step A's bound arithmetic rests on: the
+        // unsmoothed base grant and the climb slope.
+        assertEquals(16, GrowthRamp.BASE_GRANT)
+        assertEquals(8, GrowthRamp.STEP_FLOOR)
+        assertEquals(4, GrowthRamp.STEP_DIVISOR)
+    }
+
+    @Test
+    fun climbAdjudicationCountsMatchTheAuditedBound() {
+        // From the base grant (16), a freed share is FULLY
+        // reflected after at most 3 adjudications for any
+        // target up to 64: 16 -> 32 takes exactly 2, 16 -> 64
+        // exactly 3. (The segmented path adjudicates once per
+        // 2 s scaler tick, so this is the ~2 s re-read wait +
+        // ~6 s climb = ~8 s worst case step A quantified.)
+        fun adjudicationsTo(target: Int): Int {
+            val ramp = GrowthRamp(target)
+            var n = 0
+            while (ramp.granted < target) {
+                ramp.allow(target)
+                n++
+                assertTrue("climb to $target must terminate", n <= 10)
+            }
+            return n
+        }
+        assertEquals(2, adjudicationsTo(32))
+        assertEquals(3, adjudicationsTo(64))
+        for (target in 17..64) {
+            val n = adjudicationsTo(target)
+            assertTrue("target $target took $n adjudications", n <= 3)
+        }
+    }
+
     @Test
     fun hlsShrinkShapeAlsoPassesThrough() {
         // Failures shrink the scaler by 2 per tick; decreases

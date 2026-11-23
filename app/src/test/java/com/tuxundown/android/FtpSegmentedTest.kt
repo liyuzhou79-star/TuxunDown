@@ -143,6 +143,31 @@ class FtpSegmentedTest {
         )
     }
 
+    // ---- v5.9 step B: the fixed width, as far as pure logic reaches ----
+
+    @Test
+    fun workerCountIsPureAndNeverExceedsEightForAnySnapshot() {
+        // The width decision is a pure function of the ONE
+        // allowance snapshot read at run start: same snapshot
+        // in -> same width out, always inside
+        // 1..MAX_CONNECTIONS. (That the engine takes that
+        // snapshot only once — DownloadEngine runFtpSegmented,
+        // the single workerCount call site — is engine wiring
+        // with no pure-function surface; see CHECKPOINT v5.9.0
+        // step B for why that half is not unit-testable.)
+        for (allowance in listOf(-5, 0, 1, 3, 8, 32, 128, Int.MAX_VALUE)) {
+            for (threads in listOf(0, 1, 8, 64)) {
+                for (chunks in listOf(1, 2, 100)) {
+                    val w = FtpSegmented.workerCount(allowance, threads, chunks)
+                    assertTrue(w in 1..FtpSegmented.MAX_CONNECTIONS)
+                    assertEquals(
+                        w, FtpSegmented.workerCount(allowance, threads, chunks)
+                    )
+                }
+            }
+        }
+    }
+
     @Test
     fun workerCountNarrowestWins() {
         // allowance 4 < threads 6 < chunks 9 -> 4

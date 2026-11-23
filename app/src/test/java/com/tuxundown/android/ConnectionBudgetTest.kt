@@ -79,6 +79,50 @@ class ConnectionBudgetTest {
         assertEquals(0, out["a"])
     }
 
+    // ---- v5.9 step B: reallocation immediacy, as pure logic ----
+
+    @Test
+    fun floorHoldsAtTheExactBoundaryCapEqualsTaskCount() {
+        // cap >= task count is the floor's precondition; at the
+        // exact boundary every running task gets exactly 1.
+        val demands = (1..5).map { d("t$it", 2, 32) }
+        val out = ConnectionBudget.allocate(5, demands)
+        assertEquals(5, out.values.sum())
+        assertTrue(out.values.all { it == 1 })
+    }
+
+    @Test
+    fun aVanishedTasksShareIsEatenByTheRestInTheSameCall() {
+        // allocate is a stateless pure function of its inputs:
+        // the moment a task leaves the demand list, the very
+        // next call hands its share to the survivors — no
+        // residue, no remembered old split to lag behind. This
+        // is the logical root of "reallocation without lag" on
+        // the connection side; the engine's tick only decides
+        // WHEN the next call happens, never what it returns.
+        val three = ConnectionBudget.allocate(
+            32, listOf(d("a", 2, 32), d("b", 2, 32), d("c", 2, 32))
+        )
+        assertEquals(32, three.values.sum())
+        val two = ConnectionBudget.allocate(
+            32, listOf(d("a", 2, 32), d("b", 2, 32))
+        )
+        assertEquals(setOf("a", "b"), two.keys)
+        assertEquals(32, two.values.sum())
+        assertTrue(two.getValue("a") > three.getValue("a"))
+        assertTrue(two.getValue("b") > three.getValue("b"))
+    }
+
+    @Test
+    fun allocateHasNoMemoryBetweenCalls() {
+        val demands = listOf(d("a", 4, 32), d("b", 1, 32))
+        val first = ConnectionBudget.allocate(20, demands)
+        // An unrelated split in between must not leak into a
+        // repeat of the first call.
+        ConnectionBudget.allocate(8, listOf(d("x", 2, 8), d("y", 2, 8)))
+        assertEquals(first, ConnectionBudget.allocate(20, demands))
+    }
+
     @Test
     fun clampKeepsTheSettingInRange() {
         assertEquals(ConnectionBudget.MIN_CAP, ConnectionBudget.clampCap(1))
