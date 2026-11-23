@@ -153,6 +153,96 @@ class WakeGuardTest {
         assertEquals(1, flaky.releases)
     }
 
+    // ---------- v6.1 (A46-2): mid-run switch reconcile ----------
+
+    @Test
+    fun reconcileMatchingFlagTouchesNothing() {
+        val fake = FakeHandle()
+        val counter = WakeLockCounter(fake)
+        // Not holding + switch off: stays not holding, no calls.
+        assertFalse(counter.reconcile(enabled = false, holding = false))
+        assertEquals(0, fake.acquires)
+        assertEquals(0, fake.releases)
+        // Holding + switch on: stays holding, no extra acquire.
+        assertTrue(counter.acquireIf(enabled = true))
+        assertTrue(counter.reconcile(enabled = true, holding = true))
+        assertEquals(1, fake.acquires)
+        assertEquals(0, fake.releases)
+        assertEquals(1, counter.activeCount)
+    }
+
+    @Test
+    fun reconcileOffReleasesTheHoldPromptly() {
+        // The A46-2 bug, pinned fixed: a run that acquired with
+        // the switch on must let go when the switch flips off
+        // mid-run — not at the end of the transfer.
+        val fake = FakeHandle()
+        val counter = WakeLockCounter(fake)
+        assertTrue(counter.acquireIf(enabled = true))
+        assertFalse(counter.reconcile(enabled = false, holding = true))
+        assertEquals(0, counter.activeCount)
+        assertEquals(1, fake.releases)
+        assertFalse(fake.held)
+        // The run's finally then releases nothing (its flag is
+        // false) — and a stray release would be a no-op anyway.
+        counter.release()
+        assertEquals(1, fake.releases)
+    }
+
+    @Test
+    fun reconcileOnAcquiresMidRun() {
+        // The other direction: a run that started with the
+        // switch off picks the lock up when the user turns it
+        // on mid-run.
+        val fake = FakeHandle()
+        val counter = WakeLockCounter(fake)
+        assertFalse(counter.acquireIf(enabled = false))
+        assertTrue(counter.reconcile(enabled = true, holding = false))
+        assertEquals(1, counter.activeCount)
+        assertEquals(1, fake.acquires)
+        assertTrue(fake.held)
+    }
+
+    @Test
+    fun reconcileOffKeepsOtherRunsHolds() {
+        // Two runs hold; one reconciles off — the platform lock
+        // must stay held for the other run, and drop only when
+        // the second run also lets go. Each run reconciles only
+        // its own flag, so no run can eat another's hold.
+        val fake = FakeHandle()
+        val counter = WakeLockCounter(fake)
+        assertTrue(counter.acquireIf(enabled = true))
+        assertTrue(counter.acquireIf(enabled = true))
+        assertFalse(counter.reconcile(enabled = false, holding = true))
+        assertEquals(1, counter.activeCount)
+        assertTrue(fake.held)
+        assertEquals(0, fake.releases)
+        assertFalse(counter.reconcile(enabled = false, holding = true))
+        assertEquals(0, counter.activeCount)
+        assertEquals(1, fake.releases)
+        assertFalse(fake.held)
+    }
+
+    @Test
+    fun reconcileFlipFlopKeepsThePairing() {
+        // Off -> on -> off within one run: every transition is
+        // counted exactly once, and the run ends unheld with
+        // balanced platform calls.
+        val fake = FakeHandle()
+        val counter = WakeLockCounter(fake)
+        var holding = counter.acquireIf(enabled = true)
+        holding = counter.reconcile(enabled = false, holding = holding)
+        assertFalse(holding)
+        holding = counter.reconcile(enabled = true, holding = holding)
+        assertTrue(holding)
+        holding = counter.reconcile(enabled = false, holding = holding)
+        assertFalse(holding)
+        assertEquals(0, counter.activeCount)
+        assertEquals(2, fake.acquires)
+        assertEquals(2, fake.releases)
+        assertFalse(fake.held)
+    }
+
     @Test
     fun concurrentRunsBalanceOut() {
         val fake = FakeHandle()

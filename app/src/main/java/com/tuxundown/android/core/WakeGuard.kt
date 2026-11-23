@@ -110,13 +110,60 @@ class WakeLockCounter(private val handle: WakeLockHandle) {
             if (count == 0) handle.release()
         }
     }
+
+    /**
+     * v6.1 (audit round 46, item A46-2): bring ONE caller's hold
+     * in line with the CURRENT switch value, mid-run. The switch
+     * used to be read only at acquire time, so turning
+     * 「下载中保持运行」 off during a long transfer kept the CPU
+     * awake until that run ended — against the setting the user
+     * had just changed. Now the engine reconciles on its
+     * existing 1 s sampler tick (no new timer, no new polling):
+     * - enabled && !holding -> take a hold, return true;
+     * - !enabled && holding -> drop it, return false (the
+     *   underlying lock is released when the LAST holding run
+     *   reconciles or finishes — other runs' holds are never
+     *   eaten, because each run reconciles only its own flag);
+     * - otherwise the flag already matches: return it unchanged
+     *   and touch nothing.
+     * The caller stores the returned flag and releases in its
+     * finally only when it is true, exactly like [acquireIf] —
+     * so the acquire/release pairing stays per-run and
+     * structural. If the underlying acquire throws, the count
+     * is unchanged (pinned by WakeGuardTest) and the exception
+     * propagates to WakeGuard's runCatching wrapper, which
+     * keeps the caller's previous flag.
+     */
+    fun reconcile(enabled: Boolean, holding: Boolean): Boolean {
+        if (enabled == holding) return holding
+        return if (enabled) {
+            acquireIf(true)
+        } else {
+            release()
+            false
+        }
+    }
 }
 
 /** Android handle over the one real [PowerManager.WakeLock].
  *  The lock itself is created with setReferenceCounted(false)
  *  — [WakeLockCounter] owns the count, the platform must not
  *  keep a second one. The isHeld guards make a stray double
- *  call harmless on top of that. */
+ *  call harmless on top of that.
+ *
+ *  The acquire is deliberately the NO-TIMEOUT variant (audit
+ *  round 46, item A46-1, judged v6.1): a timed acquire would
+ *  need a bound that covers the longest legitimate run, and
+ *  no such bound exists — a multi-GB download on a slow link
+ *  runs for hours, and any timeout short enough to act as a
+ *  backstop would expire mid-run and silently drop the very
+ *  protection this lock exists for (the run would then sag in
+ *  suspend with no signal anywhere). The release guarantee
+ *  does not need the backstop: round 46 verified the pairing
+ *  is structural (one acquire site, one finally release site,
+ *  every path inside the try, process death releases with the
+ *  process). Recorded as a deliberate non-change in the v6.1
+ *  checkpoint chapter. */
 private class AndroidWakeLockHandle(
     private val lock: PowerManager.WakeLock,
 ) : WakeLockHandle {
@@ -196,4 +243,22 @@ object WakeGuard {
     fun releaseTransfer() {
         runCatching { counter?.release() }
     }
+
+    /**
+     * v6.1 (A46-2): mid-run counterpart of [acquireTransfer] —
+     * re-reads the CURRENT 下载中保持运行 switch and reconciles
+     * the calling run's hold with it (see
+     * [WakeLockCounter.reconcile]). Called by the engine on its
+     * existing 1 s sampler tick, so a switch flipped mid-run
+     * takes effect within about a second: off releases the hold
+     * (the platform lock drops when the last holding run lets
+     * go), on takes one. Returns the run's new holding flag —
+     * the caller keeps releasing in its finally only on true.
+     * Never throws; when no lock is available the flag is
+     * returned unchanged.
+     */
+    fun reconcileTransfer(holding: Boolean): Boolean = runCatching {
+        counterOrNull()?.reconcile(DownloadCenter.keepCpuAwake, holding)
+            ?: holding
+    }.getOrDefault(holding)
 }

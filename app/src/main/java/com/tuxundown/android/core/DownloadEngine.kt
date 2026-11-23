@@ -146,6 +146,17 @@ class DownloadEngine(
     @Volatile var paused = false
         private set
     @Volatile private var running = false
+
+    /** v6.1 (A46-2): this run's wake-lock hold flag — set by
+     *  WakeGuard.acquireTransfer at run start, reconciled with
+     *  the live keepCpuAwake switch on every sampler tick (see
+     *  [emitProgress]), released in run()'s finally only while
+     *  true. A field rather than a run()-local because the
+     *  sampler ticks live in the per-path runXxx methods. One
+     *  engine instance serves exactly one run (the service
+     *  builds a fresh engine per start), so the flag can never
+     *  bleed across runs. */
+    @Volatile private var wakeHeld = false
     /** Set when the WiFi-only guard stops the transfer mid-flight. */
     @Volatile private var netBlocked = false
     /** Set when the traffic-protection guard stops the transfer. */
@@ -229,6 +240,22 @@ class DownloadEngine(
         }
     }
 
+    /**
+     * v6.1 (A46-2): the sampler ticks' progress emission — all
+     * five transfer paths (segmented / HLS / single-stream x2 /
+     * FTP) end their existing 1 s tick with this, so the wake
+     * hold is reconciled with the CURRENT keepCpuAwake switch
+     * about once a second with no new timer: flipping
+     * 「下载中保持运行」 mid-run now takes effect within a tick
+     * (off releases promptly, on acquires) instead of only at
+     * the next run. The finally's own onProgress call does NOT
+     * go through here — by then the hold is already released.
+     */
+    private fun emitProgress() {
+        wakeHeld = WakeGuard.reconcileTransfer(wakeHeld)
+        onProgress(task)
+    }
+
     /** Blocking run on the calling thread. Returns final status. */
     fun run(): TaskStatus {
         if (running) return task.status
@@ -266,7 +293,7 @@ class DownloadEngine(
         // live outside it). False when the settings switch is
         // off or no lock is available, and then the finally
         // below releases nothing.
-        val wakeHeld = WakeGuard.acquireTransfer()
+        wakeHeld = WakeGuard.acquireTransfer()
         try {
             // v1.7: FTP links take their own path (hand-written
             // FtpClient: PASV, SIZE/REST probe, single stream with
@@ -1106,7 +1133,7 @@ class DownloadEngine(
                 }
                 lastBytes = bytes
                 lastTime = now
-                onProgress(task)
+                emitProgress()
             }
         }
         sampler.isDaemon = true
@@ -2269,7 +2296,7 @@ class DownloadEngine(
                 task.connCapHeld = connAllowance < hlsScaler.width
                 lastBytes = bytes
                 lastTime = now
-                onProgress(task)
+                emitProgress()
             }
         }
         sampler.isDaemon = true
@@ -2682,7 +2709,7 @@ class DownloadEngine(
                 )
                 lastBytes = bytes
                 lastTime = now
-                onProgress(task)
+                emitProgress()
             }
         }
         sampler.isDaemon = true
@@ -2983,7 +3010,7 @@ class DownloadEngine(
                 }
                 lastBytes = bytes
                 lastTime = now
-                onProgress(task)
+                emitProgress()
             }
         }
         sampler.isDaemon = true
@@ -3230,7 +3257,7 @@ class DownloadEngine(
                 )
                 lastBytes = bytes
                 lastTime = now
-                onProgress(task)
+                emitProgress()
             }
         }
         sampler.isDaemon = true
