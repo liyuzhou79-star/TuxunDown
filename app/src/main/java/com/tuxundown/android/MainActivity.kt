@@ -808,7 +808,7 @@ fun DownApp() {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "7.2.0"
+        }.getOrNull() ?: "7.3.0"
     }
     var showGuide by remember {
         // v2.2 safe mode: after 2+ consecutive crashes, first-
@@ -8428,12 +8428,11 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 这一版专做安全补强，把链接、密码和登录状态这些敏感东西的出口又收紧了一轮，下载功能和速度都没有变\n" +
-            "· 备份导入更严了：备份文件里的主链接和镜像只收 http、https、ftp 开头的，混进来的本地文件类链接会被跳过，不会照单全收\n" +
-            "· 自定义的密钥类请求头不再进备份：像 X-Api-Key 这类带密钥、令牌、密码字样的请求头，导出备份时和 Cookie 一样自动剔除，不会跟着备份文件走\n" +
-            "· 复制和分享前统一脱敏：任务诊断、崩溃日志、一键体检和下载报告复制出去之前都会先把链接参数和密钥类内容遮掉；分享任务清单时，如果链接里带着参数或账号信息，清单末尾会多一行提醒你先想清楚再发\n" +
-            "· 诊断页新增「安全现状」：申请了哪些权限、有哪些组件对外开放、代理密码是加密保存还是未设置，一页看清，密码本身不会显示出来\n" +
-            "· 嗅探浏览器能清除登录状态了：在嗅探浏览器里登录过的网站，现在可以一键清掉它的登录状态和浏览数据，不会再一直留着退不出去\n" +
+            "· 这一版专做数据保护：任务记录万一坏了会自己抢救，不再悄悄丢掉，下载功能和速度都没有变\n" +
+            "· 主文件坏了就用备份恢复：任务记录平时有一份备份，主文件读不出来时会自动改用备份，你的任务列表不会凭空消失\n" +
+            "· 个别记录坏了从备份补回：只有几条记录坏掉时，好的照常显示，坏掉的那几条会从备份里按编号补回来\n" +
+            "· 实在救不回会明说：主文件和备份都坏了时，坏文件会先留在一边保存好，不会被新记录覆盖掉，主页也会弹出提示把情况说清楚，不会假装什么都没发生\n" +
+            "· 诊断页新增「存储健康」：任务记录、站点学习、下载统计、嗅探历史这些存在手机里的数据，每个有多少条、健不健康，一页就能看清；设置读取出了问题或有数据丢了行数，这里也会如实写出来\n" +
             "· 升级方式不变：签名和以前一致，直接覆盖安装，任务记录都保留；没有新增权限，也没有新增第三方组件",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
@@ -8878,7 +8877,7 @@ fun TaskCard(
         val version = runCatching {
             ctx.packageManager.getPackageInfo(ctx.packageName, 0)
                 .versionName
-        }.getOrNull() ?: "7.2.0"
+        }.getOrNull() ?: "7.3.0"
         val cm = ctx.getSystemService(
             android.content.Context.CLIPBOARD_SERVICE,
         ) as android.content.ClipboardManager
