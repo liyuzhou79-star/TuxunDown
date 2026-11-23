@@ -14,8 +14,8 @@ import org.junit.Test
 class HelpTopicsTest {
 
     @Test
-    fun has38Topics() {
-        assertEquals(38, HelpTopics.topics.size)
+    fun has40Topics() {
+        assertEquals(40, HelpTopics.topics.size)
     }
 
     @Test
@@ -45,6 +45,8 @@ class HelpTopicsTest {
             "文件页的『一键对账』是什么？",
             "下完的文件能直接删吗？「删除文件」和删记录有什么区别？",
             "「尾巴双下（实验）」是什么？要不要开？",
+            "任务详情里的「全程速度曲线」是什么？",
+            "连接数对比的结果能复制吗？",
             "连接为什么是「渐进放行」？诊断页的「资源」和「连接放行形态」是什么？",
             "有哪些已知的限制？",
         )
