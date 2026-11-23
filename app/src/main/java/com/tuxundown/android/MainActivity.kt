@@ -123,6 +123,7 @@ import com.tuxundown.android.core.Format
 import com.tuxundown.android.core.HostMemory
 import com.tuxundown.android.core.FtpClient
 import com.tuxundown.android.core.LinkExtract
+import com.tuxundown.android.core.MirrorAccess
 import com.tuxundown.android.core.LinkSchemes
 import com.tuxundown.android.core.QuietHours
 import com.tuxundown.android.core.ThunderLink
@@ -630,6 +631,11 @@ fun DownApp() {
     // ---- mirror-sources dialog (v1.6 item 4) ----
     var sourcesTask by remember { mutableStateOf<TaskRecord?>(null) }
     var sourceText by remember { mutableStateOf("") }
+    // v5.4: snapshot of the open dialog task's manual mirror
+    // overrides — the record's set is not Compose state, so the
+    // dialog reads/writes this snapshot (and the record with it)
+    // to repaint the 放行 buttons on tap.
+    var mirrorOverridesUi by remember { mutableStateOf<Set<String>>(emptySet()) }
 
     // ---- checksum dialog (v1.7) ----
     var hashTask by remember { mutableStateOf<TaskRecord?>(null) }
@@ -1537,6 +1543,7 @@ fun DownApp() {
             onSources = {
                 sourcesTask = task
                 sourceText = task.sources.joinToString("\n")
+                mirrorOverridesUi = task.sourceOverrides.toSet()
             },
             onChecksum = {
                 hashTask = task
@@ -3366,6 +3373,72 @@ fun DownApp() {
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    // v5.4: per-mirror state, read from the verdicts
+                    // the engine's last validation pass RECORDED on
+                    // the task — opening this dialog probes nothing.
+                    if (st.sources.isNotEmpty()) {
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            "每个镜像的状态（来自上次下载时的校验记录）：",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        for (src in st.sources) {
+                            val decision = MirrorAccess.decision(
+                                st.sourceVerdicts[src], src in mirrorOverridesUi,
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                src,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                when (decision) {
+                                    MirrorAccess.Decision.USABLE_CONFIRMED ->
+                                        "已确认：是同一个文件，会参与下载。"
+                                    MirrorAccess.Decision.USABLE_OVERRIDDEN ->
+                                        "待确认（可能需要登录）：你已手动放行，会参与下载。"
+                                    MirrorAccess.Decision.BLOCKED_UNCONFIRMED ->
+                                        "待确认：没能确认是不是同一个文件（可能需要登录），先不用。"
+                                    MirrorAccess.Decision.BLOCKED_DIFFERENT ->
+                                        "已拒绝：已经证明是别的文件，不能放行。"
+                                    MirrorAccess.Decision.BLOCKED_UNCHECKED ->
+                                        "还没校验：开始下载时会先校验，确认了才用。"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            if (decision ==
+                                MirrorAccess.Decision.BLOCKED_UNCONFIRMED
+                            ) {
+                                Text(
+                                    "放行就是没确认也用它：万一它其实是别的文件，" +
+                                        "可能会把文件下坏；下载完的哈希校验还会再兜底检查一次。",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                TextButton(onClick = {
+                                    synchronized(st.sourceOverrides) {
+                                        st.sourceOverrides.add(src)
+                                    }
+                                    mirrorOverridesUi = mirrorOverridesUi + src
+                                    store.save()
+                                }) { Text("仍然使用这个镜像") }
+                            }
+                            if (decision ==
+                                MirrorAccess.Decision.USABLE_OVERRIDDEN
+                            ) {
+                                TextButton(onClick = {
+                                    synchronized(st.sourceOverrides) {
+                                        st.sourceOverrides.remove(src)
+                                    }
+                                    mirrorOverridesUi = mirrorOverridesUi - src
+                                    store.save()
+                                }) { Text("取消放行") }
+                            }
+                        }
+                    }
                     if (st.status == TaskStatus.RUNNING) {
                         Text(
                             "任务正在下载：改动会在下次继续时生效。",
@@ -3380,6 +3453,24 @@ fun DownApp() {
                     st.sources = sourceText.lines().map { it.trim() }
                         .filter { it.startsWith("http") && it != st.url }
                         .distinct().toMutableList()
+                    // v5.4: a mirror removed from the list takes
+                    // its recorded verdict and any override with
+                    // it — no orphan records left behind.
+                    synchronized(st.sourceVerdicts) {
+                        val prunedV = MirrorAccess.prunedVerdicts(
+                            st.sourceVerdicts, st.sources,
+                        )
+                        st.sourceVerdicts.clear()
+                        st.sourceVerdicts.putAll(prunedV)
+                    }
+                    synchronized(st.sourceOverrides) {
+                        val prunedO = MirrorAccess.prunedOverrides(
+                            mirrorOverridesUi, st.sources,
+                        )
+                        st.sourceOverrides.clear()
+                        st.sourceOverrides.addAll(prunedO)
+                        mirrorOverridesUi = prunedO
+                    }
                     store.save()
                     Toast.makeText(
                         context,

@@ -86,6 +86,25 @@ class TaskRecord(
     /** Extra mirror URLs of the SAME file (multi-source download).
      *  Validated against the primary before use (see SourceCheck). */
     var sources: MutableList<String> = mutableListOf(),
+    // ---- v5.4 additions ----
+    /** The per-mirror verdict of the engine's LAST validation
+     *  pass (see DownloadEngine.validateSources), keyed by mirror
+     *  URL. This is a RECORD of a check that already happened —
+     *  nothing re-probes to fill it. A mirror with no entry has
+     *  simply never been checked. Persisted like [sourceBytes]
+     *  (a JSON object); records written before v5.4 parse as
+     *  empty = nothing checked yet. Entries for mirrors no
+     *  longer in [sources] are dropped at parse and at save of
+     *  the mirror list (see MirrorAccess.prunedVerdicts). */
+    val sourceVerdicts: MutableMap<String, SourceCheck.Verdict> = mutableMapOf(),
+    /** Mirrors the user manually chose to use anyway although
+     *  validation could not confirm them (verdict UNKNOWN) —
+     *  a TASK-level decision: persisted on this record only,
+     *  revocable from the mirror dialog. It can never lift a
+     *  DIFFERENT verdict (proven another file — see
+     *  MirrorAccess). Records written before v5.4 parse as an
+     *  empty set = nothing overridden. */
+    val sourceOverrides: MutableSet<String> = mutableSetOf(),
     /** Priority tier (see TaskPriority): 1 = 高 (this is also
      *  exactly what 插队 has written since v1.6 — legacy jumped
      *  tasks ARE high tier), 0 = 中 (the default), -1 = 低 (v3.1).
@@ -600,6 +619,14 @@ class TaskStore(context: Context) {
                 o.put("autoRetriesUsed", t.autoRetriesUsed)
                 o.put("mobileConfirmed", t.mobileConfirmed)
                 o.put("sources", JSONArray(t.sources))
+                val sv = JSONObject()
+                synchronized(t.sourceVerdicts) {
+                    for ((k, v) in t.sourceVerdicts) sv.put(k, v.name)
+                }
+                o.put("sourceVerdicts", sv)
+                synchronized(t.sourceOverrides) {
+                    o.put("sourceOverrides", JSONArray(t.sourceOverrides.toList()))
+                }
                 o.put("priority", t.priority)
                 o.put("isHls", t.isHls)
                 o.put("hlsTotalSegments", t.hlsTotalSegments)
@@ -727,6 +754,39 @@ class TaskStore(context: Context) {
                                 t.sources.size < MAX_SOURCES
                             ) {
                                 t.sources.add(s)
+                            }
+                        }
+                    }
+                    // v5.4: per-mirror verdicts + manual overrides.
+                    // Only entries for mirrors still in `sources`
+                    // are read (orphans from an edited list die
+                    // here), unknown verdict names drop themselves,
+                    // and both collections are capped like sources.
+                    val svObj = o.optJSONObject("sourceVerdicts")
+                    if (svObj != null) {
+                        val vkeys = svObj.keys()
+                        synchronized(t.sourceVerdicts) {
+                            while (vkeys.hasNext()) {
+                                val k = vkeys.next()
+                                if (k !in t.sources) continue
+                                if (t.sourceVerdicts.size >= MAX_SOURCES) break
+                                val v = runCatching {
+                                    SourceCheck.Verdict.valueOf(svObj.optString(k))
+                                }.getOrNull() ?: continue
+                                t.sourceVerdicts[k] = v
+                            }
+                        }
+                    }
+                    val soArr = o.optJSONArray("sourceOverrides")
+                    if (soArr != null) {
+                        synchronized(t.sourceOverrides) {
+                            for (j in 0 until soArr.length()) {
+                                val s = soArr.optString(j)
+                                if (s in t.sources &&
+                                    t.sourceOverrides.size < MAX_SOURCES
+                                ) {
+                                    t.sourceOverrides.add(s)
+                                }
                             }
                         }
                     }

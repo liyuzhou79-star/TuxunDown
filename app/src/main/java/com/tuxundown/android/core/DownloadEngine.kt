@@ -1251,6 +1251,13 @@ class DownloadEngine(
      * that disagree are refused — loudly, in the task note — because
      * mixing two different files' chunks would corrupt the result.
      * Returns the usable source list (primary first).
+     *
+     * v5.4: each mirror's verdict is recorded on the task
+     * (TaskRecord.sourceVerdicts) for the mirror dialog, and use
+     * is decided by the one pure ruling in MirrorAccess — a
+     * mirror the user manually overrode (UNKNOWN only) joins in;
+     * DIFFERENT is refused regardless. The check itself
+     * (SourceCheck + the probes above) is unchanged.
      */
     private fun validateSources(): List<String> {
         val extras = task.sources.map { it.trim() }
@@ -1271,6 +1278,7 @@ class DownloadEngine(
         val valid = mutableListOf(task.url)
         var rejected = 0
         var unconfirmed = 0
+        var overridden = 0
         try {
             val primarySampleF = pool.submit(java.util.concurrent.Callable {
                 if (sampleLen > 0) fetchSample(task.url, sampleOffset, sampleLen) else null
@@ -1294,10 +1302,36 @@ class DownloadEngine(
                 // session, see SessionScope) is not a proven
                 // fake: the source is still never used, but it
                 // is counted and reported separately below.
-                when (SourceCheck.verdict(task.totalSize, total, primarySample, sample)) {
-                    SourceCheck.Verdict.SAME -> valid.add(src)
-                    SourceCheck.Verdict.DIFFERENT -> rejected++
-                    SourceCheck.Verdict.UNKNOWN -> unconfirmed++
+                val verdict =
+                    SourceCheck.verdict(task.totalSize, total, primarySample, sample)
+                // v5.4: RECORD this pass's verdict on the task —
+                // the mirror dialog reads exactly this record to
+                // show each mirror's state; nothing re-probes for
+                // display. Mirrors dropped from the list lose
+                // their record (and any override) with it.
+                synchronized(task.sourceVerdicts) {
+                    task.sourceVerdicts[src] = verdict
+                    val pruned = MirrorAccess.prunedVerdicts(task.sourceVerdicts, extras)
+                    task.sourceVerdicts.clear()
+                    task.sourceVerdicts.putAll(pruned)
+                }
+                synchronized(task.sourceOverrides) {
+                    val prunedO = MirrorAccess.prunedOverrides(task.sourceOverrides, extras)
+                    task.sourceOverrides.clear()
+                    task.sourceOverrides.addAll(prunedO)
+                }
+                // The one ruling (MirrorAccess) decides use: a
+                // manually overridden UNKNOWN mirror joins in;
+                // DIFFERENT is refused even if overridden.
+                when (MirrorAccess.decision(verdict, src in task.sourceOverrides)) {
+                    MirrorAccess.Decision.USABLE_CONFIRMED -> valid.add(src)
+                    MirrorAccess.Decision.USABLE_OVERRIDDEN -> {
+                        valid.add(src)
+                        overridden++
+                    }
+                    MirrorAccess.Decision.BLOCKED_DIFFERENT -> rejected++
+                    MirrorAccess.Decision.BLOCKED_UNCONFIRMED -> unconfirmed++
+                    MirrorAccess.Decision.BLOCKED_UNCHECKED -> unconfirmed++
                 }
             }
         } finally {
@@ -1312,13 +1346,20 @@ class DownloadEngine(
         if (unconfirmed > 0) {
             appendNote(
                 "有 $unconfirmed 个镜像源没能确认是不是同一个文件" +
-                    "（服务器没给出大小，可能需要登录），已先不用，只用确认过的源下载。"
+                    "（服务器没给出大小，可能需要登录），已先不用，只用确认过的源下载。" +
+                    "确实是同一个文件的话，可以在镜像管理里手动放行。"
+            )
+        }
+        if (overridden > 0) {
+            appendNote(
+                "有 $overridden 个镜像源没能确认是不是同一个文件，是你手动放行后一起用的；" +
+                    "下载完会照常做哈希校验，对不上会说明。"
             )
         }
         if (valid.size > 1 && !task.note.contains("多源下载")) {
             appendNote("多源下载：${valid.size} 个地址一起下同一个文件。")
         }
-        if (rejected > 0 || unconfirmed > 0 || valid.size > 1) onSave()
+        if (rejected > 0 || unconfirmed > 0 || overridden > 0 || valid.size > 1) onSave()
         return valid
     }
 
