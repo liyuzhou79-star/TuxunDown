@@ -995,6 +995,7 @@ object DownloadCenter {
         o.put("autoRetryCount", autoRetryCount)
         o.put("trafficThresholdMB", trafficThresholdMB)
         o.put("dualChannel", dualChannel)
+        o.put("tailRaceEnabled", tailRaceEnabled)
         o.put("userAgent", userAgent)
         o.put("amoledBlack", amoledBlack)
         o.put("completeVibrate", completeVibrate)
@@ -1065,6 +1066,9 @@ object DownloadCenter {
             trafficThresholdMB = o.optInt("trafficThresholdMB", trafficThresholdMB)
         }
         if (o.has("dualChannel")) dualChannel = o.optBoolean("dualChannel", dualChannel)
+        if (o.has("tailRaceEnabled")) {
+            tailRaceEnabled = o.optBoolean("tailRaceEnabled", tailRaceEnabled)
+        }
         if (o.has("userAgent")) userAgent = o.optString("userAgent", userAgent)
         if (o.has("amoledBlack")) amoledBlack = o.optBoolean("amoledBlack", amoledBlack)
         if (o.has("completeVibrate")) {

@@ -1108,6 +1108,11 @@ fun DownApp() {
                             // restored ones (the value WAS
                             // applied; only the display lied).
                             bootResumeUi = DownloadCenter.bootResume
+                            // Restore refresh: tail-race, card
+                            // fields and site grouping mirrors.
+                            tailRaceUi = DownloadCenter.tailRaceEnabled
+                            cardFieldsUi = DownloadCenter.cardFieldsSnapshot()
+                            groupBySite = DownloadCenter.taskGroupBySite
                             sortFoldersUi = DownloadCenter.sortSubfolders
                             archiveDaysUi = DownloadCenter.archiveAfterDays
                             userAgentUi = DownloadCenter.userAgent

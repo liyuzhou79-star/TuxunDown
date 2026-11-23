@@ -41,6 +41,19 @@ class BackupTest {
     }
 
     @Test
+    fun tailRaceEnabledSurvivesBuildParse() {
+        // Audit round 68 (G1): the tail-race toggle must be
+        // carried in the backup's settings shape verbatim.
+        val tasksJson = TaskStore.serialize(
+            listOf(TaskRecord(url = "https://example.com/d.bin", fileName = "d.bin"))
+        )
+        val settings = JSONObject().put("tailRaceEnabled", true)
+        val parsed = Backup.parse(Backup.build(tasksJson, settings, 1_700_000_000_000))
+        assertNotNull(parsed.settings)
+        assertTrue(parsed.settings!!.getBoolean("tailRaceEnabled"))
+    }
+
+    @Test
     fun legacyV14ArrayStillImports() {
         val tasksJson = TaskStore.serialize(
             listOf(TaskRecord(url = "https://example.com/b.bin", fileName = "b.bin"))
