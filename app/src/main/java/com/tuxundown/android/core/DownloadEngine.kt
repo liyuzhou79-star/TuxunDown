@@ -133,6 +133,14 @@ class DownloadEngine(
      *  [connectionAllowance]; workers consult it alongside the
      *  scaler target when deciding whether they are surplus. */
     @Volatile private var connAllowance: Int = Int.MAX_VALUE
+    /** v5.3: this run's transient-growth ramp (see [GrowthRamp]).
+     *  Created in runSegmented alongside the scaler, read by the
+     *  sampler on every scaler tick — the same field pattern as
+     *  [scaler], because the sampler thread is started before the
+     *  scaler (and the ramp) exist as locals. Spawn-side only:
+     *  surplus workers still exit through workerLoop's effTarget
+     *  check, never through the ramp. */
+    @Volatile private var growthRamp: GrowthRamp? = null
     /** Seekable destination in the public download folder, opened after probing. */
     private lateinit var target: DownloadTarget
     @Volatile var paused = false
@@ -1039,9 +1047,18 @@ class DownloadEngine(
                             // allowance — being capped is a
                             // ceiling, not a freeze at whatever
                             // count the run happened to start
-                            // with.
+                            // with. v5.3: the top-up now goes
+                            // through the growth ramp (one
+                            // adjudication per tick): a share
+                            // that JUMPED because this task just
+                            // started climbs in steps instead of
+                            // spawning whole, while a share that
+                            // FELL passes through instantly —
+                            // the ramp never smooths a decrease.
                             val chunksLeft = nextChunk.get() < count
-                            val deficit = connAllowance - activeWorkers.get()
+                            val desired = minOf(sc.target, connAllowance)
+                            val ceiling = growthRamp?.allow(desired) ?: desired
+                            val deficit = ceiling - activeWorkers.get()
                             if (deficit > 0 && chunksLeft) {
                                 repeat(deficit) { spawnWorker(count) }
                             }
@@ -1066,7 +1083,20 @@ class DownloadEngine(
                             // A higher target spawns at once; a lower
                             // one is honoured by surplus workers exiting
                             // at their next chunk boundary (workerLoop).
-                            val deficit = newTarget - activeWorkers.get()
+                            // v5.3: the SPAWN side goes through the
+                            // growth ramp (one adjudication per
+                            // tick), so a target that jumped — the
+                            // ladder settling high, a remembered
+                            // optimum kicking in — is approached in
+                            // steps. NOTE: task.threads above and
+                            // the HostMemory record keep the SCALER
+                            // target (newTarget), not the ramped
+                            // count — the ramp only paces how fast
+                            // workers actually open, it does not
+                            // rewrite what the run is aiming at.
+                            val desired = minOf(newTarget, connAllowance)
+                            val ceiling = growthRamp?.allow(desired) ?: desired
+                            val deficit = ceiling - activeWorkers.get()
                             if (deficit > 0 && chunksLeft) {
                                 repeat(deficit) { spawnWorker(count) }
                             }
@@ -1143,7 +1173,15 @@ class DownloadEngine(
         // worker exists (the sampler re-reads it every scaler
         // tick from here on).
         connAllowance = connectionAllowance()
-        repeat(minOf(sc.target, connAllowance)) { spawnWorker(count) }
+        // v5.3: this run's growth ramp starts from the same
+        // allowance-pressed target. Its initial grant is the
+        // target itself whenever that is at or below the burst
+        // width (16) — the v4.2 burst opening is never smoothed —
+        // and 16 for anything larger; the sampler's ticks then
+        // adjudicate further growth through it (see GrowthRamp).
+        val ramp = GrowthRamp(minOf(sc.target, connAllowance))
+        growthRamp = ramp
+        repeat(ramp.granted) { spawnWorker(count) }
 
         // Wait until all workers exit (done or paused). v2.2
         // power pass: JOIN the worker threads instead of polling
@@ -2098,6 +2136,17 @@ class DownloadEngine(
             totalSegments = segments.size,
         )
         val hlsScaler = HlsScaler(hlsPlan.startWidth, hlsPlan.maxWidth)
+        // v5.3: the same growth ramp the segmented path uses,
+        // wrapped around the gate below as depth defence — one
+        // adjudication per 1 s tick. With the CURRENT constants
+        // this can never actually bind: the HLS start width
+        // (<= 16) is inside the ramp's unsmoothed base grant,
+        // the scaler grows by only +2 per >= 2 ticks while the
+        // ramp's minimum step is 8 per tick, and decreases pass
+        // through instantly by design. GrowthRampTest pins that
+        // non-binding property; the wiring exists so both paths
+        // obey ONE spawn-growth rule if the constants ever move.
+        val hlsRamp = GrowthRamp(hlsPlan.startWidth)
         /** The gated live width the writer loop's submit window
          *  reads; rewritten by the sampler tick every second. */
         val hlsLiveWidth = AtomicInteger(hlsPlan.startWidth)
@@ -2165,7 +2214,12 @@ class DownloadEngine(
                 if (connAllowance >= hlsScaler.width) {
                     hlsScaler.onTick(task.speedBps, starved, retryDelta)
                 }
-                val gatedWidth = HlsPlan.gate(hlsScaler.width, connAllowance)
+                // v5.3: the gate's output passes through the
+                // growth ramp (see hlsRamp above) — provably an
+                // identity with current constants, kept so the
+                // HLS spawn width follows the same transient-
+                // growth rule as the segmented path.
+                val gatedWidth = hlsRamp.allow(HlsPlan.gate(hlsScaler.width, connAllowance))
                 hlsLiveWidth.set(gatedWidth)
                 task.threads = gatedWidth
                 task.connCapHeld = connAllowance < hlsScaler.width
