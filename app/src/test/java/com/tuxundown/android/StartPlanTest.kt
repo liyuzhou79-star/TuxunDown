@@ -76,7 +76,11 @@ class StartPlanTest {
         // 0, negative, below MIN_CAP and above MAX_THREADS all
         // fall back to the engine max as the bound.
         for (badCap in listOf(0, -5, 2, 999)) {
-            val fresh = StartPlan.decide(hint = 0, cap = badCap, resuming = false, persistedThreads = 0)
+            // fullWidthOpen = true pins the burst width this
+            // test asserts (BURST_START); the factory default
+            // is the conservative form since the 2026-11-24
+            // 00:09 ruling (see the default test below).
+            val fresh = StartPlan.decide(hint = 0, cap = badCap, resuming = false, persistedThreads = 0, fullWidthOpen = true)
             assertEquals("cap=$badCap", StartPlan.BURST_START, fresh.start)
             val hinted = StartPlan.decide(hint = DownloadEngine.MAX_THREADS, cap = badCap, resuming = false, persistedThreads = 0)
             assertEquals("cap=$badCap", DownloadEngine.MAX_THREADS, hinted.start)
@@ -88,15 +92,19 @@ class StartPlanTest {
         // v7.7 (Step B3): the burst was 16 from v4.2 through
         // Step B2 (which kept it while only raising the cap);
         // B3 raised it to 32 on the user's speed-first ruling.
-        val d = StartPlan.decide(hint = 0, cap = 0, resuming = false, persistedThreads = 0)
+        // This is the full-width-open form, passed explicitly:
+        // the factory default flipped to the conservative
+        // (legacy 16) form on 2026-11-24 (see the default
+        // test below).
+        val d = StartPlan.decide(hint = 0, cap = 0, resuming = false, persistedThreads = 0, fullWidthOpen = true)
         assertEquals(32, d.start)
         assertEquals(StartPlan.BURST_START, d.start)
         assertTrue(d.probing)
         // Out-of-range hints are no hint at all (v7.7: the legal
         // band tops out at 128 now, so the over-range example is
         // 200 — 100 is a legal hint since the raise).
-        assertEquals(32, StartPlan.decide(1, 0, false, 0).start)
-        assertEquals(32, StartPlan.decide(200, 0, false, 0).start)
+        assertEquals(32, StartPlan.decide(1, 0, false, 0, fullWidthOpen = true).start)
+        assertEquals(32, StartPlan.decide(200, 0, false, 0, fullWidthOpen = true).start)
     }
 
     @Test
@@ -135,7 +143,7 @@ class StartPlanTest {
         // two doublings (32 -> 64 -> 128) to the new top instead
         // of three, and the ramp three adjudications instead of
         // four. The hint band and the cap's press are unchanged.
-        val fresh = StartPlan.decide(0, 0, false, 0)
+        val fresh = StartPlan.decide(0, 0, false, 0, fullWidthOpen = true)
         assertEquals(32, fresh.start)
         assertEquals(StartPlan.BURST_START, fresh.start)
         assertTrue(fresh.probing)
