@@ -717,7 +717,7 @@ fun DownApp() {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "6.5.0"
+        }.getOrNull() ?: "6.6.0"
     }
     var showGuide by remember {
         // v2.2 safe mode: after 2+ consecutive crashes, first-
@@ -7741,11 +7741,9 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 在嗅探浏览器里长按一个下不了的链接，以前点了没反应、也不说为什么；现在会弹提示把原因说清，不用再对着没动静的页面猜\n" +
-            "· 速度曲线图和统计图上的坐标小字，现在会跟随系统的字体大小设置一起变大变小；开了大字体，这几个小字也不会再显得特别小\n" +
-            "· 给某个任务单独设置的 Authorization 登录请求头，以前填了其实没有真正发出去，现在会真正发给文件所在的网站；只发给本站，跳转或换到其他网站的镜像时不会带过去，登录信息不会跑到别的网站\n" +
-            "· 仓库里新增了一页「已知限制」，把目前暂时接受不了的限制逐条写清：会发生什么、为什么、能怎么办，README 里有入口\n" +
-            "· 这一版还把历次更新记下的遗留问题做了一次总盘点，逐条重新核对，能修的已经修了，剩下的都写进了「已知限制」那一页",
+            "· 下载中途切网或断网，不再干等了：以前默认网络一断，单条连接的下载（包括单流和 HLS 视频）最长要等满 30 秒的读取超时才发现网络没了；现在网络一断，正在传的连接立刻失败、马上走原来的重试，换到新网络接着下\n" +
+            "· 切换网络之后落成的「断网停泊」，以前要等系统事件来才解除，偶尔会卡住、等人手动点继续；现在多了一道轮询兜底，最迟约 5 秒就会自动解除、接着下载，不会再卡住\n" +
+            "· 连接数对比图上的标签小字，现在也跟随系统的字体大小设置一起变大变小了，和速度曲线图、统计图三张图的口径统一",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
             "· 文件直链 → 直接开始多线程下载，还能预先改好保存文件名\n" +
@@ -8177,7 +8175,7 @@ fun TaskCard(
         val version = runCatching {
             ctx.packageManager.getPackageInfo(ctx.packageName, 0)
                 .versionName
-        }.getOrNull() ?: "6.5.0"
+        }.getOrNull() ?: "6.6.0"
         val cm = ctx.getSystemService(
             android.content.Context.CLIPBOARD_SERVICE,
         ) as android.content.ClipboardManager
