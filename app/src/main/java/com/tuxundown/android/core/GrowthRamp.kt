@@ -42,8 +42,11 @@ package com.tuxundown.android.core
  * second, so small targets are reached in one or two steps; at
  * most about +25% of the target per adjudication means the
  * climb from the 16 baseline to any target up to 64 completes
- * in at most 3 adjudications (~6 s) — the same overall pace as
+ * in at most 4 adjudications (~8 s) — the same overall pace as
  * the old doubling ladder, except it starts at 16 instead of 4.
+ * (Most targets take 3 or fewer; 59, 62 and 63 take 4, because
+ * [stepFor] uses integer division and falls one short there —
+ * the true counts are pinned by GrowthRampTest.)
  *
  * Spawn-side ONLY: [allow] decides how many workers may be
  * spawned, never how many must die. Workers above the granted
