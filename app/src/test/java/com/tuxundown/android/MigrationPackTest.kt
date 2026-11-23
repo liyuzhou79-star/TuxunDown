@@ -219,6 +219,76 @@ class MigrationPackTest {
     }
 
     @Test
+    fun migrationPackReExportCarriesEveryStatsFieldAndHostLearningVerbatim() {
+        // v7.0 audit round 55: the round-45 re-export test
+        // asserted only 2 of 8 stats keys on the second parse.
+        // All eight must survive export -> parse -> re-export
+        // -> parse verbatim, and host learning must survive
+        // the same fixed point entry-for-entry (cap included).
+        val first = Backup.parse(
+            Backup.buildMigration(
+                "[]", JSONObject(), statsJson(), hostMemoryText(), 0L,
+            )
+        )
+        val second = Backup.parse(
+            Backup.buildMigration(
+                first.tasksJson!!, first.settings!!,
+                first.stats, first.hostMemory, 1L,
+            )
+        )
+        val stats = second.stats
+        assertNotNull(stats)
+        assertEquals(123_456_789L, stats!!.getLong("totalBytes"))
+        assertEquals(42, stats.getInt("doneCount"))
+        assertEquals("2026-11-22", stats.getString("todayKey"))
+        assertEquals(1_024L, stats.getLong("todayBytes"))
+        assertEquals(9_000_000L, stats.getLong("speedSum"))
+        assertEquals(3, stats.getInt("speedCount"))
+        assertEquals("example.com\t123456\t7", stats.getString("hostStats"))
+        assertEquals(
+            "2026-11-21\t2048\n2026-11-22\t1024", stats.getString("days"),
+        )
+        assertEquals(first.hostMemory, second.hostMemory)
+        val entries = HostMemory.parse(second.hostMemory!!)
+        assertEquals(2, entries.size)
+        val capped = entries.first { it.host == "example.com" }
+        assertEquals(16, capped.threads)
+        assertEquals(8, capped.cap)
+    }
+
+    @Test
+    fun migrationPackReExportKeepsCredentialsOut() {
+        // v7.0 audit round 55: sensitive stripping must hold
+        // not only on the first export but also after a
+        // parse -> re-export round (a backup of a restored
+        // phone must not resurrect stripped credentials),
+        // while the non-sensitive Referer survives both hops.
+        val task = TaskRecord(
+            url = "https://example.com/secret.zip",
+            fileName = "secret.zip",
+            headers = mutableMapOf(
+                "Cookie" to "session=topsecret-cookie",
+                "Authorization" to "Bearer <redacted>",
+                "Proxy-Authorization" to "Basic topsecret-basic",
+                "Referer" to "https://example.com/page",
+            ),
+        )
+        val tasksJson = TaskStore.serialize(listOf(task), stripSensitiveHeaders = true)
+        val firstText = Backup.buildMigration(
+            tasksJson, JSONObject(), statsJson(), hostMemoryText(), 0L,
+        )
+        val first = Backup.parse(firstText)
+        val secondText = Backup.buildMigration(
+            first.tasksJson!!, first.settings!!,
+            first.stats, first.hostMemory, 1L,
+        )
+        assertFalse(secondText.contains("topsecret-cookie"))
+        assertFalse(secondText.contains("topsecret-token"))
+        assertFalse(secondText.contains("topsecret-basic"))
+        assertTrue(secondText.contains("https://example.com/page"))
+    }
+
+    @Test
     fun blankSectionsAreOmittedNotStored() {
         val text = Backup.buildMigration("[]", JSONObject(), null, "  ", 0L)
         val parsed = Backup.parse(text)
