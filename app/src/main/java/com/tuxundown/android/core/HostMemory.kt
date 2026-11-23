@@ -211,17 +211,34 @@ object HostMemory {
             "${it.host}\t${it.threads}\t${it.fails}\t${it.updatedMs}\t${it.cap}"
         }
 
-    fun parse(text: String): List<Entry> {
-        if (text.isBlank()) return emptyList()
-        return text.lines().mapNotNull { line ->
+    fun parse(text: String): List<Entry> = parseWithLoss(text).first
+
+    /**
+     * v7.3 (audit round 58, B5): same parse as [parse], but also
+     * reports how many non-blank lines were dropped as
+     * unparseable, so the silent line-salvage becomes a countable
+     * trace (DownloadCenter accumulates it for the diagnostics
+     * 存储健康 section). Blank lines are ignored, not counted —
+     * a trailing newline is not corruption.
+     */
+    fun parseWithLoss(text: String): Pair<List<Entry>, Int> {
+        if (text.isBlank()) return emptyList<Entry>() to 0
+        var dropped = 0
+        val out = text.lines().mapNotNull { line ->
+            if (line.isBlank()) return@mapNotNull null
             val p = line.split('\t')
-            if (p.size != 4 && p.size != 5) return@mapNotNull null
-            val threads = p[1].toIntOrNull() ?: return@mapNotNull null
-            val fails = p[2].toIntOrNull() ?: return@mapNotNull null
-            val updated = p[3].toLongOrNull() ?: return@mapNotNull null
-            val cap = if (p.size == 5) p[4].toIntOrNull() ?: return@mapNotNull null else 0
-            if (p[0].isBlank()) null else Entry(p[0], threads, fails, updated, cap)
+            if (p.size != 4 && p.size != 5) { dropped++; return@mapNotNull null }
+            val threads = p[1].toIntOrNull() ?: run { dropped++; return@mapNotNull null }
+            val fails = p[2].toIntOrNull() ?: run { dropped++; return@mapNotNull null }
+            val updated = p[3].toLongOrNull() ?: run { dropped++; return@mapNotNull null }
+            val cap = if (p.size == 5) {
+                p[4].toIntOrNull() ?: run { dropped++; return@mapNotNull null }
+            } else {
+                0
+            }
+            if (p[0].isBlank()) { dropped++; null } else Entry(p[0], threads, fails, updated, cap)
         }
+        return out to dropped
     }
 }
 
@@ -252,11 +269,18 @@ class HostMemoryParseCache {
     var version: Int = 0
         private set
 
+    /** v7.3 (B5): lines dropped by the most recent re-parse. */
+    @Volatile
+    var lastDropped: Int = 0
+        private set
+
     @Synchronized
     fun get(text: String): List<HostMemory.Entry> {
         if (text == raw) return parsed
         raw = text
-        parsed = HostMemory.parse(text)
+        val (entries, dropped) = HostMemory.parseWithLoss(text)
+        parsed = entries
+        lastDropped = dropped
         version++
         return parsed
     }

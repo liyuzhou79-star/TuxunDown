@@ -342,7 +342,15 @@ object ChunkPlanner {
         if (hex.isBlank()) return out
         val bytes = ByteArray(minOf(hex.length / 2, (n + 7) / 8))
         for (i in bytes.indices) {
-            bytes[i] = hex.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+            // v7.3 (audit round 58, B4): a non-hex byte used to
+            // throw here and the per-record guard in
+            // TaskStore.deserialize then discarded the WHOLE
+            // record over one corrupt bitmap. Degrade to an
+            // EMPTY bitset instead — the record survives and
+            // simply re-downloads its chunks.
+            bytes[i] = runCatching {
+                hex.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+            }.getOrElse { return BooleanArray(n) }
         }
         for (i in 0 until n) {
             val b = bytes.getOrNull(i / 8) ?: break

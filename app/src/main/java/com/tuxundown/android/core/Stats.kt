@@ -96,14 +96,22 @@ object DaySeries {
     fun serialize(entries: List<Day>): String =
         entries.joinToString("\n") { "${it.key}\t${it.bytes}" }
 
-    fun parse(text: String): List<Day> {
-        if (text.isBlank()) return emptyList()
-        return text.lines().mapNotNull { line ->
+    fun parse(text: String): List<Day> = parseWithLoss(text).first
+
+    /** v7.3 (audit round 58, B5): same parse as [parse], plus
+     *  the count of non-blank lines dropped as unparseable
+     *  (blank lines are ignored, not counted). */
+    fun parseWithLoss(text: String): Pair<List<Day>, Int> {
+        if (text.isBlank()) return emptyList<Day>() to 0
+        var dropped = 0
+        val out = text.lines().mapNotNull { line ->
+            if (line.isBlank()) return@mapNotNull null
             val p = line.split('\t')
-            if (p.size != 2) return@mapNotNull null
-            val bytes = p[1].toLongOrNull() ?: return@mapNotNull null
-            if (p[0].isBlank()) null else Day(p[0], bytes)
+            if (p.size != 2) { dropped++; return@mapNotNull null }
+            val bytes = p[1].toLongOrNull() ?: run { dropped++; return@mapNotNull null }
+            if (p[0].isBlank()) { dropped++; null } else Day(p[0], bytes)
         }
+        return out to dropped
     }
 }
 
@@ -145,14 +153,22 @@ object HostStats {
     fun serialize(entries: List<Entry>): String =
         entries.joinToString("\n") { "${it.host}\t${it.bytes}\t${it.count}" }
 
-    fun parse(text: String): List<Entry> {
-        if (text.isBlank()) return emptyList()
-        return text.lines().mapNotNull { line ->
+    fun parse(text: String): List<Entry> = parseWithLoss(text).first
+
+    /** v7.3 (audit round 58, B5): same parse as [parse], plus
+     *  the count of non-blank lines dropped as unparseable
+     *  (blank lines are ignored, not counted). */
+    fun parseWithLoss(text: String): Pair<List<Entry>, Int> {
+        if (text.isBlank()) return emptyList<Entry>() to 0
+        var dropped = 0
+        val out = text.lines().mapNotNull { line ->
+            if (line.isBlank()) return@mapNotNull null
             val p = line.split('\t')
-            if (p.size != 3) return@mapNotNull null
-            val bytes = p[1].toLongOrNull() ?: return@mapNotNull null
-            val count = p[2].toIntOrNull() ?: return@mapNotNull null
-            if (p[0].isBlank()) null else Entry(p[0], bytes, count)
+            if (p.size != 3) { dropped++; return@mapNotNull null }
+            val bytes = p[1].toLongOrNull() ?: run { dropped++; return@mapNotNull null }
+            val count = p[2].toIntOrNull() ?: run { dropped++; return@mapNotNull null }
+            if (p[0].isBlank()) { dropped++; null } else Entry(p[0], bytes, count)
         }
+        return out to dropped
     }
 }

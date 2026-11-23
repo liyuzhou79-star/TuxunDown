@@ -820,6 +820,11 @@ fun DownApp() {
     }
     var clipboardLink by remember { mutableStateOf("") }
 
+    // v7.3 (B1): timestamp of the tasks.json recovery event the
+    // user has dismissed in THIS composition (the persisted
+    // shown-stamp in DownloadCenter is the cross-launch record).
+    var recoveryBannerDismissedAt by remember { mutableStateOf(0L) }
+
     // v2.5 cold-start round 2: non-first-frame startup work
     // (today: the archive sweep) runs AFTER the first frame —
     // see DownloadCenter.runDeferredStartup. Safe mode skips
@@ -2219,6 +2224,38 @@ fun DownApp() {
                     OutlinedButton(onClick = { screen = "stats" }) { Text("统计") }
                     Spacer(Modifier.size(6.dp))
                     OutlinedButton(onClick = { screen = "settings" }) { Text("设置") }
+                }
+            }
+
+            // v7.3 (audit round 58, B1): one-time banner for the
+            // latest tasks.json recovery event — dismissible, and
+            // each event shows exactly once (dismissal is stamped
+            // with the event's own timestamp in DownloadCenter).
+            val recoveryEvent = DownloadCenter.pendingTasksRecoveryEvent()
+                ?.takeIf { it.atMs != recoveryBannerDismissedAt }
+            if (recoveryEvent != null) {
+                item(key = "recoverybanner") {
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer,
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                DownloadCenter.tasksRecoveryEventText(recoveryEvent),
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.weight(1f),
+                            )
+                            TextButton(onClick = {
+                                DownloadCenter.markTasksRecoveryEventShown(recoveryEvent.atMs)
+                                recoveryBannerDismissedAt = recoveryEvent.atMs
+                            }) { Text("知道了") }
+                        }
+                    }
                 }
             }
 

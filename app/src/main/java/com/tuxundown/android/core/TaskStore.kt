@@ -408,6 +408,13 @@ class TaskStore(context: Context) {
     fun fileOf(task: TaskRecord): File = File(dir, task.id + ".bin")
     fun finalName(task: TaskRecord): String = task.fileName.ifBlank { "download" }
 
+    /** v7.3 (audit round 58, B1): the structured outcome of the
+     *  most recent [load] — DownloadCenter reads it right after
+     *  load to persist the recovery event for diagnostics. */
+    @Volatile
+    var lastLoadOutcome: LoadOutcome? = null
+        private set
+
     @Synchronized
     fun load() {
         tasks.clear()
@@ -417,12 +424,46 @@ class TaskStore(context: Context) {
         // also falls through to .bak (v1.3 only fell back when the
         // main file was missing/unreadable); a valid "[]" is a
         // legitimately empty list and is accepted as-is.
-        for (f in listOf(metaFile, File(metaFile.path + ".bak"))) {
-            if (!f.exists()) continue
-            val text = runCatching { f.readText() }.getOrNull() ?: continue
-            if (runCatching { JSONArray(text) }.isFailure) continue
-            tasks.addAll(deserialize(text))
-            return
+        // v7.3 (audit round 58, B1+B3): the decision itself is the
+        // pure companion [decideLoad] — this method only reads the
+        // two files, preserves the evidence on a double-bad, and
+        // adopts the outcome's records.
+        val bakFile = File(metaFile.path + ".bak")
+        val mainText = if (metaFile.exists()) {
+            runCatching { metaFile.readText() }.getOrNull()
+        } else {
+            null
+        }
+        val bakText = if (bakFile.exists()) {
+            runCatching { bakFile.readText() }.getOrNull()
+        } else {
+            null
+        }
+        val outcome = decideLoad(mainText, bakText)
+        lastLoadOutcome = outcome
+        if (outcome.doubleBad) {
+            // BEFORE any empty save can overwrite either file,
+            // keep the bad bytes aside as evidence.
+            preserveCorruptAside(metaFile, File(metaFile.path + ".corrupt"))
+            preserveCorruptAside(bakFile, File(metaFile.path + ".bak.corrupt"))
+        }
+        tasks.addAll(outcome.records)
+    }
+
+    /**
+     * v7.3 (B1): copy [src] to [aside] verbatim. An existing
+     * [aside] is earlier evidence and is never overwritten — the
+     * new copy takes a timestamp suffix instead.
+     */
+    private fun preserveCorruptAside(src: File, aside: File) {
+        if (!src.exists()) return
+        runCatching {
+            val target = if (aside.exists()) {
+                File(aside.path + "." + System.currentTimeMillis())
+            } else {
+                aside
+            }
+            src.copyTo(target, overwrite = false)
         }
     }
 
@@ -484,7 +525,14 @@ class TaskStore(context: Context) {
             runCatching { out.fd.sync() }
         }
         if (metaFile.exists()) {
-            runCatching { metaFile.copyTo(File(metaFile.path + ".bak"), overwrite = true) }
+            // v7.3 (audit round 58, B2): probe BEFORE copying —
+            // an unparseable main (e.g. the bad file a .bak
+            // recovery just loaded from) must never overwrite
+            // the good .bak; skip the copy and keep the rescue.
+            val mainText = runCatching { metaFile.readText() }.getOrNull()
+            if (canOverwriteBak(mainText)) {
+                runCatching { metaFile.copyTo(File(metaFile.path + ".bak"), overwrite = true) }
+            }
         }
         if (!tmp.renameTo(metaFile)) {
             // renameTo can fail across filesystems; same dir, so this
@@ -652,6 +700,95 @@ class TaskStore(context: Context) {
             }
             return accepted
         }
+
+        /** v7.3 (audit round 58, B1): which store a load came from. */
+        enum class LoadSource { MAIN, BAK, EMPTY }
+
+        /**
+         * v7.3 (audit round 58, B1): the structured result of one
+         * load decision. [droppedRecords] counts records the
+         * chosen source's array held but per-record parsing
+         * discarded (before any .bak merge); [bakMergedRecords]
+         * counts records the B3 merge pulled back from .bak;
+         * [doubleBad] is true only when BOTH files existed and
+         * neither parsed as a JSON array — the case that used to
+         * silently return an empty list and let the next save
+         * destroy the evidence.
+         */
+        data class LoadOutcome(
+            val source: LoadSource,
+            val records: List<TaskRecord>,
+            val droppedRecords: Int,
+            val bakMergedRecords: Int,
+            val doubleBad: Boolean,
+        )
+
+        /** Raw array length of [text], or null when it does not
+         *  parse as a JSON array at all. */
+        private fun arrayLengthOrNull(text: String?): Int? {
+            if (text == null) return null
+            return runCatching { JSONArray(text).length() }.getOrNull()
+        }
+
+        /**
+         * v7.3 (audit round 58, B1+B3): the PURE load decision —
+         * the main file's text and the .bak file's text in (null
+         * = file absent/unreadable), the outcome and the record
+         * table out. No file IO, so the corrupt-file corpus is
+         * unit-testable on the JVM.
+         *
+         * Rules, in order:
+         * - main parses as an array: source MAIN. When per-record
+         *   parsing dropped records (fewer records than the raw
+         *   array length) and .bak parses, .bak records whose id
+         *   is missing from main are merged back by id (B3).
+         * - main absent or unparseable, .bak parses: source BAK.
+         * - both present and both unparseable: source EMPTY with
+         *   [LoadOutcome.doubleBad] set.
+         * - anything else empty: source EMPTY, not double-bad.
+         * The IMPORT path does NOT use this function —
+         * [deserialize] there keeps its per-record drop unchanged.
+         */
+        fun decideLoad(mainText: String?, bakText: String?): LoadOutcome {
+            val mainLen = arrayLengthOrNull(mainText)
+            val bakLen = arrayLengthOrNull(bakText)
+            if (mainLen != null) {
+                val records = deserialize(mainText!!)
+                val dropped = (mainLen - records.size).coerceAtLeast(0)
+                var merged = 0
+                if (dropped > 0 && bakLen != null) {
+                    val have = records.mapTo(HashSet()) { it.id }
+                    for (r in deserialize(bakText!!)) {
+                        if (r.id !in have) {
+                            records.add(r)
+                            have.add(r.id)
+                            merged++
+                        }
+                    }
+                }
+                return LoadOutcome(LoadSource.MAIN, records, dropped, merged, false)
+            }
+            if (bakLen != null) {
+                val records = deserialize(bakText!!)
+                val dropped = (bakLen - records.size).coerceAtLeast(0)
+                return LoadOutcome(LoadSource.BAK, records, dropped, 0, false)
+            }
+            return LoadOutcome(
+                LoadSource.EMPTY, emptyList(), 0, 0,
+                doubleBad = mainText != null && bakText != null,
+            )
+        }
+
+        /**
+         * v7.3 (audit round 58, B2): may the current main file be
+         * copied over .bak? Only when main still parses as a JSON
+         * array — after a .bak recovery the main file on disk is
+         * the BAD one until the rename lands, and copying it over
+         * .bak first would destroy the rescue copy. A missing
+         * main (null) has nothing to copy, so it also answers no.
+         */
+        fun canOverwriteBak(mainText: String?): Boolean =
+            arrayLengthOrNull(mainText) != null
 
         /** Pure serialization — same format on disk and for export.
          *  [stripSensitiveHeaders] is for EXPORTS only (v1.9): the

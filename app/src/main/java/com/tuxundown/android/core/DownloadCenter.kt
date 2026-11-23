@@ -406,6 +406,81 @@ object DownloadCenter {
         clipboardPrompted = url
     }
 
+    // ---- v7.3 (audit round 58, B1): tasks.json recovery event ----
+    // The latest load that had to self-heal (fell back to .bak,
+    // merged records back from .bak, dropped records, or found
+    // both files bad) is persisted as one small JSON object under
+    // "tasksRecoveryEvent" in the settings prefs: Step C's
+    // diagnostics section reads it, and the home banner shows it
+    // once per event. A clean load never overwrites it.
+
+    /** One persisted tasks.json recovery event. */
+    data class TasksRecoveryEvent(
+        val atMs: Long,
+        val source: String,
+        val droppedRecords: Int,
+        val bakMergedRecords: Int,
+        val doubleBad: Boolean,
+    )
+
+    /** Record [outcome] if it describes an actual recovery/loss;
+     *  a clean MAIN load with no drops is not an event. */
+    fun recordTasksRecovery(outcome: TaskStore.LoadOutcome) {
+        val isEvent = outcome.doubleBad ||
+            outcome.source == TaskStore.LoadSource.BAK ||
+            outcome.droppedRecords > 0 ||
+            outcome.bakMergedRecords > 0
+        if (!isEvent) return
+        val o = org.json.JSONObject()
+        o.put("atMs", System.currentTimeMillis())
+        o.put("source", outcome.source.name)
+        o.put("dropped", outcome.droppedRecords)
+        o.put("merged", outcome.bakMergedRecords)
+        o.put("doubleBad", outcome.doubleBad)
+        prefs().edit().putString("tasksRecoveryEvent", o.toString()).apply()
+    }
+
+    /** The persisted latest recovery event, or null when none. */
+    fun tasksRecoveryEvent(): TasksRecoveryEvent? {
+        val raw = pString("tasksRecoveryEvent", "")
+        if (raw.isBlank()) return null
+        val o = runCatching { org.json.JSONObject(raw) }.getOrNull() ?: return null
+        return TasksRecoveryEvent(
+            atMs = o.optLong("atMs", 0),
+            source = o.optString("source", ""),
+            droppedRecords = o.optInt("dropped", 0),
+            bakMergedRecords = o.optInt("merged", 0),
+            doubleBad = o.optBoolean("doubleBad", false),
+        )
+    }
+
+    /** The event the home banner still owes the user: an event
+     *  exists and has not been dismissed yet (dismissal records
+     *  the event's own timestamp, so the NEXT event shows again
+     *  while this one never repeats). */
+    fun pendingTasksRecoveryEvent(): TasksRecoveryEvent? {
+        val e = tasksRecoveryEvent() ?: return null
+        if (e.atMs <= 0) return null
+        return if (pLong("tasksRecoveryEventShownAt", 0) == e.atMs) null else e
+    }
+
+    /** Dismiss the banner for the event stamped [atMs]. */
+    fun markTasksRecoveryEventShown(atMs: Long) {
+        prefs().edit().putLong("tasksRecoveryEventShownAt", atMs).apply()
+    }
+
+    /** Plain-language banner line for one recovery event. */
+    fun tasksRecoveryEventText(e: TasksRecoveryEvent): String = when {
+        e.doubleBad ->
+            "任务列表文件已损坏且备份也无法读取，已把坏文件原样保留为 tasks.json.corrupt，本次以空列表启动。"
+        e.source == TaskStore.LoadSource.BAK.name ->
+            "任务列表文件已损坏，已从备份恢复全部任务。"
+        e.bakMergedRecords > 0 ->
+            "任务列表有 ${e.droppedRecords} 条记录损坏，已从备份补回 ${e.bakMergedRecords} 条。"
+        else ->
+            "任务列表有 ${e.droppedRecords} 条记录损坏，已跳过损坏记录，其余任务完好。"
+    }
+
     /** v1.4: how many tasks may download at the same time (1–5). */
     var maxConcurrent: Int
         get() = pInt("maxConcurrent", 1).coerceIn(1, 5)
@@ -1001,14 +1076,20 @@ object DownloadCenter {
 
     /** v5.5: how many [HostStats] entries are currently stored
      *  (same row as [hostMemoryCount]). */
-    fun hostStatsCount(): Int = HostStats.parse(pString("hostStats", "")).size
+    fun hostStatsCount(): Int {
+        val (entries, dropped) = HostStats.parseWithLoss(pString("hostStats", ""))
+        noteSubStoreDropped(dropped)
+        return entries.size
+    }
 
     /** Restore per-host learning data. The text is parsed and
      *  re-serialized before storing, so malformed lines from a
      *  hand-edited file drop out instead of being stored
      *  verbatim (HostMemory.parse is tolerant by design). */
     fun applyHostMemory(text: String) {
-        saveHostEntries(HostMemory.parse(text))
+        val (entries, dropped) = HostMemory.parseWithLoss(text)
+        noteSubStoreDropped(dropped)
+        saveHostEntries(entries)
     }
 
     // ---- v4.1: speed-test history — LOCAL ONLY. The key below
@@ -1069,19 +1150,25 @@ object DownloadCenter {
             // (this same number), so today is seeded whole on
             // the first completion after upgrading — see
             // DaySeries' honest-scope note.
+            val (dayEntries, dayDropped) =
+                DaySeries.parseWithLoss(pString("statsDays", ""))
+            noteSubStoreDropped(dayDropped)
             e.putString(
                 "statsDays",
                 DaySeries.serialize(
                     DaySeries.recordDayTotal(
-                        DaySeries.parse(pString("statsDays", "")),
+                        dayEntries,
                         StatsMath.dayKey(now),
                         today + bytes,
                     )
                 ),
             )
             // v2.3: per-host totals for the statistics Top 5.
+            val (storedHostEntries, hostDropped) =
+                HostStats.parseWithLoss(pString("hostStats", ""))
+            noteSubStoreDropped(hostDropped)
             val hostEntries = HostStats.record(
-                HostStats.parse(pString("hostStats", "")),
+                storedHostEntries,
                 HostMemory.hostOf(task.url),
                 bytes,
             )
@@ -1110,16 +1197,19 @@ object DownloadCenter {
     }
 
     /** v2.3: the hosts the user downloads the most from, by bytes. */
-    fun hostStatsTop(n: Int = 5): List<HostStats.Entry> =
-        HostStats.top(HostStats.parse(pString("hostStats", "")), n)
+    fun hostStatsTop(n: Int = 5): List<HostStats.Entry> {
+        val (entries, dropped) = HostStats.parseWithLoss(pString("hostStats", ""))
+        noteSubStoreDropped(dropped)
+        return HostStats.top(entries, n)
+    }
 
     /** v2.7: the last [n] days of download totals, oldest first,
      *  zero-filled — the statistics screen's bar chart data. */
-    fun statsLastDays(n: Int = 7): List<DaySeries.Day> =
-        DaySeries.lastDays(
-            DaySeries.parse(pString("statsDays", "")),
-            n, System.currentTimeMillis(),
-        )
+    fun statsLastDays(n: Int = 7): List<DaySeries.Day> {
+        val (entries, dropped) = DaySeries.parseWithLoss(pString("statsDays", ""))
+        noteSubStoreDropped(dropped)
+        return DaySeries.lastDays(entries, n, System.currentTimeMillis())
+    }
 
     fun clearStats() {
         prefs().edit()
@@ -1182,17 +1272,63 @@ object DownloadCenter {
     // is a launch crash (the v1.3.0 lesson: never again). Every read
     // below therefore goes through a runCatching helper with the
     // documented default as the fallback. Writes stay direct.
+    // v7.3 (audit round 58, B5): every fallback above used to be
+    // invisible. Now a fallen-back read records its KEY NAME (never
+    // a value) into a process-local set, and the sub-store parsers'
+    // dropped-line counts accumulate alongside — both feed the
+    // diagnostics 存储健康 section (Step C renders; this step only
+    // collects). Process-local by design: the trace answers "did
+    // anything silently degrade since this process started".
+    private val prefFallbackKeySet =
+        java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
+    private val subStoreDroppedCount =
+        java.util.concurrent.atomic.AtomicInteger(0)
+
+    private fun notePrefFallback(key: String) {
+        prefFallbackKeySet.add(key)
+    }
+
+    /** B5 reading port for Step C: key names whose typed read
+     *  fell back to its default in this process. */
+    fun prefFallbackKeys(): Set<String> =
+        synchronized(prefFallbackKeySet) { prefFallbackKeySet.toSet() }
+
+    internal fun noteSubStoreDropped(n: Int) {
+        if (n > 0) subStoreDroppedCount.addAndGet(n)
+    }
+
+    /** B5 reading port for Step C: total sub-store lines the
+     *  loss-reporting parsers dropped in this process. */
+    fun subStoreDroppedLines(): Int = subStoreDroppedCount.get()
+
     private fun pBool(key: String, def: Boolean): Boolean =
-        runCatching { prefs().getBoolean(key, def) }.getOrDefault(def)
+        try {
+            prefs().getBoolean(key, def)
+        } catch (e: Exception) {
+            notePrefFallback(key); def
+        }
 
     private fun pInt(key: String, def: Int): Int =
-        runCatching { prefs().getInt(key, def) }.getOrDefault(def)
+        try {
+            prefs().getInt(key, def)
+        } catch (e: Exception) {
+            notePrefFallback(key); def
+        }
 
     private fun pLong(key: String, def: Long): Long =
-        runCatching { prefs().getLong(key, def) }.getOrDefault(def)
+        try {
+            prefs().getLong(key, def)
+        } catch (e: Exception) {
+            notePrefFallback(key); def
+        }
 
     private fun pString(key: String, def: String): String =
-        runCatching { prefs().getString(key, def) }.getOrDefault(def) ?: def
+        try {
+            prefs().getString(key, def) ?: def
+        } catch (e: Exception) {
+            notePrefFallback(key); def
+        }
 
     // ---- v1.5: per-host optimal thread memory (see HostMemory) ----
 
@@ -1205,8 +1341,22 @@ object DownloadCenter {
     // string, so the cache can never serve a stale table.
     private val hostEntriesCache = HostMemoryParseCache()
 
-    private fun hostEntries(): List<HostMemory.Entry> =
-        hostEntriesCache.get(pString("hostThreads", ""))
+    // v7.3 (B5): the cache re-parses only when the raw text
+    // changes; accumulate its dropped-line count exactly once
+    // per re-parse (tracked by the cache's version counter), so
+    // the per-second UI reads of the same table never multiply
+    // the trace.
+    private var hostCacheCountedVersion = 0
+
+    private fun hostEntries(): List<HostMemory.Entry> {
+        val entries = hostEntriesCache.get(pString("hostThreads", ""))
+        val v = hostEntriesCache.version
+        if (v != hostCacheCountedVersion) {
+            hostCacheCountedVersion = v
+            noteSubStoreDropped(hostEntriesCache.lastDropped)
+        }
+        return entries
+    }
 
     /** v5.1 audit round 36: bumps whenever the host table is
      *  re-parsed (i.e. actually changed) — UI callers key a
@@ -1313,6 +1463,9 @@ object DownloadCenter {
         appContext = context.applicationContext
         store = TaskStore(context.applicationContext)
         store.load()
+        // v7.3 (B1): persist a self-healed load as the latest
+        // tasks.json recovery event (banner + Step C diagnostics).
+        store.lastLoadOutcome?.let { recordTasksRecovery(it) }
         // v5.8: creation funnel for sidecar checksums (see
         // maybeFetchSidecarChecksum / TaskStore.onTaskAdded).
         store.onTaskAdded = { t -> maybeFetchSidecarChecksum(t) }
