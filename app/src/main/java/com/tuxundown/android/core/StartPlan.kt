@@ -102,19 +102,24 @@ object StartPlan {
      * nothing, and the remembered optimum re-arms the burst
      * on every later run).
      *
-     * TRUE (the default) keeps the shipped v7.7 behaviour
-     * exactly: burst 32, remembered optimum opens full width.
-     * FALSE selects the conservative form for a real-device
-     * A/B: fresh hosts burst at [BURST_START_LEGACY] (the
+     * TRUE keeps the shipped v7.7 behaviour exactly:
+     * burst 32, remembered optimum opens full width.
+     * FALSE (the default since the main agent's
+     * 2026-11-24 00:09 ruling, after the user's same-link
+     * A/B put v7.7 at 2.7 MB/s against v7.6's 31.1 MB/s
+     * with identical settings) selects the conservative
+     * form: fresh hosts burst at [BURST_START_LEGACY] (the
      * v4.2-v7.6 width) and a remembered optimum is granted
      * only the burst width up front, reaching full width
      * through the ordinary ramp steps (max(8, desired/4)
      * per adjudication — 32 -> 48 -> 64 for a learned 64,
      * ~2 adjudications, a few seconds, never instant).
-     * Flipping the default waits on the user's A/B result;
-     * this constant is the ONLY thing that changes.
+     * The full-width form stays in code behind this
+     * switch, to be revisited only on real-device A/B
+     * evidence; this constant is the ONLY thing that
+     * changes between the two forms.
      */
-    const val FULL_WIDTH_OPEN = true
+    const val FULL_WIDTH_OPEN = false
 
     /** The pre-v7.7 fresh-host burst, used when
      *  [FULL_WIDTH_OPEN] is off (see its doc). */

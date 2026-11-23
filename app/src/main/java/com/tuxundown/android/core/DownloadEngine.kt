@@ -1361,13 +1361,14 @@ class DownloadEngine(
         // v7.8 (audit round 63, Step B2): the base grant now
         // goes through GrowthRamp.baseGrantFor, driven by the
         // StartPlan.FULL_WIDTH_OPEN A/B switch. With the
-        // switch on (default) this is exactly the v7.7 wiring
+        // switch on this is exactly the v7.7 wiring
         // above: a remembered optimum opens full width at
-        // second 0. With it off, a remembered optimum is
+        // second 0. With it off (the default since the
+        // 2026-11-24 00:09 ruling) a remembered optimum is
         // granted only the burst width and climbs the ramp
         // steps like everything else — the conservative form
-        // prepared for the user's same-link A/B (see
-        // StartPlan.FULL_WIDTH_OPEN).
+        // shipped as the factory default after the user's
+        // same-link A/B (see StartPlan.FULL_WIDTH_OPEN).
         val ramp = GrowthRamp(
             minOf(sc.target, connAllowance),
             baseGrant = GrowthRamp.baseGrantFor(

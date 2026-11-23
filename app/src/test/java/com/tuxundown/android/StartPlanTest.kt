@@ -150,14 +150,21 @@ class StartPlanTest {
     }
 
     @Test
-    fun fullWidthOpenSwitchDefaultsToTheShippedV77Shape() {
+    fun fullWidthOpenSwitchDefaultsToTheConservativeForm() {
         // v7.8 (audit 63 Step B2): the A/B switch prepared for
-        // the user's same-link regression A/B ships in the
-        // v7.7 position — flipping it is a one-constant change
-        // once the real-device data lands (see
-        // StartPlan.FULL_WIDTH_OPEN).
-        assertTrue(StartPlan.FULL_WIDTH_OPEN)
+        // the user's same-link regression A/B originally
+        // shipped in the v7.7 position; the main agent's
+        // 2026-11-24 00:09 ruling flipped the factory default
+        // to the conservative form (switch OFF) after the
+        // user's same-link A/B (v7.7 2.7 MB/s vs v7.6
+        // 31.1 MB/s, identical settings). The full-width form
+        // stays reachable only by passing the switch
+        // explicitly (see StartPlan.FULL_WIDTH_OPEN).
+        assertFalse(StartPlan.FULL_WIDTH_OPEN)
         assertEquals(16, StartPlan.BURST_START_LEGACY)
+        // The no-argument decide() therefore bursts fresh
+        // hosts at the legacy 16, not 32.
+        assertEquals(16, StartPlan.decide(0, 0, false, 0).start)
     }
 
     @Test
