@@ -434,6 +434,47 @@ object DownloadCenter {
         else -> DownloadEngine.MAX_THREADS
     }
 
+    /** v5.9: the per-task connection ceiling behind
+     *  [connectionDesireOf] — the most this task's engine could
+     *  ever open on its own (HLS width / FTP's 8 / MAX_THREADS;
+     *  a single-stream run's ceiling is the 1 it holds). Same
+     *  branch order as the desire, so desire <= ceiling always
+     *  holds for a real record. */
+    fun connectionCeilingOf(t: TaskRecord): Int = when {
+        t.isHls -> DownloadEngine.HLS_MAX_PARALLEL
+        t.singleThreadOnly -> 1
+        FtpClient.isFtpUrl(t.url) -> DownloadEngine.FTP_MAX_CONNECTIONS
+        else -> DownloadEngine.MAX_THREADS
+    }
+
+    /**
+     * v5.9: the task detail's 「连接预算」 row (see
+     * ConnectionBudgetLine for the verdict rules). Gathers the
+     * live snapshot the pure verdict needs — the allowance and
+     * desire are recomputed on the spot exactly as the engine
+     * reads them, the host cap is the same lookup the server
+     * profile uses, and the live count is the record's
+     * displayConnections. Null for any non-RUNNING task: with
+     * no run there is no current allowance to speak of, and
+     * the row stays absent instead of printing a stale figure.
+     * Called from the detail card, which the existing 1 s
+     * liveTick already recomposes — no new polling.
+     */
+    fun connectionBudgetLineFor(task: TaskRecord): String? {
+        if (task.status != TaskStatus.RUNNING) return null
+        val othersRunning =
+            store.tasks.count { it.status == TaskStatus.RUNNING } > 1
+        return ConnectionBudgetLine.judge(
+            allowance = connectionAllowanceFor(task.id),
+            desire = connectionDesireOf(task),
+            hostCap = hostThreadsCap(task.url),
+            taskCeiling = connectionCeilingOf(task),
+            globalCap = globalConnectionCap,
+            liveConnections = task.displayConnections,
+            othersRunning = othersRunning,
+        ).line
+    }
+
     /** v1.4: whole-task automatic retries after a failure (0 = off). */
     var autoRetryCount: Int
         get() = pInt("autoRetryCount", 0).coerceIn(0, 5)

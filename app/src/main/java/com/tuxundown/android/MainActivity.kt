@@ -8446,6 +8446,19 @@ fun TaskCard(
                         }
                     }
                 }
+                // v5.9: connection budget row — right under the
+                // server profile, this task's CURRENT granted
+                // connection count and the one clamp the code
+                // can prove is binding (see ConnectionBudgetLine).
+                // RUNNING only: connectionBudgetLineFor returns
+                // null in every other state, so a queued / paused
+                // / finished task shows no fake figure. The card
+                // already recomposes on the 1 s liveTick, and the
+                // allowance is recomputed live inside — no new
+                // polling here.
+                DownloadCenter.connectionBudgetLineFor(task)?.let { line ->
+                    InfoRow("连接预算：", line)
+                }
                 // v1.9: proxy marker — while a proxy is active,
                 // this task's connections ride it (FTP excepted:
                 // the hand-written client cannot use one, and the
