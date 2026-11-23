@@ -154,6 +154,136 @@ class SpeedCurveExportTest {
         assertEquals(listOf("0,5,5"), dataRows(csv))
     }
 
+    // ---- v8.2: full-run series branch ----
+
+    /** Data rows of a full-run CSV (two columns, no cumulative). */
+    private fun fullDataRows(csv: String): List<String> =
+        csv.lines().filter { it.isNotEmpty() && !it.startsWith("#") }.drop(1)
+
+    @Test
+    fun fullRunBranchExportsRecordedPointsVerbatim() {
+        // The window samples deliberately differ: if the old
+        // branch ran, the rows (and a cumulative column) would
+        // show them instead of the full-run points.
+        val csv = SpeedCurveExport.buildCsv(
+            "movie.mp4", listOf(9L, 9L, 9L),
+            listOf(1000L, 2000L, 0L, 500L), 5, 1795417445000L,
+        )!!
+        // Speeds are the recorded points themselves, the axis
+        // advances by the real 5 s interval, nothing integrated.
+        assertEquals(
+            listOf("0,1000", "5,2000", "10,0", "15,500"),
+            fullDataRows(csv),
+        )
+        assertTrue(csv.lines().contains("elapsed_sec,speed_bps"))
+        assertFalse(csv.contains("cumulative_bytes"))
+        val comments = csv.lines().filter { it.startsWith("#") }
+        assertTrue(comments.any { it.contains("共 4 个") && it.contains("每 5 秒一个") })
+        assertTrue(comments.any { it.contains("全程采样") })
+        assertTrue(comments.any { it.contains("共 20 秒") })
+        assertTrue(comments.any { it.contains("实际记录下来的采样点本身") && it.contains("没有做积分还原") })
+        // Interval still at the base: no decimation has happened.
+        assertTrue(comments.any { it.contains("暂未发生抽稀合并") })
+        assertFalse(comments.any { it.contains("已经过抽稀合并") })
+    }
+
+    @Test
+    fun fullRunBranchDisclosesDecimationWhenIntervalGrew() {
+        val csv = SpeedCurveExport.buildCsv(
+            "movie.mp4", emptyList(),
+            listOf(300L, 700L), 10, 1795417445000L,
+        )!!
+        assertEquals(listOf("0,300", "10,700"), fullDataRows(csv))
+        val comments = csv.lines().filter { it.startsWith("#") }
+        assertTrue(comments.any { it.contains("每 10 秒一个") })
+        assertTrue(comments.any { it.contains("共 20 秒") })
+        assertTrue(
+            comments.any {
+                it.contains("已经过抽稀合并") && it.contains("取平均") &&
+                    it.contains("平均值") && it.contains("10 秒")
+            },
+        )
+        assertFalse(comments.any { it.contains("暂未发生抽稀合并") })
+    }
+
+    @Test
+    fun fullRunThresholdIsExactlyTwoPoints() {
+        val nowMs = 1795417445000L
+        // Exactly at the chart threshold: full-run branch, even
+        // with no window samples at all (never null, never the
+        // old "no curve" outcome).
+        val atThreshold = SpeedCurveExport.buildCsv(
+            "a.bin", emptyList(), listOf(11L, 22L), 5, nowMs,
+        )!!
+        assertEquals(listOf("0,11", "5,22"), fullDataRows(atThreshold))
+        // One point is below the threshold: the window export
+        // runs unchanged.
+        val below = SpeedCurveExport.buildCsv(
+            "a.bin", listOf(7L, 8L), listOf(11L), 5, nowMs,
+        )!!
+        assertEquals(
+            SpeedCurveExport.buildCsv("a.bin", listOf(7L, 8L), nowMs),
+            below,
+        )
+    }
+
+    @Test
+    fun noFullRunSamplesKeepsTheOldOutputByteForByte() {
+        val nowMs = 1795417445000L
+        val viaChooser = SpeedCurveExport.buildCsv(
+            "movie.mp4", listOf(1000L, 2000L, 0L, 500L),
+            emptyList(), 5, nowMs,
+        )
+        assertEquals(
+            SpeedCurveExport.buildCsv("movie.mp4", listOf(1000L, 2000L, 0L, 500L), nowMs),
+            viaChooser,
+        )
+        // Same through the task entry: an old task (no full-run
+        // fields ever written) exports its window curve as-is.
+        val task = TaskRecord(url = "https://a.b/movie.mp4", fileName = "movie.mp4")
+        synchronized(task.speedHistory) { task.speedHistory.addAll(listOf(3L, 4L)) }
+        assertEquals(
+            SpeedCurveExport.buildCsv("movie.mp4", listOf(3L, 4L), nowMs),
+            SpeedCurveExport.buildCsv(task, nowMs),
+        )
+        // And with neither series there is still nothing to export.
+        val empty = TaskRecord(url = "https://a.b/x.bin", fileName = "x.bin")
+        assertNull(SpeedCurveExport.buildCsv(empty, nowMs))
+    }
+
+    @Test
+    fun fullRunBranchSanitisesTheIntervalAndClampsNegatives() {
+        // 15 is not 5 x 2^k: the header and the axis must fall
+        // back to the base interval, never print the bad value.
+        val csv = SpeedCurveExport.buildCsv(
+            "a.bin", emptyList(), listOf(-5L, 42L), 15, 1795417445000L,
+        )!!
+        assertEquals(listOf("0,0", "5,42"), fullDataRows(csv))
+        assertTrue(csv.lines().any { it.startsWith("#") && it.contains("每 5 秒一个") })
+        assertFalse(csv.contains("15 秒"))
+    }
+
+    @Test
+    fun fullRunBranchNeverLeaksTaskSecretsEither() {
+        val task = TaskRecord(
+            url = "https://example.com/file.bin?token=SECRET123&sig=ABC",
+            fileName = "file.bin",
+            headers = mutableMapOf(
+                "Cookie" to "session=TOPSECRET",
+                "Referer" to "https://example.com/private-page",
+            ),
+        )
+        synchronized(task.fullSpeedHistory) { task.fullSpeedHistory.addAll(listOf(100L, 200L)) }
+        task.fullSpeedIntervalSec = 5
+        val csv = SpeedCurveExport.buildCsv(task, 1795417445000L)!!
+        assertFalse(csv.contains("SECRET123"))
+        assertFalse(csv.contains("TOPSECRET"))
+        assertFalse(csv.contains("example.com"))
+        assertFalse(csv.contains("Cookie"))
+        assertFalse(csv.contains("token"))
+        assertEquals(listOf("0,100", "5,200"), fullDataRows(csv))
+    }
+
     @Test
     fun exportFileNameShapeAndSafety() {
         assertEquals("movie.mp4-speed.csv", SpeedCurveExport.exportFileName("movie.mp4"))

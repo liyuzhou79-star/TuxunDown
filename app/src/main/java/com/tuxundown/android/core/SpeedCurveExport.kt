@@ -29,6 +29,24 @@ package com.tuxundown.android.core
  *   rule as TaskDiagnostics). [buildCsv] for a task reads
  *   nothing but its display name and its samples.
  *
+ * v8.2: when the task carries a full-run series
+ * ([TaskRecord.fullSpeedHistory]) with at least
+ * [MIN_FULL_SAMPLES] points — the same count at which the
+ * detail page draws its full-run chart — the export switches
+ * to that series instead: every row's speed is a recorded
+ * sample itself, the time axis advances by the series' real
+ * interval ([TaskRecord.fullSpeedIntervalSec]), and NO
+ * cumulative column is emitted, because a cumulative figure
+ * could only come from integrating the samples — exactly the
+ * reconstruction this branch exists to avoid. The header says
+ * the real interval and, once it has grown past the base
+ * 5 seconds, discloses the decimation in [FullSpeedHistory]'s
+ * own terms: adjacent pairs were averaged into single points
+ * (a merged point IS the mean of the two samples it replaced;
+ * points recorded after a decimation are still the real speed
+ * at their — wider — spacing). Tasks without a full-run series
+ * keep the window export above, byte for byte.
+ *
  * Pure — unit-tested. Writing the text to the public Download
  * folder is PublicStorage.saveTextFile's job, exactly like the
  * sniff-list export (SniffExport).
@@ -40,6 +58,11 @@ object SpeedCurveExport {
 
     /** The record keeps at most this many newest samples. */
     const val MAX_RETAINED_SAMPLES = 90
+
+    /** v8.2: a full-run series needs at least this many points
+     *  to be exported as a curve — the same threshold the
+     *  detail page's full-run chart uses to appear at all. */
+    const val MIN_FULL_SAMPLES = 2
 
     /**
      * CSV text for [samples] of the file called [fileName], or
@@ -88,6 +111,76 @@ object SpeedCurveExport {
     }
 
     /**
+     * v8.2: CSV text choosing between the two series. When
+     * [fullPoints] reaches [MIN_FULL_SAMPLES], the full-run
+     * curve is exported (see [buildFullCsv]); otherwise the
+     * 90-second window export runs exactly as before, so a
+     * task without full-run samples produces byte-identical
+     * output to the pre-v8.2 formatter.
+     */
+    fun buildCsv(
+        fileName: String,
+        samples: List<Long>,
+        fullPoints: List<Long>,
+        fullIntervalSec: Int,
+        nowMs: Long,
+    ): String? =
+        if (fullPoints.size >= MIN_FULL_SAMPLES) {
+            buildFullCsv(fileName, fullPoints, fullIntervalSec, nowMs)
+        } else {
+            buildCsv(fileName, samples, nowMs)
+        }
+
+    /**
+     * v8.2: the full-run CSV. Rows are the recorded samples
+     * themselves — elapsed seconds are the point index times
+     * the series' sanitised interval, and there is deliberately
+     * no cumulative column (it could only be reconstructed by
+     * integration, which this branch never does).
+     */
+    private fun buildFullCsv(
+        fileName: String,
+        fullPoints: List<Long>,
+        fullIntervalSec: Int,
+        nowMs: Long,
+    ): String {
+        val interval = FullSpeedHistory.sanitizeInterval(fullIntervalSec)
+        val sb = StringBuilder()
+        sb.append("# TuxunDown 速度曲线导出\n")
+        sb.append("# 生成时间：").append(ExportStamp.format(nowMs)).append('\n')
+        sb.append("# 文件：").append(commentName(fileName)).append('\n')
+        sb.append("# 样本：共 ").append(fullPoints.size)
+            .append(" 个，每 ").append(interval)
+            .append(" 秒一个（全程采样，记录的是整个下载过程的速度）\n")
+        sb.append("# 时长：共 ")
+            .append(FullSpeedHistory.spanSeconds(fullPoints.size, interval))
+            .append(" 秒（样本数 × 每样本 ").append(interval).append(" 秒）\n")
+        sb.append(
+            "# 说明：速度值就是下载时实际记录下来的采样点本身，没有做积分还原，" +
+                "也不是推算出来的；秒数从第一个全程采样点算起，每行的时间是采样点序号乘以采样间隔。\n",
+        )
+        if (interval > FullSpeedHistory.BASE_INTERVAL_SEC) {
+            sb.append(
+                "# 抽稀：下载时间较长、采样点达到上限后，早期采样已经过抽稀合并——" +
+                    "相邻两个采样点取平均合成一个点，采样间隔由最初的 " +
+                    "${FullSpeedHistory.BASE_INTERVAL_SEC} 秒变为现在的 $interval 秒；" +
+                    "合并出来的点是被合并的两个采样点的平均值，合并之后新记下的点仍是当时的实际速度。\n",
+            )
+        } else {
+            sb.append("# 抽稀：暂未发生抽稀合并，采样间隔还是最初的 ")
+                .append(FullSpeedHistory.BASE_INTERVAL_SEC).append(" 秒。\n")
+        }
+        sb.append("elapsed_sec,speed_bps\n")
+        for ((index, rawBps) in fullPoints.withIndex()) {
+            // Same clamp as the window branch: a negative sample
+            // is impossible from the sampler, never export one.
+            sb.append(index.toLong() * interval).append(',')
+                .append(rawBps.coerceAtLeast(0)).append('\n')
+        }
+        return sb.toString()
+    }
+
+    /**
      * CSV text for [task]'s retained curve, or null when it has
      * none. Reads ONLY the display name and the samples — never
      * the link or the headers (see the redaction rule above).
@@ -96,10 +189,19 @@ object SpeedCurveExport {
         buildCsv(task, System.currentTimeMillis())
 
     /** v6.4: [buildCsv] for [task] with an explicit [nowMs]
-     *  generation stamp (see the file-name overload). */
+     *  generation stamp (see the file-name overload). v8.2: the
+     *  full-run series rides along and wins when it has enough
+     *  points (see the five-argument overload). */
     fun buildCsv(task: TaskRecord, nowMs: Long): String? {
         val samples = synchronized(task.speedHistory) { task.speedHistory.toList() }
-        return buildCsv(task.savedName.ifBlank { task.fileName }, samples, nowMs)
+        val fullPoints = synchronized(task.fullSpeedHistory) { task.fullSpeedHistory.toList() }
+        return buildCsv(
+            task.savedName.ifBlank { task.fileName },
+            samples,
+            fullPoints,
+            task.fullSpeedIntervalSec,
+            nowMs,
+        )
     }
 
     /**
