@@ -124,6 +124,36 @@ class ConnectionBudgetTest {
     }
 
     @Test
+    fun fourToOneWeightsSplitACapOf32As26And6() {
+        // The shares the audit-64 GrowthRamp contention tests
+        // rest on: weights 4 : 1, both appetites at the
+        // ceiling, cap 32.
+        val out = ConnectionBudget.allocate(
+            32, listOf(d("hi", 4, 128), d("lo", 1, 128))
+        )
+        assertEquals(26, out["hi"])
+        assertEquals(6, out["lo"])
+        assertEquals(32, out.values.sum())
+    }
+
+    @Test
+    fun liveTargetsLetTheLeftoverFlowToTheHungryTask() {
+        // v7.9 (audit round 64): the segmented desire the
+        // caller passes is now each task's LIVE scaler target.
+        // A task settled at 8 next to one aiming at 64 under a
+        // cap of 32: the settled task keeps its whole 8 and
+        // the hungry one gets the remaining 24 — with the old
+        // static ceiling desires (128 / 128) the split was
+        // 16 / 16 and 8 of the cap sat idle for the whole run.
+        val out = ConnectionBudget.allocate(
+            32, listOf(d("hungry", 2, 64), d("settled", 2, 8))
+        )
+        assertEquals(24, out["hungry"])
+        assertEquals(8, out["settled"])
+        assertEquals(32, out.values.sum())
+    }
+
+    @Test
     fun clampKeepsTheSettingInRange() {
         assertEquals(ConnectionBudget.MIN_CAP, ConnectionBudget.clampCap(1))
         assertEquals(ConnectionBudget.MAX_CAP, ConnectionBudget.clampCap(999))

@@ -16,7 +16,8 @@ package com.tuxundown.android.core
  * in the server profile's 已知的限流上限 row right above).
  *
  * Only reasons the inputs PROVE are ever named:
- * - HOST_CAP: a remembered HostMemory cap sits below desire;
+ * - HOST_CAP: a remembered HostMemory cap sits at or below
+ *   desire (and below the path's own ceiling);
  * - GLOBAL_CAP: the allowance came back below the effective
  *   desire (the weighted split across RUNNING tasks, or the
  *   cap alone below one task's desire);
@@ -52,7 +53,15 @@ object ConnectionBudgetLine {
         liveConnections: Int,
         othersRunning: Boolean,
     ): Verdict {
-        val hostBinds = hostCap > 0 && hostCap < desire
+        // v7.9 (audit round 64): the segmented caller's desire
+        // is now the LIVE scaler target, which the host cap
+        // already bounds (the scaler's max IS the cap), so a
+        // target sitting exactly AT the cap is the cap binding,
+        // not a coincidence — hence <= on desire. The
+        // hostCap < taskCeiling guard keeps a cap that merely
+        // equals the path's own ceiling (HLS 16, FTP 8) from
+        // being named a restriction it never imposes.
+        val hostBinds = hostCap > 0 && hostCap < taskCeiling && hostCap <= desire
         val effectiveDesire = if (hostBinds) hostCap else desire
         val granted = minOf(allowance, effectiveDesire).coerceAtLeast(0)
         val contradictory = allowance < 0 || desire <= 0 || hostCap < 0 ||

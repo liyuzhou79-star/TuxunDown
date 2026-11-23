@@ -100,6 +100,51 @@ class ConnectionBudgetLineTest {
         assertEquals(ConnectionBudgetLine.Reason.HOST_CAP, v.reason)
     }
 
+    // ---- v7.9 (audit round 64): live-target desires ----
+
+    @Test
+    fun liveTargetGrantedInFullIsNotBlamedOnTheGlobalCap() {
+        // The caller now passes the segmented task's LIVE
+        // scaler target as the desire. A task settled at 8
+        // whose split hands it the whole 8 is not being held
+        // by the global cap — before the fix its desire read
+        // as the static 128 ceiling, the allowance of 8 came
+        // back below it, and the line blamed the global split.
+        val v = judge(
+            allowance = 8, desire = 8, taskCeiling = 128,
+            globalCap = 32, othersRunning = true,
+        )
+        assertEquals(8, v.granted)
+        assertEquals(ConnectionBudgetLine.Reason.UNLIMITED, v.reason)
+        assertFalse(v.line.contains("全局连接上限"))
+    }
+
+    @Test
+    fun liveTargetSittingExactlyAtTheHostCapIsHostCap() {
+        // The scaler's max IS the remembered cap, so a target
+        // equal to the cap is the cap binding. The old
+        // hostCap < desire test read this snapshot as
+        // contradictory (allowance above desire, no host cap
+        // to explain it) and named no reason at all.
+        val v = judge(
+            allowance = 32, desire = 16, hostCap = 16,
+            taskCeiling = 128, globalCap = 128,
+        )
+        assertEquals(16, v.granted)
+        assertEquals(ConnectionBudgetLine.Reason.HOST_CAP, v.reason)
+    }
+
+    @Test
+    fun hostCapEqualToThePathsOwnCeilingIsNotARestriction() {
+        // An HLS host cap of 16 equals the HLS ceiling itself:
+        // it cuts nothing the engine could ever have opened.
+        val v = judge(
+            allowance = 16, desire = 16, hostCap = 16,
+            taskCeiling = 16, globalCap = 32,
+        )
+        assertEquals(ConnectionBudgetLine.Reason.TASK_CEILING, v.reason)
+    }
+
     // ---- unprovable snapshots: number only, no invented reason ----
 
     @Test

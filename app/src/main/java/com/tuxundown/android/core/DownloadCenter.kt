@@ -558,8 +558,7 @@ object DownloadCenter {
     }
 
     /** How many connections a task could use with no global
-     *  cap in the way: segmented tasks scale up to
-     *  MAX_THREADS, HLS fetches segments up to
+     *  cap in the way. HLS fetches segments up to
      *  HLS_MAX_PARALLEL at a time (v4.3: the adaptive width's
      *  ceiling — the desire is what the task COULD use, so the
      *  accounting reserves for the max, not the fixed 4 it
@@ -569,12 +568,30 @@ object DownloadCenter {
      *  hits the 1 branch first. An FTP task whose probe has not
      *  decided yet is briefly reserved at the FTP ceiling; a
      *  fallback run stamps singleThreadOnly and the desire
-     *  self-corrects to 1 on the next read. */
+     *  self-corrects to 1 on the next read.
+     *
+     *  v7.9 (audit round 64): the SEGMENTED desire is the
+     *  task's LIVE scaler target (TaskRecord.threads — the
+     *  engine keeps it equal to the target, never pressed by
+     *  the allowance, so there is no ratchet), not the static
+     *  MAX_THREADS ceiling it used before. With the ceiling as
+     *  the desire, a task whose scaler had settled at 8 still
+     *  reserved an equal split of the cap (16 of 32 in a
+     *  two-task split) and the unused half of its share never
+     *  flowed to a hungrier task for the whole run; the live
+     *  target lets ConnectionBudget.allocate hand the leftover
+     *  over on the very next tick, and it makes the detail
+     *  line's desire the same number the engine actually
+     *  wants. Before the scaler exists (the probe window) the
+     *  persisted target stands in and self-corrects the moment
+     *  the engine stamps the real one. HLS / FTP keep the
+     *  reserve-for-max form: the HLS width is not stored
+     *  pre-gate anywhere, and FTP's count is fixed at start. */
     private fun connectionDesireOf(t: TaskRecord): Int = when {
         t.isHls -> DownloadEngine.HLS_MAX_PARALLEL
         t.singleThreadOnly -> 1
         FtpClient.isFtpUrl(t.url) -> DownloadEngine.FTP_MAX_CONNECTIONS
-        else -> DownloadEngine.MAX_THREADS
+        else -> t.threads.coerceIn(1, DownloadEngine.MAX_THREADS)
     }
 
     /** v5.9: the per-task connection ceiling behind

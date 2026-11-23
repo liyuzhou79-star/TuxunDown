@@ -266,6 +266,53 @@ class GrowthRampTest {
         }
     }
 
+    // ---- v7.9 (audit round 64): contention / starvation ----
+
+    @Test
+    fun flappingRivalNeverStarvesTheLateTaskBelowItsFairShare() {
+        // Two segmented tasks, cap 32, equal weights, both
+        // appetites at the ceiling: the split is 16 / 16.
+        // The rival flaps (pauses / resumes every adjudication,
+        // so the late task's desired count alternates 32 / 16).
+        // The ramp's asymmetry — decreases instant, increases
+        // stepped — must never push the late task BELOW the
+        // share it is owed while the rival is present: every
+        // rival-present adjudication lands exactly on 16, and
+        // the moment the rival stays gone the climb finishes
+        // in the bounded 2 steps (stepFor(32) = 8).
+        val ramp = GrowthRamp(16)
+        assertEquals(16, ramp.granted)
+        repeat(5) {
+            assertEquals(24, ramp.allow(32)) // rival gone: one step up
+            assertEquals(16, ramp.allow(16)) // rival back: instant, to the share
+        }
+        assertEquals(24, ramp.allow(32))
+        assertEquals(32, ramp.allow(32)) // rival gone for good: full in 2 steps
+        assertEquals(32, ramp.allow(32))
+    }
+
+    @Test
+    fun lowWeightShareIsReachedInOneStepThanksToTheFloor() {
+        // Cap 32 split by weights 4 : 1 over ceiling appetites
+        // is 26 / 6 (ConnectionBudgetTest pins the split
+        // itself). stepFor is computed per desired, so the
+        // low-weight task's small desire would crawl at
+        // 6 / 4 = 1 per step without STEP_FLOOR; the floor of
+        // 8 reaches its whole share in ONE adjudication — the
+        // floor makes small shares proportionally the FASTEST
+        // to arrive, never the slowest.
+        assertEquals(8, GrowthRamp.stepFor(6))
+        val low = GrowthRamp(0)
+        assertEquals(6, low.allow(6))
+        // The heavy share (26) is likewise bounded: step 8
+        // walks 0 -> 8 -> 16 -> 24 -> 26, four adjudications.
+        val high = GrowthRamp(0)
+        assertEquals(8, high.allow(26))
+        assertEquals(16, high.allow(26))
+        assertEquals(24, high.allow(26))
+        assertEquals(26, high.allow(26))
+    }
+
     // ---- v5.9 step B: the audit-44 reallocation bound, pinned ----
 
     @Test
