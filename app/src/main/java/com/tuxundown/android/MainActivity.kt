@@ -1756,11 +1756,28 @@ fun DownApp() {
         com.tuxundown.android.widget.WidgetUpdater.refresh(context)
     }
 
+    // v7.1 (audit round 56, Step C): queue positions for the
+    // WHOLE task list, computed ONCE here — this scope re-runs
+    // on the standing 1 s tick above, so the positions refresh
+    // on that same beat; cards never compute their own (no
+    // per-card re-simulation). The exclude set is the
+    // EngineClaims claim set (DownloadCenter.isClaimed, held
+    // for a whole runOne invocation including its retry
+    // backoff) — the UI-reachable set closest to the running
+    // ids the drain itself passes to nextEligible; see
+    // QueueOrder.queuePositions for the stated residual.
+    val queuePositions = com.tuxundown.android.core.QueueOrder.queuePositions(
+        store.tasks,
+        System.currentTimeMillis(),
+        store.tasks.filter { DownloadCenter.isClaimed(it.id) }.map { it.id }.toSet(),
+    )
+
     // One card wiring, reused by the narrow list and the wide
     // two-column rows (v1.6 item 7).
     val TaskCardFor: @androidx.compose.runtime.Composable (TaskRecord) -> Unit = { task ->
         TaskCard(
             task = task,
+            queuePosition = queuePositions[task.id],
             // v6.7.0 Step C: reading the snapshot here subscribes
             // this scope, so a finished probe re-renders the
             // cards with their ghost marks (or clears them).
@@ -8624,6 +8641,14 @@ fun InfoRow(label: String, value: String) {
 @androidx.compose.runtime.Composable
 fun TaskCard(
     task: TaskRecord,
+    // v7.1 (audit round 56, Step C): this QUEUED task's
+    // 1-based queue position from QueueOrder.queuePositions
+    // (computed once for the whole list by the caller), or
+    // null when it has none — not QUEUED, excluded, or not
+    // currently eligible (net / portal parked, scheduled
+    // time not yet arrived). Null keeps the card's wording
+    // exactly as it was before v7.1.
+    queuePosition: Int? = null,
     // v6.7.0 Step C: true only when the latest ghost snapshot
     // probed this DONE record's file as MISSING. UNKNOWN / not
     // yet probed always arrive here as false.
@@ -8866,6 +8891,11 @@ fun TaskCard(
                                 "每天 ${Format.clockTime(task.scheduledAt)} 定时下载"
                             else if (task.scheduledAt > System.currentTimeMillis())
                                 "预约 ${Format.clockTime(task.scheduledAt)} 开始"
+                            else if (queuePosition != null)
+                                // v7.1 Step C: the position from
+                                // QueueOrder.queuePositions — the
+                                // same adjudication the drain uses.
+                                "排队中 · 第 $queuePosition 位"
                             else "排队中，等待开始"
                         TaskStatus.DONE -> "已完成"
                         TaskStatus.FAILED -> "下载失败"

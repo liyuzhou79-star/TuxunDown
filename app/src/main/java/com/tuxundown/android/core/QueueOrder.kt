@@ -176,6 +176,25 @@ object QueueOrder {
         tasks: List<TaskRecord>,
         now: Long,
         excludeIds: Set<String> = emptySet(),
+    ): TaskRecord? = pickWithServed(tasks, now, excludeIds, lastServedHost)
+
+    /**
+     * The ONE pick core behind both [nextEligible] and
+     * [queuePositions]: eligibility, effective tier (with the
+     * v7.1 aging ring), jumped, then host rotation against
+     * [servedHost], then list order — exactly the chain
+     * documented on [nextEligible]. It is a pure function of
+     * its arguments: the rotation memory is PASSED IN, never
+     * read from or written to [lastServedHost] here, so a
+     * caller can simulate a whole drain locally (see
+     * [queuePositions]) without disturbing the real memory.
+     * [nextEligible] is this function with the real memory.
+     */
+    internal fun pickWithServed(
+        tasks: List<TaskRecord>,
+        now: Long,
+        excludeIds: Set<String>,
+        servedHost: String?,
     ): TaskRecord? {
         val eligible = tasks.filter { t ->
             t.status == TaskStatus.QUEUED && t.id !in excludeIds && !t.netDeferred &&
@@ -187,12 +206,75 @@ object QueueOrder {
         val tier = eligible.filter { effectiveTier(it, now) == topTier }
         val jumped = tier.firstOrNull { it.jumpedAt > 0 }
         if (jumped != null) return jumped
-        val served = lastServedHost
-        if (served != null) {
-            val rotated = tier.firstOrNull { HostMemory.hostOf(it.url) != served }
+        if (servedHost != null) {
+            val rotated = tier.firstOrNull { HostMemory.hostOf(it.url) != servedHost }
             if (rotated != null) return rotated
         }
         return tier.first()
+    }
+
+    /**
+     * v7.1 (audit round 56, Step C): where each currently
+     * pickable QUEUED task stands in line — task id to its
+     * 1-based queue position — computed by SIMULATING a drain
+     * with the very same pick core the real drain uses
+     * ([pickWithServed], the core behind [nextEligible]):
+     * start from the current [lastServedHost], repeatedly
+     * pick, record the next position, update a LOCAL served
+     * host with exactly [noteServed]'s rule
+     * (HostMemory.hostOf of the picked task's url), and remove
+     * the picked task from the local candidate list. There is
+     * no second, approximate ordering anywhere: position 1 is
+     * by construction what [nextEligible] would return for
+     * the same arguments.
+     *
+     * Only tasks the simulation actually picks get a position.
+     * A QUEUED task that is not eligible right now — net-parked
+     * (netDeferred), portal-parked (portalDeferred) or its
+     * scheduledAt has not arrived — is never picked, so it has
+     * NO position here and its card keeps its existing status
+     * wording; no number is faked for it. A charge-parked task
+     * (chargeDeferred) IS inside the eligibility gate (the
+     * charge gate is a post-pick gate in the drain), so the
+     * simulation picks it and it does get a position.
+     *
+     * [excludeIds] caliber: the caller must pass the same
+     * exclusion caliber the drain passes to [nextEligible].
+     * The drain passes its running-thread ids; the task list
+     * UI passes the EngineClaims claim set, read per task via
+     * DownloadCenter.isClaimed (a claim is held for the whole
+     * runOne invocation, so this also excludes a task sitting
+     * in its auto-retry backoff window — status flipped back
+     * to QUEUED but still claimed — exactly as the drain's
+     * running set excludes it). Excluded tasks get no position
+     * and occupy none. Residual difference, stated honestly:
+     * the claim set is a snapshot taken when the UI computes
+     * the positions, while the drain re-reads its own running
+     * set on every pass, so a claim taken or released between
+     * the snapshot and a drain pass can leave a displayed
+     * position briefly one off until the next UI refresh.
+     *
+     * No side effects: [lastServedHost] is only read (once, as
+     * the simulation's starting memory), the input list is
+     * copied before anything is removed from it, and no task
+     * record is touched.
+     */
+    fun queuePositions(
+        tasks: List<TaskRecord>,
+        now: Long,
+        excludeIds: Set<String> = emptySet(),
+    ): Map<String, Int> {
+        val remaining = tasks.toMutableList()
+        val positions = LinkedHashMap<String, Int>()
+        var servedHost = lastServedHost
+        var nextPosition = 1
+        while (true) {
+            val picked = pickWithServed(remaining, now, excludeIds, servedHost) ?: break
+            positions[picked.id] = nextPosition++
+            servedHost = HostMemory.hostOf(picked.url)
+            remaining.remove(picked)
+        }
+        return positions
     }
 
     /** Earliest future scheduled start among QUEUED tasks, or 0. */
