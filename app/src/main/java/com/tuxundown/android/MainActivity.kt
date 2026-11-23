@@ -695,7 +695,7 @@ fun DownApp() {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "5.9.0"
+        }.getOrNull() ?: "6.0.0"
     }
     var showGuide by remember {
         // v2.2 safe mode: after 2+ consecutive crashes, first-
@@ -7476,9 +7476,9 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 任务详情新增「连接预算」行：正在下载的任务现在会写明自己分到了几条连接，以及是被全局连接上限、站点限流还是单任务上限压住的，数字跟着实时刷新——连接开不满的时候，不用再猜是哪里卡住了\n" +
-            "· 测速改走代理了：以前配了代理时，测速会绕过代理直接连，测出来的数字跟实际下载对不上；现在测速和下载走同一条路，结果才作数。测速页也会提醒：有任务正在下载时测速会互相抢带宽，结果会偏低\n" +
-            "· 全局限速的分配口径说清了：开了全局限速后，总带宽按任务优先级切分，每个任务都有一份保底，慢任务暂时用不完的份额不会转借给别的任务——这是为了保证谁都不会被饿着；任务结束或暂停后，腾出来的带宽会在下一次写入时立即重新分配，连接数也会在几秒内跟上",
+            "· 这是 5.x 的整合版：把 4.1 以来的功能逐项做了一遍全量回归——57 个功能点一个一个对着实际代码复核接通情况，结论是全部接通、没有回退、没有只剩说明没有实装的空壳\n" +
+            "· 升级前的准备核查也做完了：从 1.2 到这一版的版本号链逐个核对、没有断档；检查更新的版本比较在 5.9 升 6.0、6.9 升 6.10 这类跨位情况下都算对；备份导出再导入的往返也核过，设置、任务、统计和按站点学习数据都能原样回来\n" +
+            "· 文档和帮助补齐了：帮助中心新增六个话题——连接预算、自动读取校验文件、建任务为什么会去重、镜像待确认与手动放行、嗅探历史重新嗅探、一键体检；仓库说明里也补上了完整的权限清单和体积说明，用的还是你手上这一版的功能，没有超前写还没做好的东西",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
             "· 文件直链 → 直接开始多线程下载，还能预先改好保存文件名\n" +
@@ -8622,7 +8622,7 @@ fun TaskCard(
                     val version = runCatching {
                         ctx.packageManager.getPackageInfo(ctx.packageName, 0)
                             .versionName
-                    }.getOrNull() ?: "5.9.0"
+                    }.getOrNull() ?: "6.0.0"
                     val cm = ctx.getSystemService(
                         android.content.Context.CLIPBOARD_SERVICE,
                     ) as android.content.ClipboardManager

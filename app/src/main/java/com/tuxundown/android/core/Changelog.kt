@@ -16,7 +16,11 @@ object Changelog {
 
     data class Entry(val version: String, val summary: String)
 
-    val entries: List<Entry> = listOf(
+        val entries: List<Entry> = listOf(
+        Entry(
+            "6.0.0",
+            "5.x 的整合版：4.1 以来的功能逐项全量回归复核，确认全部接通、无回退；升级前的版本号链、跨版本比较和备份往返都核查过；帮助中心补了六个新话题，说明文档同步到最新功能。",
+        ),
         Entry(
             "5.9.0",
             "任务详情新增「连接预算」行：这个任务分到几条连接、被全局上限／站点限流／单任务上限哪一项压住，一眼看清并实时刷新；测速改为走代理设置，测得准了，测速页也会提醒有任务在下时结果会偏低；全局限速的份额口径在说明里讲清。",
