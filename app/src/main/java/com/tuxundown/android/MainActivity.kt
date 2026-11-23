@@ -120,6 +120,7 @@ import com.tuxundown.android.core.DownloadedFiles
 import com.tuxundown.android.core.DuplicateFinder
 import com.tuxundown.android.core.TaskPriority
 import com.tuxundown.android.core.Format
+import com.tuxundown.android.core.HealthCheck
 import com.tuxundown.android.core.HostMemory
 import com.tuxundown.android.core.FtpClient
 import com.tuxundown.android.core.LinkExtract
@@ -5114,6 +5115,178 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
     var lines by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
     var report by remember { mutableStateOf("") }
 
+    // ---- v5.5: 一键体检 (see HealthCheck for the verdicts) ----
+    // Nothing runs on entry: the items show 未检查 until the
+    // user taps 开始体检. Results land item by item (each step
+    // posts its own row) so the page never freezes on the two
+    // network steps.
+    var healthRunning by remember { mutableStateOf(false) }
+    var healthStarted by remember { mutableStateOf(false) }
+    var healthCurrent by remember { mutableStateOf<HealthCheck.Item?>(null) }
+    var healthResults by remember {
+        mutableStateOf<List<HealthCheck.Result>>(emptyList())
+    }
+    var healthCopy by remember { mutableStateOf("") }
+
+    fun healthPost(block: () -> Unit) {
+        android.os.Handler(android.os.Looper.getMainLooper()).post(block)
+    }
+
+    fun runHealthCheck() {
+        if (healthRunning) return
+        healthRunning = true
+        healthStarted = true
+        healthResults = emptyList()
+        healthCopy = ""
+        healthCurrent = null
+        Thread {
+            val results = mutableListOf<HealthCheck.Result>()
+            fun publish(r: HealthCheck.Result) {
+                results.add(r)
+                val snapshot = results.toList()
+                healthPost { healthResults = snapshot }
+            }
+            fun step(
+                item: HealthCheck.Item,
+                block: () -> HealthCheck.Result?,
+            ) {
+                healthPost { healthCurrent = item }
+                runCatching { block() }.getOrNull()?.let { publish(it) }
+            }
+            // 1. version + signing fingerprint — the same
+            // PackageManager read the 自检 below does, judged
+            // by HealthCheck (fingerprint口径 = Diagnostics').
+            step(HealthCheck.Item.VERSION) {
+                val fingerprint = runCatching {
+                    val pm = context.packageManager
+                    @Suppress("DEPRECATION")
+                    val pi = if (android.os.Build.VERSION.SDK_INT >= 28) {
+                        pm.getPackageInfo(
+                            context.packageName,
+                            android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES,
+                        )
+                    } else {
+                        pm.getPackageInfo(
+                            context.packageName,
+                            android.content.pm.PackageManager.GET_SIGNATURES,
+                        )
+                    }
+                    @Suppress("DEPRECATION")
+                    val certBytes = if (android.os.Build.VERSION.SDK_INT >= 28) {
+                        pi.signingInfo?.apkContentsSigners?.firstOrNull()?.toByteArray()
+                    } else {
+                        pi.signatures?.firstOrNull()?.toByteArray()
+                    }
+                    val digest = java.security.MessageDigest.getInstance("SHA-256")
+                        .digest(certBytes ?: byteArrayOf())
+                    digest.joinToString("") { "%02x".format(it) }
+                }.getOrDefault("")
+                HealthCheck.versionVerdict(
+                    version, Diagnostics.fingerprint8(fingerprint),
+                )
+            }
+            // 2. memory tier (DownloadCenter's cached verdict).
+            step(HealthCheck.Item.MEMORY) {
+                HealthCheck.memoryVerdict(DownloadCenter.memoryTier())
+            }
+            // 3. last cold start (StartupTiming's stored value).
+            step(HealthCheck.Item.STARTUP) {
+                HealthCheck.startupVerdict(StartupTiming.lastColdStartMs(context))
+            }
+            // 4. download-dir free space (PublicStorage's read;
+            // -1 with a custom SAF folder reads honestly as
+            // 读不到 inside the verdict).
+            step(HealthCheck.Item.SPACE) {
+                HealthCheck.spaceVerdict(
+                    PublicStorage.availableBytes(context),
+                    DownloadCenter.downloadDirUri.isNotBlank(),
+                )
+            }
+            // 5. network + gates — the summary card's own
+            // snapshot, so the two surfaces cannot disagree.
+            step(HealthCheck.Item.NETWORK) {
+                HealthCheck.networkVerdict(
+                    DownloadCenter.summaryNetSnapshot(DownloadCenter.store.tasks),
+                )
+            }
+            // 6. proxy reachability — ONLY when a proxy is
+            // configured and active; the same bare socket probe
+            // the 自检 uses. Never probes an unconfigured proxy.
+            val ps = DownloadCenter.proxySettings()
+            if (ps.active) {
+                step(HealthCheck.Item.PROXY) {
+                    val reachable = runCatching {
+                        java.net.Socket().use { s ->
+                            s.connect(
+                                java.net.InetSocketAddress(ps.host, ps.port), 5_000,
+                            )
+                            true
+                        }
+                    }.getOrDefault(false)
+                    HealthCheck.proxyVerdict(true, reachable, ps.label())
+                }
+            }
+            // 7. DNS — the 自检's own two hosts and 4 s timeout
+            // shape, gathered per host so the verdict can count.
+            step(HealthCheck.Item.DNS) {
+                fun dnsProbe(host: String): HealthCheck.DnsProbe {
+                    var result: Array<java.net.InetAddress>? = null
+                    var failed = false
+                    val t = Thread {
+                        runCatching { java.net.InetAddress.getAllByName(host) }
+                            .onSuccess { result = it }
+                            .onFailure { failed = true }
+                    }
+                    t.isDaemon = true
+                    t.start()
+                    t.join(4_000)
+                    return when {
+                        failed -> HealthCheck.DnsProbe(host, false, "$host 解析失败")
+                        result != null -> HealthCheck.DnsProbe(
+                            host, true, "$host 能解析（${result!!.size} 个地址）",
+                        )
+                        else -> HealthCheck.DnsProbe(host, false, "$host 解析超时")
+                    }
+                }
+                HealthCheck.dnsVerdict(
+                    listOf(dnsProbe("www.baidu.com"), dnsProbe("github.com")),
+                )
+            }
+            // 8. learning-data counts (existing parse results).
+            step(HealthCheck.Item.LEARNING) {
+                HealthCheck.learningVerdict(
+                    DownloadCenter.hostMemoryCount(),
+                    DownloadCenter.hostStatsCount(),
+                )
+            }
+            // 9. task total + abnormal count — the GateContext
+            // is built exactly like the home 异常 tab's (same
+            // conservative WiFi read), so the counts agree.
+            step(HealthCheck.Item.TASKS) {
+                val tasks = DownloadCenter.store.tasks
+                val gates = AbnormalFilter.GateContext(
+                    wifiGateClosed = DownloadCenter.wifiOnly &&
+                        !runCatching { DownloadCenter.isOnWifi() }
+                            .getOrDefault(false),
+                    chargeGateClosed = ChargeGuard.shouldPark(
+                        DownloadCenter.chargeOnlyDownload,
+                        DownloadCenter.isCharging(),
+                    ),
+                    nowMs = System.currentTimeMillis(),
+                )
+                HealthCheck.tasksVerdict(
+                    tasks.size, AbnormalFilter.count(tasks, gates),
+                )
+            }
+            val copyText = HealthCheck.buildCopyText(version, results.toList())
+            healthPost {
+                healthCopy = copyText
+                healthCurrent = null
+                healthRunning = false
+            }
+        }.start()
+    }
+
     // ---- v4.2: connection-count comparison (knife 5) ----
     // Prefilled ONCE with the most recently created task's URL
     // (the link the user most likely wants to check); empty when
@@ -5453,6 +5626,120 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+        // ---- v5.5: 一键体检 — the aggregated health check at
+        // the top of the page. Nothing runs until 开始体检 is
+        // tapped; before that every row honestly says 未检查.
+        // Each row carries BOTH a coloured dot and the level
+        // word （正常 / 注意 / 异常 / 未检查 / 检查中）, so the
+        // verdict never rides on colour alone. ----
+        item(key = "d-health") {
+            val proxyActive = DownloadCenter.proxySettings().active
+            val healthItems = HealthCheck.itemsFor(proxyActive)
+            val byItem = healthResults.associateBy { it.item }
+            SettingsGroup("一键体检") {
+                Text(
+                    "把版本、内存、空间、网络、解析和任务状态汇成一页，一项一项看。" +
+                        "点下面的按钮才会开始检查，进页面不会自动跑。提醒一句：" +
+                        "代理连通和 DNS 两项会发出很小的网络请求，其余都在本机完成。",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(Modifier.height(10.dp))
+                Button(
+                    onClick = { runHealthCheck() },
+                    enabled = !healthRunning,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text(if (healthRunning) "正在体检…" else "开始体检") }
+                Spacer(Modifier.height(10.dp))
+                for (item in healthItems) {
+                    val r = byItem[item]
+                    val isCurrent = healthRunning && healthCurrent == item
+                    val dotColor: Color
+                    val stateWord: String
+                    val valueText: String
+                    when {
+                        r != null -> {
+                            dotColor = when (r.level) {
+                                HealthCheck.Level.OK -> Color(0xFF2E7D32)
+                                HealthCheck.Level.WARN -> Color(0xFFB26A00)
+                                HealthCheck.Level.BAD -> Color(0xFFB3261E)
+                            }
+                            stateWord = r.level.label
+                            valueText = r.value
+                        }
+                        isCurrent -> {
+                            dotColor = MaterialTheme.colorScheme.primary
+                            stateWord = "检查中"
+                            valueText = "正在检查…"
+                        }
+                        healthStarted && healthRunning -> {
+                            dotColor = MaterialTheme.colorScheme.outline
+                            stateWord = "未检查"
+                            valueText = "还没轮到"
+                        }
+                        healthStarted -> {
+                            dotColor = MaterialTheme.colorScheme.outline
+                            stateWord = "未检查"
+                            valueText = "这一项这次没查成，再点一次开始体检"
+                        }
+                        else -> {
+                            dotColor = MaterialTheme.colorScheme.outline
+                            stateWord = "未检查"
+                            valueText = "点「开始体检」后检查"
+                        }
+                    }
+                    Row(
+                        Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.Top,
+                    ) {
+                        Box(
+                            Modifier.padding(top = 5.dp).size(10.dp)
+                                .clip(RoundedCornerShape(5.dp))
+                                .background(dotColor),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            item.label,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.width(96.dp),
+                        )
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                stateWord,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                valueText,
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        }
+                    }
+                }
+                if (!healthRunning && healthCopy.isNotBlank()) {
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedButton(
+                        onClick = {
+                            runCatching {
+                                val cm = context.getSystemService(
+                                    android.content.Context.CLIPBOARD_SERVICE
+                                ) as android.content.ClipboardManager
+                                cm.setPrimaryClip(
+                                    android.content.ClipData.newPlainText(
+                                        "体检结果", healthCopy,
+                                    )
+                                )
+                            }
+                            Toast.makeText(
+                                context, "体检结果已复制，去粘贴发送就行",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("复制体检结果") }
+                }
+            }
         }
         // ---- v5.1: current memory tier (display only — the
         // tier is automatic, there is deliberately no switch) ----

@@ -795,6 +795,15 @@ object DownloadCenter {
     /** Per-host learning data in HostMemory's serialized form. */
     fun hostMemorySnapshot(): String = pString("hostThreads", "")
 
+    /** v5.5: how many [HostMemory] entries are currently stored
+     *  (the diagnostics 一键体检's 学习数据 row — a count of the
+     *  existing parse result, nothing new is measured). */
+    fun hostMemoryCount(): Int = hostEntries().size
+
+    /** v5.5: how many [HostStats] entries are currently stored
+     *  (same row as [hostMemoryCount]). */
+    fun hostStatsCount(): Int = HostStats.parse(pString("hostStats", "")).size
+
     /** Restore per-host learning data. The text is parsed and
      *  re-serialized before storing, so malformed lines from a
      *  hand-edited file drop out instead of being stored
@@ -1233,7 +1242,19 @@ object DownloadCenter {
      * hence the !dualChannelActive term) — never the threshold
      * switch alone.
      */
-    fun summaryNetLine(tasks: List<TaskRecord>): String {
+    fun summaryNetLine(tasks: List<TaskRecord>): String =
+        SummaryNetStatus.line(summaryNetSnapshot(tasks))
+
+    /**
+     * v5.5: the [SummaryNetStatus.Snapshot] behind
+     * [summaryNetLine], exposed so the diagnostics 一键体检
+     * judges the SAME evidence (see HealthCheck.networkVerdict)
+     * instead of re-reading the network and gates its own way.
+     * The collection below is exactly what summaryNetLine used
+     * to do inline — one capabilities read, the drain's own
+     * held-task eligibility, per-task traffic evidence.
+     */
+    fun summaryNetSnapshot(tasks: List<TaskRecord>): SummaryNetStatus.Snapshot {
         val ctx = appContext
         val caps = if (ctx == null) null else runCatching {
             val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE)
@@ -1262,19 +1283,17 @@ object DownloadCenter {
                 confirmed = t.mobileConfirmed,
             )
         }
-        return SummaryNetStatus.line(
-            SummaryNetStatus.Snapshot(
-                network = kind,
-                validated = caps?.hasCapability(
-                    NetworkCapabilities.NET_CAPABILITY_VALIDATED
-                ) == true,
-                dualActive = dualChannelActive,
-                wifiOnlyOn = wifiOnly,
-                chargeOnlyOn = chargeOnlyDownload,
-                charging = isCharging(),
-                hasQueuedDueTask = held.isNotEmpty(),
-                trafficBlockedTask = trafficBlocked,
-            )
+        return SummaryNetStatus.Snapshot(
+            network = kind,
+            validated = caps?.hasCapability(
+                NetworkCapabilities.NET_CAPABILITY_VALIDATED
+            ) == true,
+            dualActive = dualChannelActive,
+            wifiOnlyOn = wifiOnly,
+            chargeOnlyOn = chargeOnlyDownload,
+            charging = isCharging(),
+            hasQueuedDueTask = held.isNotEmpty(),
+            trafficBlockedTask = trafficBlocked,
         )
     }
 
