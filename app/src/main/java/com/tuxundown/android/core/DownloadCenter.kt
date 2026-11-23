@@ -353,7 +353,9 @@ object DownloadCenter {
 
     fun rememberSniffedPage(url: String) {
         if (url.isBlank()) return
-        sniffHistory = listOf(url) + sniffHistory.filter { it != url }
+        // v5.7: the ordering/dedup/cap rule lives in the pure
+        // SniffHistory (unit-tested); this stays the only writer.
+        sniffHistory = SniffHistory.afterSuccessfulSniff(sniffHistory, url)
     }
 
     /**

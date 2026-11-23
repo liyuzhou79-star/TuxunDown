@@ -131,6 +131,7 @@ import com.tuxundown.android.core.ThunderLink
 import com.tuxundown.android.core.ProxySettings
 import com.tuxundown.android.core.PublicStorage
 import com.tuxundown.android.core.ScheduleTime
+import com.tuxundown.android.core.SniffHistory
 import com.tuxundown.android.core.SpeedCurveExport
 import com.tuxundown.android.core.SpeedSchedule
 import com.tuxundown.android.core.SpeedCompare
@@ -2641,27 +2642,49 @@ fun DownApp() {
                     if (history.isNotEmpty() && urlText.isBlank()) {
                         Spacer(Modifier.height(10.dp))
                         Text(
-                            "最近嗅过的网页（点一个重新嗅探）：",
+                            "最近嗅过的网页：",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         for (h in history.take(5)) {
-                            Text(
-                                h,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.primary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    // v2.9 (audit 15): a bare text
-                                    // link was a ~24 dp touch
-                                    // target; give it the 48 dp
-                                    // minimum like every button.
-                                    .heightIn(min = 48.dp)
-                                    .clickable { urlText = h }
-                                    .padding(vertical = 16.dp),
-                            )
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    h,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        // v2.9 (audit 15): a bare text
+                                        // link was a ~24 dp touch
+                                        // target; give it the 48 dp
+                                        // minimum like every button.
+                                        .heightIn(min = 48.dp)
+                                        .clickable { urlText = h }
+                                        .padding(vertical = 16.dp),
+                                )
+                                // v5.7: one-tap re-sniff — runs the
+                                // entry's saved page URL through the
+                                // SAME startSniff a fresh paste uses
+                                // (static fetch, intermediate-page
+                                // tracking, result list, size probe
+                                // all shared; see SniffHistory for
+                                // the session/history semantics). A
+                                // failure lands in `message` exactly
+                                // like a fresh sniff's and leaves the
+                                // entry and the old session untouched.
+                                TextButton(
+                                    onClick = {
+                                        if (!sniffing) {
+                                            startSniff(SniffHistory.resniffTarget(h))
+                                        }
+                                    },
+                                ) { Text("重新嗅探") }
+                            }
                         }
                     }
                     Spacer(Modifier.height(4.dp))
