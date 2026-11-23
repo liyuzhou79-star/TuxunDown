@@ -106,6 +106,41 @@ class TaskStoreJsonTest {
     }
 
     @Test
+    fun roundTripKeepsDailyPickAndOldRecordsDefaultUnknown() {
+        // v6.4 (audit round 49): the daily HH:MM pick rides the
+        // shared serializer, so disk AND backup round trips keep
+        // it (Backup.build embeds this exact array format).
+        val t = TaskRecord(url = "https://a.b/f.bin", status = TaskStatus.QUEUED)
+        t.scheduleDaily = true
+        t.scheduleHour = 23
+        t.scheduleMinute = 30
+        val back = TaskStore.deserialize(TaskStore.serialize(listOf(t)))
+        assertEquals(1, back.size)
+        assertTrue(back[0].scheduleDaily)
+        assertEquals(23, back[0].scheduleHour)
+        assertEquals(30, back[0].scheduleMinute)
+        // A pre-v6.4 record has neither key: -1 / -1 = unknown
+        // pick (the reschedule keeps the legacy epoch path).
+        val legacy = TaskStore.deserialize(
+            """[{"id":"x","url":"https://e.com/f","status":"PAUSED","scheduleDaily":true}]"""
+        )
+        assertEquals(1, legacy.size)
+        assertEquals(-1, legacy[0].scheduleHour)
+        assertEquals(-1, legacy[0].scheduleMinute)
+        // A corrupt pair is sanitized as a PAIR at the parse
+        // door: out-of-range hour, and a valid hour with an
+        // out-of-range minute, both fall back to unknown.
+        val hostile = TaskStore.deserialize(
+            """[{"id":"y","url":"https://e.com/f","status":"PAUSED","scheduleHour":25,"scheduleMinute":30},{"id":"z","url":"https://e.com/g","status":"PAUSED","scheduleHour":10,"scheduleMinute":-3}]"""
+        )
+        assertEquals(2, hostile.size)
+        assertEquals(-1, hostile[0].scheduleHour)
+        assertEquals(-1, hostile[0].scheduleMinute)
+        assertEquals(-1, hostile[1].scheduleHour)
+        assertEquals(-1, hostile[1].scheduleMinute)
+    }
+
+    @Test
     fun roundTripKeepsV16Fields() {
         val t = TaskRecord(
             url = "https://example.com/live/index.m3u8",

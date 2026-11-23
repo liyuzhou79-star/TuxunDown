@@ -6,6 +6,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.Calendar
+import java.util.TimeZone
 
 /** v1.8: daily-schedule wall-clock math. */
 class ScheduleTimeTest {
@@ -119,6 +120,72 @@ class ScheduleTimeTest {
             on(2025, 1, 1, 10, 0), // Feb 1
             ScheduleTime.nextOccurrence(10, 0, now),
         )
+    }
+
+    // ---- v6.4 (audit round 49): time-zone injection, the
+    // daily re-anchor, and DST edges. Epoch constants below
+    // were computed independently (zone offsets noted per
+    // line) so the assertions do not just mirror Calendar. ----
+
+    private val utc: TimeZone = TimeZone.getTimeZone("UTC")
+    private val taipei: TimeZone = TimeZone.getTimeZone("Asia/Taipei")
+    private val newYork: TimeZone = TimeZone.getTimeZone("America/New_York")
+
+    @Test
+    fun nextDailyAtReanchorsPickedTimeAfterZoneMove() {
+        // The slot epoch a Taipei user got for "23:30 daily":
+        // 2026-11-22 23:30 +08:00.
+        val taipeiSlot = 1_795_361_400_000L
+        assertEquals("23:30", ScheduleTime.formatHhMm(taipeiSlot, taipei))
+        // The phone is now in a UTC zone; it is 2026-11-23 12:00 UTC.
+        val now = 1_795_435_200_000L
+        // Re-anchoring from the stored pick lands on 23:30 LOCAL
+        // in the new zone (2026-11-23 23:30 UTC), not on the old
+        // epoch's 15:30 reading there.
+        val next = ScheduleTime.nextDailyAt(23, 30, now, utc)
+        assertEquals(1_795_476_600_000L, next)
+        assertEquals("23:30", ScheduleTime.formatHhMm(next, utc))
+    }
+
+    @Test
+    fun advanceDailyOnLegacyEpochDriftsAfterZoneMove() {
+        // The pre-v6.4 behaviour, pinned on purpose: with no
+        // stored pick, advancing the stored epoch in the NEW
+        // zone keeps the epoch's new-zone reading — Taipei's
+        // 23:30 slot (2026-11-22 15:30 UTC) advances to
+        // 2026-11-23 15:30 UTC. This silent drift is exactly
+        // what nextDailyAt fixes for records that carry a pick;
+        // legacy records cannot be re-anchored (see the
+        // advanceDaily doc).
+        val taipeiSlot = 1_795_361_400_000L
+        val now = 1_795_435_200_000L // 2026-11-23 12:00 UTC
+        val next = ScheduleTime.advanceDaily(taipeiSlot, now, utc)
+        assertEquals(1_795_447_800_000L, next)
+        assertEquals("15:30", ScheduleTime.formatHhMm(next, utc))
+    }
+
+    @Test
+    fun nextDailyAtSpringForwardNonexistentTimeResolvesForward() {
+        // America/New_York springs forward on 2026-03-08
+        // (02:00 -> 03:00): 02:30 never happens that day.
+        // Calendar's lenient resolution moves it forward by the
+        // gap, landing at 03:30 EDT (07:30 UTC).
+        val now = 1_772_902_800_000L // 2026-03-07 12:00 EST
+        val next = ScheduleTime.nextDailyAt(2, 30, now, newYork)
+        assertEquals(1_772_955_000_000L, next) // 2026-03-08 03:30 EDT
+        assertEquals("03:30", ScheduleTime.formatHhMm(next, newYork))
+    }
+
+    @Test
+    fun nextDailyAtFallBackRepeatedTimeResolvesToFirstOccurrence() {
+        // America/New_York falls back on 2026-11-01: 01:30
+        // happens twice (EDT, then EST). Calendar resolves the
+        // ambiguity to the FIRST occurrence — 01:30 EDT
+        // (05:30 UTC), not the 06:30 UTC repeat.
+        val now = 1_793_462_400_000L // 2026-10-31 12:00 EDT
+        val next = ScheduleTime.nextDailyAt(1, 30, now, newYork)
+        assertEquals(1_793_511_000_000L, next) // 2026-11-01 01:30 EDT
+        assertEquals("01:30", ScheduleTime.formatHhMm(next, newYork))
     }
 
     @Test

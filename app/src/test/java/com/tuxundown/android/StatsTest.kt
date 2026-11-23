@@ -30,6 +30,23 @@ class StatsTest {
         assertEquals(0L, StatsMath.todayBytes("", 500, day1))
     }
 
+    @Test
+    fun dayKeyAndTodayBytesReadInInjectedZone() {
+        // v6.4 (audit round 49): the day key is a LOCAL-day
+        // caliber in the zone in force at read time — one
+        // instant, two zones, two different days. A stored
+        // "today" counter keyed in the old zone simply stops
+        // matching after a move (reads 0); nothing is moved or
+        // double-counted.
+        val at = 1_795_365_000_000L // 2026-11-22 16:30 UTC
+        val taipei = java.util.TimeZone.getTimeZone("Asia/Taipei")
+        val utc = java.util.TimeZone.getTimeZone("UTC")
+        assertEquals("2026-11-23", StatsMath.dayKey(at, taipei))
+        assertEquals("2026-11-22", StatsMath.dayKey(at, utc))
+        assertEquals(500L, StatsMath.todayBytes("2026-11-23", 500, at, taipei))
+        assertEquals(0L, StatsMath.todayBytes("2026-11-23", 500, at, utc))
+    }
+
     // ---- v2.3: per-host ranking ----
 
     @Test

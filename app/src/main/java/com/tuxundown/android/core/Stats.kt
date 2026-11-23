@@ -9,9 +9,21 @@ package com.tuxundown.android.core
  */
 object StatsMath {
 
-    /** "2026-11-22" style local day key for an epoch-ms instant. */
-    fun dayKey(epochMs: Long): String {
-        val cal = java.util.Calendar.getInstance().apply { timeInMillis = epochMs }
+    /**
+     * "2026-11-22" style local day key for an epoch-ms instant,
+     * read in [zone] (v6.4 audit round 49: injectable, default =
+     * the device zone at call time). The caliber is LOCAL DAY in
+     * the zone in force when the key is computed: after a zone
+     * change the same instant can key to a different day, and a
+     * stored "today" counter simply stops matching (todayBytes
+     * reads 0) while the DaySeries history keeps its old keys —
+     * statistics re-key, no counted byte is lost or moved.
+     */
+    fun dayKey(
+        epochMs: Long,
+        zone: java.util.TimeZone = java.util.TimeZone.getDefault(),
+    ): String {
+        val cal = java.util.Calendar.getInstance(zone).apply { timeInMillis = epochMs }
         return "%04d-%02d-%02d".format(
             cal.get(java.util.Calendar.YEAR),
             cal.get(java.util.Calendar.MONTH) + 1,
@@ -20,8 +32,11 @@ object StatsMath {
     }
 
     /** Stored "today" bytes are only valid while the day matches. */
-    fun todayBytes(storedKey: String, storedBytes: Long, nowMs: Long): Long =
-        if (storedKey == dayKey(nowMs)) storedBytes else 0L
+    fun todayBytes(
+        storedKey: String, storedBytes: Long, nowMs: Long,
+        zone: java.util.TimeZone = java.util.TimeZone.getDefault(),
+    ): Long =
+        if (storedKey == dayKey(nowMs, zone)) storedBytes else 0L
 }
 
 /**
@@ -58,14 +73,21 @@ object DaySeries {
     }
 
     /** The last [n] days ending today, oldest first; days with
-     *  no record read as 0 so the chart has no holes. */
-    fun lastDays(entries: List<Day>, n: Int, nowMs: Long): List<Day> {
+     *  no record read as 0 so the chart has no holes. "Today"
+     *  and the day steps are read in [zone] (v6.4: injectable,
+     *  default = the device zone at call time), and the keys
+     *  come from the same zone so the walk and the lookup can
+     *  never disagree about which day an instant belongs to. */
+    fun lastDays(
+        entries: List<Day>, n: Int, nowMs: Long,
+        zone: java.util.TimeZone = java.util.TimeZone.getDefault(),
+    ): List<Day> {
         if (n <= 0) return emptyList()
         val byKey = entries.associateBy { it.key }
-        val cal = java.util.Calendar.getInstance().apply { timeInMillis = nowMs }
+        val cal = java.util.Calendar.getInstance(zone).apply { timeInMillis = nowMs }
         cal.add(java.util.Calendar.DAY_OF_YEAR, -(n - 1))
         return (0 until n).map {
-            val key = StatsMath.dayKey(cal.timeInMillis)
+            val key = StatsMath.dayKey(cal.timeInMillis, zone)
             cal.add(java.util.Calendar.DAY_OF_YEAR, 1)
             byKey[key] ?: Day(key, 0)
         }

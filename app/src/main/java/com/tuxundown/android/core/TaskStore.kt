@@ -186,6 +186,19 @@ class TaskRecord(
      *  the service re-queues it for the same wall-clock time next
      *  day (scheduledAt carries the NEXT slot). */
     var scheduleDaily: Boolean = false,
+    // ---- v6.4 additions (audit round 49) ----
+    /** The wall-clock hour/minute the user PICKED for a daily
+     *  schedule (0..23 / 0..59), stored separately from
+     *  [scheduledAt] so a reschedule can re-anchor the slot in
+     *  the CURRENT time zone (see ScheduleTime.nextDailyAt).
+     *  -1 = unknown: records written before v6.4 carry no pick —
+     *  their intended wall-clock time is unrecoverable (the old
+     *  epoch only shows what it reads as in today's zone), so
+     *  they keep the legacy advanceDaily behaviour. Only the
+     *  pair together is meaningful; the parser sanitizes any
+     *  half-valid or out-of-range pair back to -1 / -1. */
+    var scheduleHour: Int = -1,
+    var scheduleMinute: Int = -1,
     /**
      * HLS: segments already written to the target file. Writes are
      * strictly in playlist order, so the done set is always a prefix.
@@ -660,6 +673,8 @@ class TaskStore(context: Context) {
                 o.put("failureHttpCode", t.failureHttpCode)
                 o.put("jumpedAt", t.jumpedAt)
                 o.put("scheduleDaily", t.scheduleDaily)
+                o.put("scheduleHour", t.scheduleHour)
+                o.put("scheduleMinute", t.scheduleMinute)
                 o.put("taskLimitKBps", t.taskLimitKBps)
                 o.put("archived", t.archived)
                 o.put("userNote", t.userNote)
@@ -753,6 +768,11 @@ class TaskStore(context: Context) {
                         failureHttpCode = o.optInt("failureHttpCode", 0),
                         jumpedAt = o.optLong("jumpedAt", 0).coerceAtLeast(0),
                         scheduleDaily = o.optBoolean("scheduleDaily", false),
+                        // v6.4: missing keys (pre-v6.4 records)
+                        // parse as -1 = unknown pick; the pair
+                        // is range-sanitized just below.
+                        scheduleHour = o.optInt("scheduleHour", -1),
+                        scheduleMinute = o.optInt("scheduleMinute", -1),
                         taskLimitKBps = o.optInt("taskLimitKBps", 0).coerceAtLeast(0),
                         archived = o.optBoolean("archived", false),
                         userNote = o.optString("userNote"),
@@ -768,6 +788,18 @@ class TaskStore(context: Context) {
                         t.checksumState !in Checksum.STATE_NONE..Checksum.STATE_MISMATCHED
                     ) {
                         t.checksumState = Checksum.STATE_NONE
+                    }
+                    // v6.4 audit (round 49): the daily pick is
+                    // only meaningful as a valid PAIR. A corrupt
+                    // or hostile backup carrying hour=25 (or a
+                    // valid hour with minute=-3) must not reach
+                    // the reschedule math half-trusted — the
+                    // whole pair falls back to -1 / -1 (unknown),
+                    // which keeps the record on the legacy
+                    // advanceDaily path like any pre-v6.4 record.
+                    if (t.scheduleHour !in 0..23 || t.scheduleMinute !in 0..59) {
+                        t.scheduleHour = -1
+                        t.scheduleMinute = -1
                     }
                     val srcArr = o.optJSONArray("sources")
                     if (srcArr != null) {

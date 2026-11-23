@@ -1,6 +1,7 @@
 package com.tuxundown.android.core
 
 import java.util.Calendar
+import java.util.TimeZone
 
 /**
  * Notification quiet hours (v2.5): a daily window during
@@ -15,8 +16,16 @@ object QuietHours {
     const val DEFAULT_START_MIN = 23 * 60
     const val DEFAULT_END_MIN = 7 * 60
 
-    fun minuteOfDay(epochMs: Long): Int {
-        val cal = Calendar.getInstance().apply { timeInMillis = epochMs }
+    /**
+     * Minutes since local midnight for [epochMs], read in
+     * [zone] (v6.4 audit round 49: injectable, default = the
+     * device zone at call time — the window is judged LIVE in
+     * the zone in force at each tick, so a zone change or a
+     * DST shift re-reads the window against the new wall clock
+     * on the very next judgement; nothing is cached).
+     */
+    fun minuteOfDay(epochMs: Long, zone: TimeZone = TimeZone.getDefault()): Int {
+        val cal = Calendar.getInstance(zone).apply { timeInMillis = epochMs }
         return cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
     }
 
@@ -45,6 +54,9 @@ object QuietHours {
         }
     }
 
-    fun isQuietAt(startMin: Int, endMin: Int, epochMs: Long): Boolean =
-        isQuiet(startMin, endMin, minuteOfDay(epochMs))
+    fun isQuietAt(
+        startMin: Int, endMin: Int, epochMs: Long,
+        zone: TimeZone = TimeZone.getDefault(),
+    ): Boolean =
+        isQuiet(startMin, endMin, minuteOfDay(epochMs, zone))
 }

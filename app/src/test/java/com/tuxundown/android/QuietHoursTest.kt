@@ -39,6 +39,33 @@ class QuietHoursTest {
     }
 
     @Test
+    fun crossMidnightWindowJudgedInInjectedZone() {
+        // v6.4 (audit round 49): the window is judged live from
+        // the wall clock in the zone in force — the SAME instant
+        // is inside the 23:00 -> 07:00 window in Taipei
+        // (2026-11-23 00:30 local) and outside it in UTC
+        // (2026-11-22 16:30). No state crosses over: each
+        // judgement re-reads minute-of-day in its zone.
+        val at = 1_795_365_000_000L // 2026-11-22 16:30 UTC
+        val taipei = java.util.TimeZone.getTimeZone("Asia/Taipei")
+        val utc = java.util.TimeZone.getTimeZone("UTC")
+        assertEquals(30, QuietHours.minuteOfDay(at, taipei))
+        assertEquals(16 * 60 + 30, QuietHours.minuteOfDay(at, utc))
+        assertTrue(
+            QuietHours.isQuietAt(
+                QuietHours.DEFAULT_START_MIN, QuietHours.DEFAULT_END_MIN,
+                at, taipei,
+            )
+        )
+        assertFalse(
+            QuietHours.isQuietAt(
+                QuietHours.DEFAULT_START_MIN, QuietHours.DEFAULT_END_MIN,
+                at, utc,
+            )
+        )
+    }
+
+    @Test
     fun formatAndDefaults() {
         assertEquals("23:00", QuietHours.formatMin(QuietHours.DEFAULT_START_MIN))
         assertEquals("07:00", QuietHours.formatMin(QuietHours.DEFAULT_END_MIN))

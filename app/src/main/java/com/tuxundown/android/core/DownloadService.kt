@@ -1358,9 +1358,27 @@ class DownloadService : Service() {
         if (task.status != TaskStatus.DONE && task.status != TaskStatus.FAILED) return
         val store = DownloadCenter.store
         if (store.byId(task.id) == null) return // deleted meanwhile
-        val next = ScheduleTime.advanceDaily(
-            task.scheduledAt, System.currentTimeMillis()
-        )
+        // v6.4 (audit round 49): a record that carries the
+        // user's picked HH:MM re-anchors from that pick in the
+        // CURRENT time zone (ScheduleTime.nextDailyAt), so the
+        // daily slot keeps firing at the picked wall-clock time
+        // after travel / a zone change. A legacy record without
+        // a stored pick keeps advanceDaily on the stored epoch —
+        // its intended wall-clock time was never persisted and
+        // cannot be recovered, so its slot may read as a
+        // different local time in a new zone (documented on
+        // ScheduleTime.advanceDaily); that is the honest limit
+        // for pre-v6.4 records, not a silent choice.
+        val next = if (task.scheduleHour in 0..23 && task.scheduleMinute in 0..59) {
+            ScheduleTime.nextDailyAt(
+                task.scheduleHour, task.scheduleMinute,
+                System.currentTimeMillis()
+            )
+        } else {
+            ScheduleTime.advanceDaily(
+                task.scheduledAt, System.currentTimeMillis()
+            )
+        }
         task.chunkDone = BooleanArray(0)
         task.chunkSize = 0
         // v4.2: a fresh download gets a fresh grid — the old

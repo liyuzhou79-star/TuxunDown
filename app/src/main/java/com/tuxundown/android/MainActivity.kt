@@ -614,6 +614,13 @@ fun DownApp() {
     var scheduleMode by remember { mutableStateOf(0) }
     var dailyTimeText by remember { mutableStateOf("23:30") }
     var pendingScheduleAt by remember { mutableStateOf(0L) }
+    // v6.4 (audit round 49): the HH:MM the user picked in daily
+    // mode, kept next to pendingScheduleAt so createTask can
+    // persist it on the record (TaskRecord.scheduleHour/Minute)
+    // — the epoch alone cannot re-anchor the slot after a time
+    // zone change. Null whenever the pending slot is not a
+    // daily pick.
+    var pendingScheduleHm by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var sniffing by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf("") }
     // v6.3: short-link expansion opt-in (add dialog checkbox,
@@ -1053,6 +1060,14 @@ fun DownApp() {
             // task for the same time every day after each run.
             t.scheduleDaily = true
             t.scheduledAt = pendingScheduleAt
+            // v6.4: persist the picked wall-clock time itself —
+            // without it the record only holds an epoch computed
+            // in today's zone, and the daily slot silently
+            // drifts after a zone change (see TaskRecord).
+            pendingScheduleHm?.let { hm ->
+                t.scheduleHour = hm.first
+                t.scheduleMinute = hm.second
+            }
             t.note = "每天定时下载：第一次在 ${Format.clockTime(pendingScheduleAt)} 开始，" +
                 "之后每天这个时间自动再下一次。"
         } else if (pendingScheduleAt > System.currentTimeMillis()) {
@@ -1231,7 +1246,10 @@ fun DownApp() {
         }
         // v1.8: batch creation is always immediate — a daily slot
         // computed for a single task must not leak into the batch.
-        if (scheduleMode == 1) pendingScheduleAt = 0L
+        if (scheduleMode == 1) {
+            pendingScheduleAt = 0L
+            pendingScheduleHm = null
+        }
         showAdd = false
         urlText = ""
         Toast.makeText(
@@ -1319,7 +1337,11 @@ fun DownApp() {
             pendingScheduleAt = ScheduleTime.nextOccurrence(
                 hm.first, hm.second, System.currentTimeMillis()
             )
+            // v6.4: keep the pick itself for createTask — the
+            // epoch above is only its first occurrence.
+            pendingScheduleHm = hm
         } else {
+            pendingScheduleHm = null
             pendingScheduleAt = if (scheduleMin > 0) {
                 System.currentTimeMillis() + scheduleMin * 60_000L
             } else 0L
