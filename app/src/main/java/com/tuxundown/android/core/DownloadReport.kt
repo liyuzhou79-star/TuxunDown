@@ -47,10 +47,7 @@ nowMs: Long,
 ): String {
 val out = StringBuilder()
 out.append("TuxunDown 下载报告\n")
-val stamp = java.text.SimpleDateFormat(
-"yyyy-MM-dd HH:mm", java.util.Locale.US,
-).format(java.util.Date(nowMs))
-out.append("生成时间：$stamp\n")
+out.append("生成时间：${ExportStamp.format(nowMs)}\n")
 
 var anySection = false
 

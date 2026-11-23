@@ -161,9 +161,7 @@ object CrashGuard {
                     appContext.packageManager
                         .getPackageInfo(appContext.packageName, 0).versionName
                 }.getOrNull() ?: "?"
-                val timeText = java.text.SimpleDateFormat(
-                    "yyyy-MM-dd HH:mm:ss", java.util.Locale.US
-                ).format(java.util.Date())
+                val timeText = ExportStamp.format(System.currentTimeMillis())
                 logFile(appContext).writeText(
                     buildLog(timeText, version, thread.name, throwable)
                 )

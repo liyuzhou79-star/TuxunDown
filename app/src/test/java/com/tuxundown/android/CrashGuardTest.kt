@@ -1,6 +1,7 @@
 package com.tuxundown.android
 
 import com.tuxundown.android.core.CrashGuard
+import com.tuxundown.android.core.ExportStamp
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -37,6 +38,18 @@ class CrashGuardTest {
         assertTrue(out.contains("截断"))
         assertTrue(out.length < long.length)
         assertEquals("short", CrashGuard.truncateLog("short"))
+    }
+
+    @Test
+    fun buildLogCarriesAnExportStampTimeLine() {
+        // v6.4 step B: the handler hands buildLog an
+        // ExportStamp string (local time + explicit zone
+        // offset); the log's 时间 line must carry it verbatim.
+        val stamp = ExportStamp.format(
+            1795417445000L, java.util.TimeZone.getTimeZone("Asia/Taipei"),
+        )
+        val log = CrashGuard.buildLog(stamp, "6.3.0", "main", IllegalStateException("x"))
+        assertTrue(log.contains("时间：2026-11-23 15:04:05 (UTC+08:00)"))
     }
 
     @Test

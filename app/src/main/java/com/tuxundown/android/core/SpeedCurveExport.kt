@@ -47,10 +47,20 @@ object SpeedCurveExport {
      * exportable and must never become an empty file (the UI
      * tells the user plainly instead).
      */
-    fun buildCsv(fileName: String, samples: List<Long>): String? {
+    fun buildCsv(fileName: String, samples: List<Long>): String? =
+        buildCsv(fileName, samples, System.currentTimeMillis())
+
+    /**
+     * v6.4: same CSV with a generation-time header line. The
+     * stamp is [ExportStamp]'s caliber (local time + explicit
+     * zone offset at that instant), passed in as [nowMs] so
+     * this formatter stays pure and testable.
+     */
+    fun buildCsv(fileName: String, samples: List<Long>, nowMs: Long): String? {
         if (samples.isEmpty()) return null
         val sb = StringBuilder()
         sb.append("# TuxunDown 速度曲线导出\n")
+        sb.append("# 生成时间：").append(ExportStamp.format(nowMs)).append('\n')
         sb.append("# 文件：").append(commentName(fileName)).append('\n')
         sb.append("# 样本：共 ").append(samples.size)
             .append(" 个，每 ").append(SAMPLE_SECONDS)
@@ -82,9 +92,14 @@ object SpeedCurveExport {
      * none. Reads ONLY the display name and the samples — never
      * the link or the headers (see the redaction rule above).
      */
-    fun buildCsv(task: TaskRecord): String? {
+    fun buildCsv(task: TaskRecord): String? =
+        buildCsv(task, System.currentTimeMillis())
+
+    /** v6.4: [buildCsv] for [task] with an explicit [nowMs]
+     *  generation stamp (see the file-name overload). */
+    fun buildCsv(task: TaskRecord, nowMs: Long): String? {
         val samples = synchronized(task.speedHistory) { task.speedHistory.toList() }
-        return buildCsv(task.savedName.ifBlank { task.fileName }, samples)
+        return buildCsv(task.savedName.ifBlank { task.fileName }, samples, nowMs)
     }
 
     /**

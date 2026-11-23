@@ -1,6 +1,7 @@
 package com.tuxundown.android
 
 import com.tuxundown.android.core.DownloadReport
+import com.tuxundown.android.core.ExportStamp
 import com.tuxundown.android.core.HostStats
 import com.tuxundown.android.core.TaskRecord
 import com.tuxundown.android.core.TaskStatus
@@ -80,6 +81,23 @@ assertFalse(text.contains("全部记录"))
 assertFalse(text.contains("本机累计统计"))
 assertFalse(text.contains("下载最多的站点"))
 assertTrue(text.contains("还没有可报告的数据"))
+}
+
+@Test
+fun generationTimeUsesTheExportStampCaliber() {
+// v6.4 step B: the 生成时间 line is ExportStamp's shape —
+// local time WITH an explicit zone-offset label, never a
+// bare local time a reader in another zone could misread.
+val text = DownloadReport.build(
+emptyList(), DownloadReport.Counters(0, 0, 0), emptyList(), now,
+)
+assertTrue(text.contains("生成时间：${ExportStamp.format(now)}\n"))
+val stampLine = text.lines().first { it.startsWith("生成时间：") }
+assertTrue(
+stampLine.removePrefix("生成时间：").matches(
+Regex("""\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \(UTC[+-]\d{2}:\d{2}\)"""),
+),
+)
 }
 
 @Test

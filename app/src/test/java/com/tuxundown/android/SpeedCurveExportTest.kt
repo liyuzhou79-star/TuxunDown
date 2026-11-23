@@ -1,5 +1,6 @@
 package com.tuxundown.android
 
+import com.tuxundown.android.core.ExportStamp
 import com.tuxundown.android.core.SpeedCurveExport
 import com.tuxundown.android.core.TaskRecord
 import org.junit.Assert.assertEquals
@@ -52,6 +53,35 @@ class SpeedCurveExportTest {
         assertTrue(comments.any { it.contains("共 2 秒") })
         // Column header is exactly the promised shape.
         assertTrue(csv.lines().contains("elapsed_sec,cumulative_bytes,speed_bps"))
+    }
+
+    @Test
+    fun headerCarriesTheGenerationTime() {
+        // v6.4 step B: the nowMs entry stamps the header with
+        // ExportStamp's caliber (local time + explicit zone
+        // offset). It is a '#' comment line, so the CSV's data
+        // shape and the honesty comments are untouched.
+        val nowMs = 1795417445000L
+        val csv = SpeedCurveExport.buildCsv("movie.mp4", listOf(7L, 8L), nowMs)!!
+        val comments = csv.lines().filter { it.startsWith("#") }
+        assertTrue(comments.any { it == "# 生成时间：${ExportStamp.format(nowMs)}" })
+        assertTrue(
+            comments.any {
+                it.removePrefix("# 生成时间：").matches(
+                    Regex("""\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \(UTC[+-]\d{2}:\d{2}\)"""),
+                )
+            },
+        )
+        // The reconstruction disclaimer still rides along.
+        assertTrue(comments.any { it.contains("累计字节不是单独记录的") && it.contains("还原") })
+        assertEquals(listOf("0,7,7", "1,15,8"), dataRows(csv))
+        // The task overload stamps the same way.
+        val task = TaskRecord(url = "https://a.b/movie.mp4", fileName = "movie.mp4")
+        synchronized(task.speedHistory) { task.speedHistory.add(9L) }
+        val taskCsv = SpeedCurveExport.buildCsv(task, nowMs)!!
+        assertTrue(taskCsv.lines().any { it == "# 生成时间：${ExportStamp.format(nowMs)}" })
+        // An empty curve stays unexportable on the new entry too.
+        assertNull(SpeedCurveExport.buildCsv("movie.mp4", emptyList(), nowMs))
     }
 
     @Test

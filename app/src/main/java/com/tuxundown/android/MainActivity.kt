@@ -8974,7 +8974,9 @@ fun TaskCard(
                     Spacer(Modifier.height(6.dp))
                     OutlinedButton(onClick = {
                         val ctx = context
-                        val csv = SpeedCurveExport.buildCsv(task)
+                        val csv = SpeedCurveExport.buildCsv(
+                            task, System.currentTimeMillis(),
+                        )
                         if (csv == null) {
                             Toast.makeText(
                                 ctx,
