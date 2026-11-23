@@ -1,6 +1,55 @@
-# TuxunDown
+<p align="center">
+  <img src="docs/icon.png" width="120" alt="TuxunDown 图标">
+</p>
 
-极速多线程下载器（Android），免费开源。
+<h1 align="center">TuxunDown</h1>
+
+<p align="center">
+  极速多线程下载器（Android），免费开源。<br>
+  把文件切成小块、多条连接同时下载，专为「单条连接被限速」的场景而生：断点续传、资源嗅探、流媒体下载、多源并下与 WiFi＋流量双通道，全都装在一个不到 1.5 MB 的安装包里。
+</p>
+
+<p align="center">
+  <a href="https://github.com/liyuzhou79-star/TuxunDown/releases/tag/v7.7.0"><img src="https://img.shields.io/badge/版本-7.7.0-blue" alt="当前版本 7.7.0"></a>
+  <a href="https://github.com/liyuzhou79-star/TuxunDown/releases"><img src="https://img.shields.io/github/downloads/liyuzhou79-star/TuxunDown/total" alt="下载量"></a>
+  <img src="https://img.shields.io/badge/平台-Android-3DDC84" alt="平台 Android">
+  <img src="https://img.shields.io/badge/Android-10%2B-3DDC84" alt="Android 10+">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/许可-GPLv3-blue" alt="GPLv3"></a>
+</p>
+
+<p align="center">
+  <a href="#下载"><b>下载最新版</b></a> ·
+  <a href="#截图">截图</a> ·
+  <a href="#功能">功能</a> ·
+  <a href="#已知限制">已知限制</a> ·
+  <a href="#许可">许可</a>
+</p>
+
+---
+
+## 下载
+
+当前最新正式版：**v7.7.0**
+
+- 发布页：[v7.7.0](https://github.com/liyuzhou79-star/TuxunDown/releases/tag/v7.7.0)
+- 安装包直达：[TuxunDown-v7.7.0.apk](https://github.com/liyuzhou79-star/TuxunDown/releases/download/v7.7.0/TuxunDown-v7.7.0.apk)（约 1.4 MB）
+- 全部历史版本：[Releases](https://github.com/liyuzhou79-star/TuxunDown/releases)
+
+系统要求：Android 10 及以上。所有正式版都用同一把固定签名钥匙签署，新版可直接覆盖安装，不用卸载旧版。
+
+## 截图
+
+以下截图来自真实手机上的实际使用界面：
+
+<p align="center">
+  <img src="docs/screenshots/home-completed.jpg" width="260" alt="主页与已完成任务、速度曲线">
+  <img src="docs/screenshots/downloading.jpg" width="260" alt="下载进行中">
+  <img src="docs/screenshots/detail-server-profile.jpg" width="260" alt="任务详情与服务器画像">
+</p>
+
+<p align="center">
+  主页与已完成任务、速度曲线 · 下载进行中 · 任务详情与服务器画像
+</p>
 
 ## 功能
 
