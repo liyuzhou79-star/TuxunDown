@@ -40,6 +40,24 @@ import java.net.URL
  * sensitivity class from a credential. It keeps riding every
  * hop unchanged.
  *
+ * v6.5 audit round 50 (A-F3): the same scoping now covers the
+ * task's explicit Authorization header. Before this round the
+ * engine NEVER sent it — it was only null-checked to let a
+ * URL's embedded user:pass Basic through — so a task captured
+ * or pasted with an Authorization header silently went out
+ * unauthenticated. Now [authorizationFor] releases it under
+ * EXACTLY the cookie rule (same host as the task's primary
+ * link, exact match, fail closed): a credential belongs to its
+ * own host, so mirrors and cross-host redirect hops get
+ * nothing, on the second hop just as on the first.
+ * [basicAuthorizationFor] keeps the per-hop userinfo rule
+ * consistent with it: a hop URL's OWN user:pass still produces
+ * its Basic header even when the task carries an explicit
+ * Authorization that is being withheld from that (cross-host)
+ * hop — the withheld header must not suppress credentials that
+ * belong to the target itself. On the task's own host the
+ * explicit header wins and the userinfo Basic is not built.
+ *
  * Pure — unit-tested (SessionScopeTest).
  */
 object SessionScope {
@@ -69,4 +87,70 @@ object SessionScope {
      *  null when it must not travel there (see [maySendCookie]). */
     fun cookieFor(cookie: String?, ownerUrl: String?, requestUrl: String?): String? =
         if (maySendCookie(cookie, ownerUrl, requestUrl)) cookie else null
+
+    /**
+     * May [authorization] (the task's explicit Authorization
+     * header, captured or pasted for the task whose primary
+     * link is [ownerUrl]) be sent on a request to [requestUrl]?
+     * The cookie rule, unchanged: a non-blank value and an
+     * EXACT same-host match only; every doubt answers false.
+     */
+    fun maySendAuthorization(
+        authorization: String?,
+        ownerUrl: String?,
+        requestUrl: String?,
+    ): Boolean {
+        if (authorization.isNullOrBlank()) return false
+        val owner = hostOf(ownerUrl) ?: return false
+        val target = hostOf(requestUrl) ?: return false
+        return owner == target
+    }
+
+    /** The Authorization header to attach to a request to
+     *  [requestUrl], or null when it must not travel there
+     *  (see [maySendAuthorization]). */
+    fun authorizationFor(
+        authorization: String?,
+        ownerUrl: String?,
+        requestUrl: String?,
+    ): String? =
+        if (maySendAuthorization(authorization, ownerUrl, requestUrl)) {
+            authorization
+        } else {
+            null
+        }
+
+    /**
+     * The Basic header built from THIS hop URL's own embedded
+     * user:pass ([userInfo], still URL-encoded as it appears in
+     * the URL), or null when this hop must not carry one:
+     *
+     * - no userInfo on the hop URL → nothing to build;
+     * - the task's explicit Authorization IS released to this
+     *   hop (same host, see [authorizationFor]) → it wins, the
+     *   userinfo Basic is not built (the pre-A-F3 precedence,
+     *   preserved on the host where the explicit header
+     *   actually goes out);
+     * - otherwise — no explicit header at all, or one that is
+     *   being withheld from this cross-host hop → the hop URL's
+     *   own credentials still produce their Basic header: they
+     *   belong to the target, not to the task's primary host.
+     */
+    fun basicAuthorizationFor(
+        userInfo: String?,
+        explicitAuthorization: String?,
+        ownerUrl: String?,
+        requestUrl: String?,
+    ): String? {
+        if (userInfo.isNullOrEmpty()) return null
+        if (authorizationFor(explicitAuthorization, ownerUrl, requestUrl) != null) {
+            return null
+        }
+        val decoded = runCatching {
+            java.net.URLDecoder.decode(userInfo, "UTF-8")
+        }.getOrNull() ?: return null
+        val b64 = java.util.Base64.getEncoder()
+            .encodeToString(decoded.toByteArray(Charsets.UTF_8))
+        return "Basic $b64"
+    }
 }

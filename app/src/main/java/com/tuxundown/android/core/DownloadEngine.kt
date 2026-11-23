@@ -629,6 +629,12 @@ class DownloadEngine(
      * scopes cookies by domain. Referer still rides every hop —
      * it is the anti-hotlink signal servers check cross-host by
      * design, a different sensitivity class from a credential.
+     *
+     * v6.5 audit round 50 (A-F3): the task's explicit
+     * Authorization header is scoped by the SAME rule — it is
+     * actually sent now (before, it never left the task record),
+     * but only to the task's own host; see
+     * [SessionScope.authorizationFor].
      */
     private fun openFollowingRedirects(
         startUrl: String,
@@ -681,18 +687,21 @@ class DownloadEngine(
             // never turns userInfo into an Authorization header on
             // its own, so credentialed links used to die with a 401.
             // Taken from THIS hop's URL only — a redirect target
-            // without userInfo never receives the credentials. An
-            // explicit Authorization header (e.g. captured by the
-            // sniffer) always wins.
-            val userInfo = hopUrl.userInfo
-            if (!userInfo.isNullOrEmpty() && task.headers["Authorization"] == null) {
-                runCatching {
-                    val decoded = java.net.URLDecoder.decode(userInfo, "UTF-8")
-                    val b64 = java.util.Base64.getEncoder()
-                        .encodeToString(decoded.toByteArray(Charsets.UTF_8))
-                    c.setRequestProperty("Authorization", "Basic $b64")
-                }
-            }
+            // without userInfo never receives the credentials.
+            // v6.5 audit round 50 (A-F3): the task's explicit
+            // Authorization header is no longer just null-checked
+            // here — SessionScope releases it to the task's OWN
+            // host only (authorizationFor, the cookie rule), and
+            // where it goes out it wins over the userinfo Basic.
+            // Where it is withheld (a cross-host hop), the hop
+            // URL's own user:pass still builds its Basic header —
+            // those credentials belong to the target itself. Both
+            // verdicts are SessionScope's, unit-tested there.
+            SessionScope.authorizationFor(task.headers["Authorization"], task.url, current)
+                ?.let { c.setRequestProperty("Authorization", it) }
+                ?: SessionScope.basicAuthorizationFor(
+                    hopUrl.userInfo, task.headers["Authorization"], task.url, current,
+                )?.let { c.setRequestProperty("Authorization", it) }
             // v4.7 audit round 32: host-scoped cookie (see the
             // doc above and SessionScope) — consulted per hop
             // with this hop's URL, never re-sent blindly.
