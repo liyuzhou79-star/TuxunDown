@@ -137,6 +137,7 @@ import com.tuxundown.android.core.HealthCheck
 import com.tuxundown.android.core.IllegalTransitions
 import com.tuxundown.android.core.PowerStats
 import com.tuxundown.android.core.ResourceStatus
+import com.tuxundown.android.core.StartPlan
 import com.tuxundown.android.core.SecurityStatus
 import com.tuxundown.android.core.StatusDistribution
 import com.tuxundown.android.core.StorageHealth
@@ -7004,6 +7005,9 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
                         }.getOrNull(),
                         activeSamplers = runCatching {
                             DownloadCenter.runningEngines().size
+                        }.getOrNull(),
+                        fullWidthOpen = runCatching {
+                            StartPlan.FULL_WIDTH_OPEN
                         }.getOrNull(),
                     )
                 )

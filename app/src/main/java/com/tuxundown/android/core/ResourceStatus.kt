@@ -2,13 +2,13 @@ package com.tuxundown.android.core
 
 /**
  * v7.7 (audit round 62, Step C): the diagnostics page's
- * 「资源」 section — three read-only runtime figures,
+ * 「资源」 section — read-only runtime figures,
  * assembled here as pure logic in the same pattern as
  * [PowerStats] / [SecurityStatus]. Nothing here changes
  * any behaviour; the page reads each fact once per visit
  * and this object only decides which rows exist.
  *
- * The three facts and their pinned calibers:
+ * The facts and their pinned calibers:
  * - Current thread count: read live by the page with
  *   [Thread.activeCount]. That is the platform's own
  *   estimate of the active threads in the current thread
@@ -26,6 +26,12 @@ package com.tuxundown.android.core
  *   one sampler per running engine by construction, read
  *   as the size of DownloadCenter's registered-engine
  *   set. No second counter is kept anywhere.
+ * - Connection release form (v7.9): the ACTUAL value of
+ *   the factory constant [StartPlan.FULL_WIDTH_OPEN],
+ *   read by the page and shown as-is — false is the
+ *   gradual form, true the instant full-width form.
+ *   Pure display: this row never feeds back into any
+ *   decision and changes no behaviour.
  *
  * Absence rules (same caliber as [PowerStats]): a null
  * (unreadable) input drops exactly its own row; a
@@ -43,6 +49,7 @@ object ResourceStatus {
         val threadCount: Int?,
         val memoryTier: MemoryTier?,
         val activeSamplers: Int?,
+        val fullWidthOpen: Boolean? = null,
     )
 
     /** Assemble the section's display rows from a
@@ -63,6 +70,14 @@ object ResourceStatus {
         if (samplers != null && samplers >= 0) {
             rows += "采样器活跃数" to
                 "当前共 $samplers 个（按正在运行的引擎计）"
+        }
+        val fullWidth = snapshot.fullWidthOpen
+        if (fullWidth != null) {
+            rows += "连接放行形态" to if (fullWidth) {
+                "瞬间满开（记住的站第 0 秒全开）"
+            } else {
+                "渐进放行（先开一批，两三秒内分档加满）"
+            }
         }
         return rows
     }
