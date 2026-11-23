@@ -521,6 +521,8 @@ fun DownApp() {
     var autoInstallUi by remember { mutableStateOf(DownloadCenter.autoInstallApk) }
     var autoOpenUi by remember { mutableStateOf(DownloadCenter.autoOpenFile) }
     var autoVerifyUi by remember { mutableStateOf(DownloadCenter.autoVerifyHash) }
+    // v5.8: sidecar checksum files at task creation (default off).
+    var autoSidecarUi by remember { mutableStateOf(DownloadCenter.autoReadChecksumFile) }
     // v3.0: auto-extract finished .zip tasks (default off).
     var autoExtractUi by remember { mutableStateOf(DownloadCenter.autoExtractZip) }
     var maxConc by remember { mutableStateOf(DownloadCenter.maxConcurrent) }
@@ -909,6 +911,7 @@ fun DownApp() {
                             autoInstallUi = DownloadCenter.autoInstallApk
                             autoOpenUi = DownloadCenter.autoOpenFile
                             autoVerifyUi = DownloadCenter.autoVerifyHash
+                            autoSidecarUi = DownloadCenter.autoReadChecksumFile
                             autoExtractUi = DownloadCenter.autoExtractZip
                             maxConc = DownloadCenter.maxConcurrent
                             connCap = DownloadCenter.globalConnectionCap
@@ -1842,6 +1845,8 @@ fun DownApp() {
             onAutoOpen = { autoOpenUi = it; DownloadCenter.autoOpenFile = it },
             autoVerify = autoVerifyUi,
             onAutoVerify = { autoVerifyUi = it; DownloadCenter.autoVerifyHash = it },
+            autoSidecar = autoSidecarUi,
+            onAutoSidecar = { autoSidecarUi = it; DownloadCenter.autoReadChecksumFile = it },
             autoExtract = autoExtractUi,
             onAutoExtract = { autoExtractUi = it; DownloadCenter.autoExtractZip = it },
             batteryOk = batteryOk,
@@ -3576,6 +3581,9 @@ fun DownApp() {
                         ht.expectedMd5 = hex
                         ht.expectedSha256 = ""
                     }
+                    // v5.8: this value is hand-typed now, whatever
+                    // a sidecar may have supplied before.
+                    ht.checksumFromSidecar = false
                     ht.checksumState = Checksum.STATE_NONE
                     store.saveNow()
                     hashTask = null
@@ -3613,6 +3621,7 @@ fun DownApp() {
                         TextButton(onClick = {
                             ht.expectedSha256 = ""
                             ht.expectedMd5 = ""
+                            ht.checksumFromSidecar = false
                             ht.checksumState = Checksum.STATE_NONE
                             store.saveNow()
                             hashTask = null
@@ -6068,6 +6077,8 @@ fun SettingsScreen(
     onAutoOpen: (Boolean) -> Unit,
     autoVerify: Boolean,
     onAutoVerify: (Boolean) -> Unit,
+    autoSidecar: Boolean,
+    onAutoSidecar: (Boolean) -> Unit,
     autoExtract: Boolean,
     onAutoExtract: (Boolean) -> Unit,
     batteryOk: Boolean,
@@ -6095,7 +6106,7 @@ fun SettingsScreen(
         "s-look" to "外观 amoled 纯黑 深色 暗色 主题 黑色",
         "s-card" to "任务卡片 卡片 字段 平均速度 重试次数 创建时间 来源站点 分片 显示 详情",
         "s-notify" to "提示 震动 声音 响铃 完成 自动安装 安装 自动打开 打开 静默 夜间 时段 勿扰 " +
-            "校验 哈希 完整性 sha md5 解压 zip 压缩包 自动解压",
+            "校验 哈希 完整性 sha md5 校验文件 边车 自动读取 解压 zip 压缩包 自动解压",
         "s-power" to "后台运行 后台 保活 电池 白名单 省电 冻结",
         "s-data" to "引导与数据 引导 新手引导 帮助 常见问题 备份 导出 导入 " +
             "恢复 孤儿 清理 part 数据 诊断 自检 体检 归档 旧记录 删除记录 " +
@@ -6782,6 +6793,24 @@ fun SettingsScreen(
                         )
                     }
                     Switch(checked = autoVerify, onCheckedChange = onAutoVerify)
+                }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("自动读取校验文件")
+                        Text(
+                            "开启后，新建任务时会顺手看一眼下载地址旁边有没有网站放的校验文件" +
+                                "（地址后面加 .sha256 或 .md5 的那个小文件），有就把里面的校验值自动填进任务，" +
+                                "下完照常校验，卡片上会写明校验值是网站给的。你手填过校验值的任务不会被它改动。" +
+                                "找不到或读不懂就当没有，不影响下载。默认关，关着的时候不会多发任何请求。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = autoSidecar, onCheckedChange = onAutoSidecar)
                 }
                 Row(
                     Modifier.fillMaxWidth(),
@@ -8451,7 +8480,11 @@ fun TaskCard(
                         if (task.checksumState == Checksum.STATE_VERIFYING) {
                             Checksum.verifyingLabel(task.checksumProgressPct)
                         } else {
-                            Checksum.stateLabel(task.checksumState)
+                            // v5.8: stateLabelFor adds the
+                            // website-supplied source sentence
+                            // for sidecar hashes; the verdict
+                            // words stay stateLabel's.
+                            Checksum.stateLabelFor(task)
                         }
                     InfoRow(
                         "完整性校验：",

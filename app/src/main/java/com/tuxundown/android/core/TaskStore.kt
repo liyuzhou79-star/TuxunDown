@@ -128,6 +128,13 @@ class TaskRecord(
     /** Checksum verdict: see Checksum.STATE_* (0 none, 1 verifying,
      *  2 matched 对上， 3 mismatched 对不上）. */
     var checksumState: Int = 0,
+    // ---- v5.8 additions ----
+    /** True when the expected hash above came from a website
+     *  sidecar file (see SidecarChecksum), not from the user's
+     *  hand in the hash dialog — the card says which, and a
+     *  hand edit clears it. Records written before v5.8 parse
+     *  as false = no website mark. */
+    var checksumFromSidecar: Boolean = false,
     // ---- v4.5 additions (audit round 30) ----
     /** The STRUCTURED failure verdict, recorded by the engine
      *  at the failure site where the raw exception / HTTP code
@@ -496,9 +503,23 @@ class TaskStore(context: Context) {
         return accepted.size
     }
 
+    /**
+     * v5.8: creation hook, invoked by [add] only — the ONE
+     * funnel every task-creation entry passes through
+     * (home create / sniff / scan / in-app update all end in
+     * store.add). Import deliberately bypasses it (importJson
+     * uses addAll): an imported record must not trigger fresh
+     * network work. DownloadCenter installs the sidecar
+     * checksum fetch here; the hook itself must be cheap and
+     * non-blocking (it runs on the caller's thread).
+     */
+    @Volatile
+    var onTaskAdded: ((TaskRecord) -> Unit)? = null
+
     fun add(t: TaskRecord): TaskRecord {
         tasks.add(0, t)
         saveNow()
+        runCatching { onTaskAdded?.invoke(t) }
         return t
     }
 
@@ -634,6 +655,7 @@ class TaskStore(context: Context) {
                 o.put("expectedSha256", t.expectedSha256)
                 o.put("expectedMd5", t.expectedMd5)
                 o.put("checksumState", t.checksumState)
+                o.put("checksumFromSidecar", t.checksumFromSidecar)
                 o.put("failureKind", t.failureKind.name)
                 o.put("failureHttpCode", t.failureHttpCode)
                 o.put("jumpedAt", t.jumpedAt)
@@ -724,6 +746,7 @@ class TaskStore(context: Context) {
                         expectedSha256 = o.optString("expectedSha256"),
                         expectedMd5 = o.optString("expectedMd5"),
                         checksumState = o.optInt("checksumState", 0),
+                        checksumFromSidecar = o.optBoolean("checksumFromSidecar", false),
                         failureKind = runCatching {
                             FailureKind.valueOf(o.optString("failureKind"))
                         }.getOrDefault(FailureKind.UNKNOWN),

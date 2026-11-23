@@ -199,6 +199,25 @@ object Checksum {
     fun verifyingLabel(progressPct: Int): String =
         if (progressPct in 0..100) "正在校验…$progressPct%" else "校验中…"
 
+    /**
+     * v5.8: card wording when the expected hash came from a
+     * website sidecar file (see SidecarChecksum). The verdict
+     * words themselves stay [stateLabel]'s — this only adds
+     * the source sentence, so there is still ONE wording for
+     * 对上 / 对不上. For a hand-typed hash (or no hash) it
+     * returns [stateLabel] unchanged.
+     */
+    fun stateLabelFor(task: TaskRecord): String {
+        val base = stateLabel(task.checksumState)
+        if (!task.checksumFromSidecar || expectedOf(task) == null) return base
+        return when (task.checksumState) {
+            STATE_MATCHED -> "$base · 已按网站给的校验值核对"
+            STATE_MISMATCHED -> "$base · 网站给的校验值与文件对不上"
+            STATE_VERIFYING -> base
+            else -> "$base · 校验值来自网站给的校验文件"
+        }
+    }
+
     /** Card wording for a checksum state. */
     fun stateLabel(state: Int): String = when (state) {
         STATE_MATCHED -> "✓ 对上（文件完整）"
@@ -369,12 +388,23 @@ object ChecksumVerifier {
             }
             actual == expected -> {
                 task.checksumState = Checksum.STATE_MATCHED
-                "完整性校验通过：$kind 对上，文件没坏。"
+                // v5.8: a sidecar-supplied value was not typed by
+                // the user — say where it came from.
+                if (task.checksumFromSidecar) {
+                    "完整性校验通过：$kind 对上，已按网站给的校验值核对，文件没坏。"
+                } else {
+                    "完整性校验通过：$kind 对上，文件没坏。"
+                }
             }
             else -> {
                 task.checksumState = Checksum.STATE_MISMATCHED
-                "⚠ 完整性校验对不上：这个文件的 $kind 和你填的不一样，" +
-                    "可能下载损坏了，或者来源给的不是同一个文件，请谨慎使用。"
+                if (task.checksumFromSidecar) {
+                    "⚠ 完整性校验对不上：这个文件的 $kind 和网站给的校验值不一样，" +
+                        "可能下载损坏了，或者来源给的不是同一个文件，请谨慎使用。"
+                } else {
+                    "⚠ 完整性校验对不上：这个文件的 $kind 和你填的不一样，" +
+                        "可能下载损坏了，或者来源给的不是同一个文件，请谨慎使用。"
+                }
             }
         }
     }

@@ -212,6 +212,110 @@ object DownloadCenter {
         set(v) { prefs().edit().putBoolean("autoVerifyHash", v).apply() }
 
     /**
+     * v5.8: when a task is created, also try the website's
+     * sidecar checksum files ("<url>.sha256" / "<url>.md5",
+     * see SidecarChecksum) and fill the expected hash from
+     * there. Default OFF — with it off, task creation makes
+     * ZERO extra network requests. When on, the fetch is
+     * asynchronous, bounded and silent on every failure, and
+     * never overwrites a hand-typed hash.
+     */
+    var autoReadChecksumFile: Boolean
+        get() = pBool("autoReadChecksumFile", false)
+        set(v) { prefs().edit().putBoolean("autoReadChecksumFile", v).apply() }
+
+    /**
+     * v5.8: the sidecar fetch itself, installed as the store's
+     * creation hook (see TaskStore.onTaskAdded — every creation
+     * entry ends in store.add, so this is the one funnel).
+     * Cheap gate first: with the switch off, or for an
+     * ineligible task, it returns without touching the network
+     * or even starting a thread. Otherwise ONE daemon thread
+     * tries the sidecars in order (sha256, then md5), each
+     * bounded to [SidecarChecksum.TIMEOUT_MS] and
+     * [SidecarChecksum.MAX_BODY_BYTES], through ProxyState
+     * (the configured proxy) with the task's own session
+     * headers — the same stack the precheck uses. The first
+     * body that parses for this task fills it (hand-typed
+     * priority is re-checked at fill time in
+     * SidecarChecksum.applyTo) and persists via the coalesced
+     * save. Every failure is silent by design.
+     */
+    internal fun maybeFetchSidecarChecksum(task: TaskRecord) {
+        if (!SidecarChecksum.shouldFetch(autoReadChecksumFile, task)) return
+        val targetName = SidecarChecksum.targetFileName(task)
+        val urls = SidecarChecksum.sidecarUrls(task.url)
+        Thread {
+            runCatching {
+                for (sidecarUrl in urls) {
+                    // The task may have been deleted, or the user
+                    // may have typed a hash meanwhile.
+                    if (store.byId(task.id) == null) return@Thread
+                    if (task.expectedSha256.isNotBlank() ||
+                        task.expectedMd5.isNotBlank()
+                    ) {
+                        return@Thread
+                    }
+                    val body = fetchSidecarBody(task, sidecarUrl) ?: continue
+                    val parsed = SidecarChecksum.parse(body, targetName) ?: continue
+                    if (SidecarChecksum.applyTo(task, parsed)) {
+                        store.save()
+                    }
+                    return@Thread
+                }
+            }
+        }.apply {
+            isDaemon = true
+            name = "sidecar-checksum"
+            start()
+        }
+    }
+
+    /** One bounded sidecar GET; null on any non-200 / error. */
+    private fun fetchSidecarBody(task: TaskRecord, sidecarUrl: String): String? {
+        var conn: java.net.HttpURLConnection? = null
+        return try {
+            val c = ProxyState.open(java.net.URL(sidecarUrl))
+            conn = c
+            c.connectTimeout = SidecarChecksum.TIMEOUT_MS
+            c.readTimeout = SidecarChecksum.TIMEOUT_MS
+            c.instanceFollowRedirects = true
+            c.requestMethod = "GET"
+            c.setRequestProperty(
+                "User-Agent",
+                UserAgents.resolve(task.headers["User-Agent"], userAgent),
+            )
+            task.headers["Cookie"]?.let { c.setRequestProperty("Cookie", it) }
+            task.headers["Referer"]?.let { c.setRequestProperty("Referer", it) }
+            if (c.responseCode != 200) return null
+            c.inputStream.use { input ->
+                val out = java.io.ByteArrayOutputStream()
+                val buf = ByteArray(4096)
+                // Read at most the cap + 1 byte; anything past
+                // the cap is discarded (parse judges the head).
+                var remaining = SidecarChecksum.MAX_BODY_BYTES + 1
+                while (remaining > 0) {
+                    val n = input.read(buf, 0, minOf(buf.size, remaining))
+                    if (n < 0) break
+                    out.write(buf, 0, n)
+                    remaining -= n
+                }
+                val bytes = out.toByteArray()
+                val bounded = if (bytes.size > SidecarChecksum.MAX_BODY_BYTES) {
+                    bytes.copyOf(SidecarChecksum.MAX_BODY_BYTES)
+                } else {
+                    bytes
+                }
+                String(bounded, Charsets.UTF_8)
+            }
+        } catch (e: Exception) {
+            null
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
+    /**
      * v3.0: when a .zip task finishes, extract it automatically
      * into a same-named folder next to the archive (see
      * ZipExtractor). Default OFF — an archive unpacking itself
@@ -616,6 +720,7 @@ object DownloadCenter {
         o.put("autoInstallApk", autoInstallApk)
         o.put("autoOpenFile", autoOpenFile)
         o.put("autoVerifyHash", autoVerifyHash)
+        o.put("autoReadChecksumFile", autoReadChecksumFile)
         o.put("autoExtractZip", autoExtractZip)
         o.put("bootResume", bootResume)
         o.put("sortSubfolders", sortSubfolders)
@@ -694,6 +799,9 @@ object DownloadCenter {
         if (o.has("autoOpenFile")) autoOpenFile = o.optBoolean("autoOpenFile", autoOpenFile)
         if (o.has("autoVerifyHash")) {
             autoVerifyHash = o.optBoolean("autoVerifyHash", autoVerifyHash)
+        }
+        if (o.has("autoReadChecksumFile")) {
+            autoReadChecksumFile = o.optBoolean("autoReadChecksumFile", autoReadChecksumFile)
         }
         if (o.has("autoExtractZip")) {
             autoExtractZip = o.optBoolean("autoExtractZip", autoExtractZip)
@@ -1116,6 +1224,9 @@ object DownloadCenter {
         appContext = context.applicationContext
         store = TaskStore(context.applicationContext)
         store.load()
+        // v5.8: creation funnel for sidecar checksums (see
+        // maybeFetchSidecarChecksum / TaskStore.onTaskAdded).
+        store.onTaskAdded = { t -> maybeFetchSidecarChecksum(t) }
         syncProxyState()
         refreshScheduleAlarm()
         // v5.1: fix the memory tier for this process now that a
