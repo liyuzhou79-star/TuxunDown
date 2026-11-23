@@ -28,9 +28,10 @@ object Checksum {
     const val SHA256 = "SHA-256"
     const val MD5 = "MD5"
 
-    /** Tidy user input: trim, drop spaces, lowercase. */
+    /** Tidy user input: trim, drop ALL whitespace (space /
+     *  tab / CR / LF), lowercase. */
     fun normalize(hex: String): String =
-        hex.trim().replace(" ", "").replace("\n", "").lowercase()
+        hex.trim().replace(Regex("\\s"), "").lowercase()
 
     /**
      * Which algorithm a hex string must be: 64 hex chars = SHA-256,
@@ -45,6 +46,51 @@ object Checksum {
             32 -> MD5
             else -> null
         }
+    }
+
+    /**
+     * Audit round 43: parse what a user actually pastes from
+     * a release page into the hash dialog. The strict
+     * [detectKind] only accepted a bare hex string (whitespace
+     * aside), so the common real-world shapes were all
+     * rejected with 没认出来 even though the hash was right
+     * there:
+     * - an algorithm prefix: "sha256: <hex>", "SHA-256=<hex>",
+     *   "MD5: <hex>", BSD style "SHA256 (file.zip) = <hex>";
+     * - a checksum-file line: "<hex>  file.zip",
+     *   "<hex> *file.zip", "<hex>\tfile.zip";
+     * - a bare hash with mixed case / inner spaces / tabs /
+     *   newlines (grouped hex) — the whitespace-squashed fast
+     *   path below.
+     *
+     * Rules, in order:
+     * 1. Squash ALL whitespace; if the whole thing is then a
+     *    pure 32/64 hex string, that is the hash.
+     * 2. Otherwise look at the MAXIMAL hex runs in the raw
+     *    text: runs of exactly 64 or 32 hex chars are
+     *    candidates. Exactly ONE distinct candidate -> it
+     *    wins, kind by length. Zero, or two or more DISTINCT
+     *    candidates (ambiguous — e.g. a hash whose file name
+     *    stem is itself 32 hex chars), -> null: the dialog
+     *    asks again instead of guessing.
+     *
+     * A plain file name ("release.zip", "app-v1.apk") has no
+     * 32/64 hex run, so it can never be misread as a hash.
+     * The algorithm is ALWAYS judged by length, never by a
+     * typed label — a wrong label cannot smuggle a wrong
+     * kind in. Pure.
+     */
+    fun parseExpected(raw: String): Pair<String, String>? {
+        val squashed = normalize(raw)
+        detectKind(squashed)?.let { return it to squashed }
+        val candidates = Regex("[0-9a-fA-F]+").findAll(raw)
+            .map { it.value.lowercase() }
+            .filter { it.length == 64 || it.length == 32 }
+            .distinct()
+            .toList()
+        if (candidates.size != 1) return null
+        val hex = candidates.single()
+        return detectKind(hex)?.let { it to hex }
     }
 
     /** The task's expected (kind, normalized hex), SHA-256 first; null when unset. */
@@ -266,7 +312,10 @@ object ChecksumVerifier {
                     }
                 }
             }.getOrNull()
-            return finish(task, kind, expected, actual, cancelled)
+            return finish(
+                task, kind, expected, actual, cancelled,
+                Checksum.expectedOf(task),
+            )
         } finally {
             // v4.5: EVERY exit (matched / mismatched /
             // cancelled / unreadable / blew up) retires the
@@ -278,14 +327,34 @@ object ChecksumVerifier {
         }
     }
 
-    private fun finish(
+    /**
+     * Record a finished digest's verdict on the task and
+     * return the plain-language sentence for it.
+     *
+     * Audit round 43: [current] is the task's expected hash
+     * re-read AFTER the digest ran. The card's 改校验哈希
+     * button stays tappable while a verify runs, so the user
+     * can replace (or clear) the expected value mid-verify;
+     * without this check the running verify would stamp its
+     * OLD-hash verdict onto the task and the card would then
+     * attribute 对上/对不上 to the NEW hash. A superseded
+     * verify records NO verdict (back to STATE_NONE) and
+     * says why. Internal (not private) so unit tests can pin
+     * every branch; it touches only the record + strings.
+     */
+    internal fun finish(
         task: TaskRecord,
         kind: String,
         expected: String,
         actual: String?,
         cancelled: Boolean,
+        current: Pair<String, String>?,
     ): String {
         return when {
+            current != (kind to expected) -> {
+                task.checksumState = Checksum.STATE_NONE
+                "校验期间你改了校验值，这次结果没有算数；需要时可在任务详情里点「立即校验」再验一次。"
+            }
             cancelled -> {
                 // Stopped on purpose: no verdict either way,
                 // back to "not checked"; the file is untouched.

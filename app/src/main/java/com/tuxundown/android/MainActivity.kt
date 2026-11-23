@@ -1488,6 +1488,12 @@ fun DownApp() {
     }
 
     fun deleteTask(task: TaskRecord) {
+        // Audit round 43: a verify of this (finished) task may
+        // be streaming a multi-GB file right now — ask it to
+        // stop at the next buffer instead of reading on for a
+        // record that is about to be gone. No-op when no
+        // verify is running.
+        ChecksumVerifier.requestCancel(task.id)
         // Audit A7: a RUNNING task's engine threads keep writing for
         // a while after pause(). The service owns the cleanup now:
         // mark cancelled here; the service deletes the file and the
@@ -3513,7 +3519,11 @@ fun DownApp() {
     // ---- checksum hash dialog (v1.7) ----
     if (hashTask != null) {
         val ht = hashTask!!
-        val detected = Checksum.detectKind(hashText)
+        // Audit round 43: parse what release pages actually
+        // print (algorithm prefix / whole "<hash>  filename"
+        // line), not just a bare hex string.
+        val parsed = Checksum.parseExpected(hashText)
+        val detected = parsed?.first
         AlertDialog(
             onDismissRequest = { hashTask = null },
             title = { Text("设置校验哈希") },
@@ -3521,6 +3531,7 @@ fun DownApp() {
                 Column {
                     Text(
                         "把发布页给的哈希值粘进来：64 位自动认成 SHA-256，32 位认成 MD5。" +
+                            "带「sha256:」这样的前缀、或者连文件名一整行粘进来也认得。" +
                             "下载完成时会自动算一遍对不对得上，卡片上会写明结果。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -3547,8 +3558,9 @@ fun DownApp() {
             },
             confirmButton = {
                 TextButton(onClick = {
-                    val kind = Checksum.detectKind(hashText)
-                    if (kind == null) {
+                    val parsedNow = Checksum.parseExpected(hashText)
+                    val kind = parsedNow?.first
+                    if (parsedNow == null || kind == null) {
                         Toast.makeText(
                             context,
                             "没认出来：要填 32 位（MD5）或 64 位（SHA-256）的十六进制哈希",
@@ -3556,7 +3568,7 @@ fun DownApp() {
                         ).show()
                         return@TextButton
                     }
-                    val hex = Checksum.normalize(hashText)
+                    val hex = parsedNow.second
                     if (kind == Checksum.SHA256) {
                         ht.expectedSha256 = hex
                         ht.expectedMd5 = ""
@@ -4486,7 +4498,10 @@ fun FilesScreen(onBack: () -> Unit) {
                     deleteEntry = null
                     Thread {
                         val ok = PublicStorage.deleteByUri(context, e.uri)
-                        if (task != null) DownloadCenter.store.remove(task)
+                        if (task != null) {
+                            ChecksumVerifier.requestCancel(task.id)
+                            DownloadCenter.store.remove(task)
+                        }
                         android.os.Handler(android.os.Looper.getMainLooper()).post {
                             Toast.makeText(
                                 context,
@@ -4502,6 +4517,7 @@ fun FilesScreen(onBack: () -> Unit) {
                 Row {
                     if (task != null) {
                         TextButton(onClick = {
+                            ChecksumVerifier.requestCancel(task.id)
                             DownloadCenter.store.remove(task)
                             deleteEntry = null
                             reloadKey++

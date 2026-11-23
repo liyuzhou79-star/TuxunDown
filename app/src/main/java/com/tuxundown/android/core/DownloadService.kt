@@ -1548,8 +1548,13 @@ class DownloadService : Service() {
                 ZipExtract.isZipName(displayName)
             ) {
                 if (task.checksumState == Checksum.STATE_MISMATCHED) {
+                    // Audit round 43: the old wording promised
+                    // a 手动解压 the app does not have (the only
+                    // extractor call is this automatic one).
+                    // Point at what the user can actually do.
                     task.note = note +
-                        " 校验没对上，没有自动解压；确认文件没问题后可手动解压。"
+                        " 校验没对上，没有自动解压；确认文件没问题后，" +
+                        "可用文件管理器打开这个压缩包手动解压。"
                 } else {
                     val res = ZipExtractor.extract(this, task) { count ->
                         // v4.4 milestone: the record was deleted

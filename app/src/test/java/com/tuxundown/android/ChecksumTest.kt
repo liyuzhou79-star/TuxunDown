@@ -1,9 +1,11 @@
 package com.tuxundown.android
 
 import com.tuxundown.android.core.Checksum
+import com.tuxundown.android.core.ChecksumVerifier
 import com.tuxundown.android.core.TaskRecord
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayInputStream
 
@@ -222,6 +224,133 @@ class ChecksumTest {
         assertEquals("还没校验", Checksum.stateLabel(Checksum.STATE_NONE))
         assertEquals("还没校验", Checksum.stateLabel(99))
         assertEquals("还没校验", Checksum.stateLabel(-1))
+    }
+
+    // ---- audit round 43: parseExpected (dirty pasted input) ----
+
+    private val sha = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    private val md5 = "900150983cd24fb0d6963f7d28e17f72"
+
+    @Test
+    fun parseBareAndGroupedHashes() {
+        assertEquals(Checksum.SHA256 to sha, Checksum.parseExpected(sha))
+        assertEquals(Checksum.MD5 to md5, Checksum.parseExpected(md5))
+        // Mixed case + spaces / tabs / newlines inside (grouped hex).
+        assertEquals(
+            Checksum.SHA256 to sha,
+            Checksum.parseExpected(" BA7816BF\t8F01CFEA\n414140DE 5DAE2223 " +
+                "B00361A396177A9CB410FF61F20015AD\r\n"),
+        )
+    }
+
+    @Test
+    fun parseAlgorithmPrefixes() {
+        assertEquals(Checksum.SHA256 to sha, Checksum.parseExpected("sha256: $sha"))
+        assertEquals(Checksum.SHA256 to sha, Checksum.parseExpected("SHA-256=$sha"))
+        assertEquals(Checksum.SHA256 to sha, Checksum.parseExpected("SHA256:  ${sha.uppercase()}"))
+        assertEquals(Checksum.MD5 to md5, Checksum.parseExpected("md5: $md5"))
+        // BSD style: SHA256 (file) = hash — kind by LENGTH, not label.
+        assertEquals(
+            Checksum.SHA256 to sha,
+            Checksum.parseExpected("SHA256 (tuxundown.apk) = $sha"),
+        )
+        assertEquals(
+            Checksum.MD5 to md5,
+            Checksum.parseExpected("MD5 (tuxundown.apk) = $md5"),
+        )
+    }
+
+    @Test
+    fun parseChecksumFileLines() {
+        assertEquals(
+            Checksum.SHA256 to sha,
+            Checksum.parseExpected("$sha  tuxundown-v5.8.0.apk"),
+        )
+        assertEquals(
+            Checksum.SHA256 to sha,
+            Checksum.parseExpected("$sha *tuxundown-v5.8.0.apk"),
+        )
+        assertEquals(
+            Checksum.MD5 to md5,
+            Checksum.parseExpected("$md5\ttuxundown-v5.8.0.apk\n"),
+        )
+        // The same hash repeated (e.g. pasted twice) is still one candidate.
+        assertEquals(Checksum.SHA256 to sha, Checksum.parseExpected("$sha  $sha"))
+    }
+
+    @Test
+    fun parseRejectsNonHashesAndAmbiguity() {
+        assertNull(Checksum.parseExpected(""))
+        assertNull(Checksum.parseExpected("   "))
+        // A file name alone must never be misread as a hash.
+        assertNull(Checksum.parseExpected("tuxundown-v5.8.0.apk"))
+        assertNull(Checksum.parseExpected("release.zip"))
+        assertNull(Checksum.parseExpected("校验值见发布页说明"))
+        // Wrong lengths / non-hex stay rejected.
+        assertNull(Checksum.parseExpected("a".repeat(63)))
+        assertNull(Checksum.parseExpected("a".repeat(65)))
+        assertNull(Checksum.parseExpected("g".repeat(64)))
+        // Two DIFFERENT hashes in one paste: ambiguous, ask again.
+        assertNull(Checksum.parseExpected("$sha $md5"))
+        assertNull(Checksum.parseExpected("$sha  ${"0".repeat(64)}"))
+    }
+
+    @Test
+    fun normalizeDropsTabsAndCrLf() {
+        assertEquals("ab12", Checksum.normalize(" A\tB\r\n1 2 "))
+    }
+
+    // ---- audit round 43: ChecksumVerifier.finish verdict branches ----
+
+    @Test
+    fun finishMatchedAndMismatched() {
+        val t = TaskRecord(url = "https://x/f")
+        val ok = ChecksumVerifier.finish(
+            t, Checksum.SHA256, sha, sha, cancelled = false,
+            current = Checksum.SHA256 to sha,
+        )
+        assertEquals(Checksum.STATE_MATCHED, t.checksumState)
+        assertTrue(ok.contains("校验通过"))
+        val bad = ChecksumVerifier.finish(
+            t, Checksum.SHA256, sha, md5.padEnd(64, '0'), cancelled = false,
+            current = Checksum.SHA256 to sha,
+        )
+        assertEquals(Checksum.STATE_MISMATCHED, t.checksumState)
+        assertTrue(bad.contains("对不上"))
+    }
+
+    @Test
+    fun finishCancelledAndUnreadableRecordNoVerdict() {
+        val t = TaskRecord(url = "https://x/f")
+        ChecksumVerifier.finish(
+            t, Checksum.SHA256, sha, sha, cancelled = true,
+            current = Checksum.SHA256 to sha,
+        )
+        assertEquals(Checksum.STATE_NONE, t.checksumState)
+        ChecksumVerifier.finish(
+            t, Checksum.SHA256, sha, null, cancelled = false,
+            current = Checksum.SHA256 to sha,
+        )
+        assertEquals(Checksum.STATE_NONE, t.checksumState)
+    }
+
+    @Test
+    fun finishSupersededWhenExpectedChangedMidVerify() {
+        val t = TaskRecord(url = "https://x/f")
+        // The digest matched the OLD hash, but the user replaced
+        // the expected value while it ran: no verdict may be
+        // stamped — the card would blame/praise the NEW hash.
+        val msg = ChecksumVerifier.finish(
+            t, Checksum.SHA256, sha, sha, cancelled = false,
+            current = Checksum.MD5 to md5,
+        )
+        assertEquals(Checksum.STATE_NONE, t.checksumState)
+        assertTrue(msg.contains("改了校验值"))
+        // Cleared mid-verify is superseded too.
+        ChecksumVerifier.finish(
+            t, Checksum.SHA256, sha, sha, cancelled = false, current = null,
+        )
+        assertEquals(Checksum.STATE_NONE, t.checksumState)
     }
 
     @Test
