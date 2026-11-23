@@ -59,6 +59,60 @@ class UpdateCheckTest {
     }
 
     @Test
+    fun compareVersions_6xBoundaryCasesPinThe6_0Upgrade() {
+        // v6.0 audit round 45 (release readiness): the digit-
+        // boundary cases the 6.0 upgrade actually crosses. The
+        // comparator is numeric per part, so a two-digit minor
+        // or major must never fall back to lexical order.
+        // 5.9 -> 6.0: the upgrade every 5.9 install will be offered.
+        assertTrue(UpdateCheck.isNewer("6.0.0", "5.9.0"))
+        assertFalse(UpdateCheck.isNewer("5.9.0", "6.0.0"))
+        assertTrue(UpdateCheck.compareVersions("5.9.0", "6.0.0") < 0)
+        // 6.0 -> 6.10 and 6.9 -> 6.10: two-digit minor wins.
+        assertTrue(UpdateCheck.compareVersions("6.10.0", "6.0.0") > 0)
+        assertTrue(UpdateCheck.compareVersions("6.10.0", "6.9.0") > 0)
+        assertTrue(UpdateCheck.compareVersions("6.9.0", "6.10.0") < 0)
+        // 6.0 -> 6.0.1: a fourth part counts, missing counts as 0.
+        assertTrue(UpdateCheck.compareVersions("6.0.1", "6.0.0") > 0)
+        assertTrue(UpdateCheck.compareVersions("6.0.0", "6.0.1") < 0)
+        assertEquals(0, UpdateCheck.compareVersions("6.0", "6.0.0"))
+        // 10.0: a two-digit major beats every 6.x / 9.x.
+        assertTrue(UpdateCheck.compareVersions("10.0.0", "6.10.0") > 0)
+        assertTrue(UpdateCheck.compareVersions("10.0.0", "9.9.9") > 0)
+        assertTrue(UpdateCheck.isNewer("10.0.0", "6.0.0"))
+        // An installed 6.0.0 is ahead of the last 5.x formal page.
+        assertFalse(UpdateCheck.isNewer("5.9.0", "6.0.0"))
+    }
+
+    @Test
+    fun compareVersions_fullChainThrough6_0StaysAscending() {
+        // v6.0 audit round 45: the whole published chain (the
+        // ChangelogTest list, 1.2.0 -> 5.9.0) plus the 6.x tail
+        // must order strictly ascending under the same comparator
+        // the About page uses, so 6.0.0 is offered to every older
+        // install and to none of the newer ones.
+        val chain = listOf(
+            "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0",
+            "1.9.0", "2.0.0", "2.1.0", "2.2.0", "2.3.0", "2.4.0", "2.5.0",
+            "2.6.0", "2.7.0", "2.8.0", "2.9.0", "3.0.0", "3.1.0", "3.2.0",
+            "3.3.0", "3.4.0", "3.5.0", "3.6.0", "3.7.0", "3.8.0", "3.9.0",
+            "4.0.0", "4.1.0", "4.2.0", "4.3.0", "4.4.0", "4.5.0", "4.6.0",
+            "4.7.0", "4.8.0", "4.9.0", "5.0.0", "5.1.0", "5.2.0", "5.3.0",
+            "5.4.0", "5.5.0", "5.6.0", "5.7.0", "5.8.0", "5.9.0",
+            "6.0.0", "6.0.1", "6.9.0", "6.10.0", "10.0.0",
+        )
+        for (i in 0 until chain.size - 1) {
+            assertTrue(
+                "${chain[i]} < ${chain[i + 1]}",
+                UpdateCheck.compareVersions(chain[i], chain[i + 1]) < 0,
+            )
+            assertTrue(UpdateCheck.isNewer(chain[i + 1], chain[i]))
+            assertFalse(UpdateCheck.isNewer(chain[i], chain[i + 1]))
+        }
+        assertEquals(0, UpdateCheck.compareVersions("6.0.0", "6.0.0"))
+    }
+
+    @Test
     fun parseLatest_picksTheApkAsset() {
         val json = """
             {

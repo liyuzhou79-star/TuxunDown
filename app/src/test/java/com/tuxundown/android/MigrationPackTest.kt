@@ -136,6 +136,89 @@ class MigrationPackTest {
     }
 
     @Test
+    fun migrationRoundTripCarriesEveryStatsFieldVerbatim() {
+        // v6.0 audit round 45: the round-trip test above asserts
+        // only 3 of the 8 statistics keys. All eight stored keys
+        // (DownloadCenter.statsSnapshotJson's exact set) must
+        // survive buildMigration -> parse verbatim, or a phone
+        // move silently loses part of the totals / day series.
+        val text = Backup.buildMigration(
+            "[]", JSONObject(), statsJson(), null, 0L,
+        )
+        val stats = Backup.parse(text).stats
+        assertNotNull(stats)
+        assertEquals(123_456_789L, stats!!.getLong("totalBytes"))
+        assertEquals(42, stats.getInt("doneCount"))
+        assertEquals("2026-11-22", stats.getString("todayKey"))
+        assertEquals(1_024L, stats.getLong("todayBytes"))
+        assertEquals(9_000_000L, stats.getLong("speedSum"))
+        assertEquals(3, stats.getInt("speedCount"))
+        assertEquals("example.com\t123456\t7", stats.getString("hostStats"))
+        assertEquals(
+            "2026-11-21\t2048\n2026-11-22\t1024", stats.getString("days"),
+        )
+    }
+
+    @Test
+    fun migrationPackReExportIsStable() {
+        // v6.0 audit round 45: export -> import -> export again
+        // must be a fixed point at the Backup layer — the second
+        // pack carries exactly the sections the first one did
+        // (settings incl. sniff history / collapsed sites, tasks,
+        // all statistics, host learning), so a backup of a
+        // restored phone is the same backup.
+        val settings = JSONObject()
+            .put("wifiOnly", true)
+            .put("maxConcurrent", 3)
+            .put("sniffHistory", org.json.JSONArray(listOf("https://example.com/page")))
+            .put("collapsedSites", org.json.JSONArray(listOf("example.com")))
+            .put("proxyHost", "127.0.0.1")
+            .put("proxyPort", 7890)
+        val task = TaskRecord(
+            url = "https://example.com/a.zip",
+            fileName = "a.zip",
+            status = TaskStatus.PAUSED,
+        )
+        val first = Backup.parse(
+            Backup.buildMigration(
+                TaskStore.serialize(listOf(task)),
+                settings, statsJson(), hostMemoryText(), 1_700_000_000_000,
+            )
+        )
+        val second = Backup.parse(
+            Backup.buildMigration(
+                first.tasksJson!!, first.settings!!,
+                first.stats, first.hostMemory, 1_700_000_100_000,
+            )
+        )
+        assertEquals(Backup.MIGRATION_VERSION, second.formatVersion)
+        assertEquals(first.hostMemory, second.hostMemory)
+        assertNotNull(second.settings)
+        assertTrue(second.settings!!.getBoolean("wifiOnly"))
+        assertEquals(3, second.settings.getInt("maxConcurrent"))
+        assertEquals(
+            "https://example.com/page",
+            second.settings.getJSONArray("sniffHistory").getString(0),
+        )
+        assertEquals(
+            "example.com",
+            second.settings.getJSONArray("collapsedSites").getString(0),
+        )
+        assertEquals("127.0.0.1", second.settings.getString("proxyHost"))
+        assertEquals(7890, second.settings.getInt("proxyPort"))
+        assertNotNull(second.stats)
+        assertEquals(123_456_789L, second.stats!!.getLong("totalBytes"))
+        assertEquals(
+            "2026-11-21\t2048\n2026-11-22\t1024",
+            second.stats.getString("days"),
+        )
+        val restored = TaskStore.deserialize(second.tasksJson!!)
+        assertEquals(1, restored.size)
+        assertEquals("a.zip", restored[0].fileName)
+        assertEquals(2, HostMemory.parse(second.hostMemory!!).size)
+    }
+
+    @Test
     fun blankSectionsAreOmittedNotStored() {
         val text = Backup.buildMigration("[]", JSONObject(), null, "  ", 0L)
         val parsed = Backup.parse(text)
