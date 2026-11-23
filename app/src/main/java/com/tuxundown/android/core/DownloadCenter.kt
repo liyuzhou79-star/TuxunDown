@@ -315,55 +315,60 @@ object DownloadCenter {
             // Cookie only ever reaches the task's own host.
             var current = sidecarUrl
             var redirects = 0
-            while (true) {
-            val c = ProxyState.open(java.net.URL(current))
-            conn = c
-            c.connectTimeout = SidecarChecksum.TIMEOUT_MS
-            c.readTimeout = SidecarChecksum.TIMEOUT_MS
-            c.instanceFollowRedirects = false
-            c.requestMethod = "GET"
-            c.setRequestProperty(
-                "User-Agent",
-                UserAgents.resolve(task.headers["User-Agent"], userAgent),
-            )
-            SessionScope.cookieFor(task.headers["Cookie"], task.url, current)
-                ?.let { c.setRequestProperty("Cookie", it) }
-            task.headers["Referer"]?.let { c.setRequestProperty("Referer", it) }
-            val code = c.responseCode
-            if (AuxRedirect.isRedirect(code)) {
-                val next = AuxRedirect.nextUrl(
-                    current, c.getHeaderField("Location"), redirects,
+            var result: String? = null
+            var done = false
+            while (!done) {
+                val c = ProxyState.open(java.net.URL(current))
+                conn = c
+                c.connectTimeout = SidecarChecksum.TIMEOUT_MS
+                c.readTimeout = SidecarChecksum.TIMEOUT_MS
+                c.instanceFollowRedirects = false
+                c.requestMethod = "GET"
+                c.setRequestProperty(
+                    "User-Agent",
+                    UserAgents.resolve(task.headers["User-Agent"], userAgent),
                 )
-                if (next != null) {
-                    runCatching { c.disconnect() }
-                    conn = null
-                    current = next
-                    redirects++
-                    continue
+                SessionScope.cookieFor(task.headers["Cookie"], task.url, current)
+                    ?.let { c.setRequestProperty("Cookie", it) }
+                task.headers["Referer"]?.let { c.setRequestProperty("Referer", it) }
+                val code = c.responseCode
+                if (AuxRedirect.isRedirect(code)) {
+                    val next = AuxRedirect.nextUrl(
+                        current, c.getHeaderField("Location"), redirects,
+                    )
+                    if (next != null) {
+                        runCatching { c.disconnect() }
+                        conn = null
+                        current = next
+                        redirects++
+                        continue
+                    }
                 }
-            }
-            if (code != 200) return null
-            return c.inputStream.use { input ->
-                val out = java.io.ByteArrayOutputStream()
-                val buf = ByteArray(4096)
-                // Read at most the cap + 1 byte; anything past
-                // the cap is discarded (parse judges the head).
-                var remaining = SidecarChecksum.MAX_BODY_BYTES + 1
-                while (remaining > 0) {
-                    val n = input.read(buf, 0, minOf(buf.size, remaining))
-                    if (n < 0) break
-                    out.write(buf, 0, n)
-                    remaining -= n
+                if (code == 200) {
+                    result = c.inputStream.use { input ->
+                        val out = java.io.ByteArrayOutputStream()
+                        val buf = ByteArray(4096)
+                        // Read at most the cap + 1 byte; anything past
+                        // the cap is discarded (parse judges the head).
+                        var remaining = SidecarChecksum.MAX_BODY_BYTES + 1
+                        while (remaining > 0) {
+                            val n = input.read(buf, 0, minOf(buf.size, remaining))
+                            if (n < 0) break
+                            out.write(buf, 0, n)
+                            remaining -= n
+                        }
+                        val bytes = out.toByteArray()
+                        val bounded = if (bytes.size > SidecarChecksum.MAX_BODY_BYTES) {
+                            bytes.copyOf(SidecarChecksum.MAX_BODY_BYTES)
+                        } else {
+                            bytes
+                        }
+                        String(bounded, Charsets.UTF_8)
+                    }
                 }
-                val bytes = out.toByteArray()
-                val bounded = if (bytes.size > SidecarChecksum.MAX_BODY_BYTES) {
-                    bytes.copyOf(SidecarChecksum.MAX_BODY_BYTES)
-                } else {
-                    bytes
-                }
-                String(bounded, Charsets.UTF_8)
+                done = true
             }
-            }
+            result
         } catch (e: Exception) {
             null
         } finally {

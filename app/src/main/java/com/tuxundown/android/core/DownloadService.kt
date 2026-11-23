@@ -360,7 +360,8 @@ class DownloadService : Service() {
                     runCatching { c.disconnect() }
                 }
             }
-            current = next
+            // next is non-null here: a null next returned above.
+            current = next!!
             redirects++
         }
     }
