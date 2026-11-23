@@ -132,6 +132,7 @@ import com.tuxundown.android.core.GhostMark
 import com.tuxundown.android.core.GhostSnapshot
 import com.tuxundown.android.core.HealthCheck
 import com.tuxundown.android.core.IllegalTransitions
+import com.tuxundown.android.core.PowerStats
 import com.tuxundown.android.core.SecurityStatus
 import com.tuxundown.android.core.StatusDistribution
 import com.tuxundown.android.core.StorageHealth
@@ -6907,6 +6908,54 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
             if (statusLines.isNotEmpty()) {
                 SettingsGroup("任务状态分布") {
                     for ((label, value) in statusLines) {
+                        InfoRow(label, value)
+                    }
+                }
+            }
+        }
+        // ---- v7.6 (audit round 61, Step C): 功耗 — a
+        // read-only snapshot of this process's power
+        // bookkeeping, all runtime reads made once for this
+        // page visit: the wake-lock held total and the
+        // sampler tick count are PowerStats' process-local
+        // counters (taped onto WakeGuard's underlying
+        // transitions and the engine's per-tick emission —
+        // see PowerStats), and the poll-source count is
+        // assembled from the running-engine set size plus
+        // the service's precheck / drain loop mirrors under
+        // the pinned caliber. A read that fails drops its
+        // row; if every read fails the whole group is
+        // absent. Neutral statements only — no saving
+        // percentage is claimed anywhere. ----
+        item(key = "d-power") {
+            val powerLines = remember {
+                PowerStats.lines(
+                    PowerStats.Snapshot(
+                        wakeLockHeldTotalMs = runCatching {
+                            PowerStats.wakeLockHeldTotalMs()
+                        }.getOrNull(),
+                        wakeLockHeldNow = runCatching {
+                            PowerStats.wakeLockHeldNow()
+                        }.getOrNull(),
+                        samplerTicks = runCatching {
+                            PowerStats.samplerTicks()
+                        }.getOrNull(),
+                        activePollSources = runCatching {
+                            PowerStats.activePollSourceCount(
+                                runningSamplers =
+                                    DownloadCenter.runningEngines().size,
+                                precheckAlive =
+                                    DownloadCenter.precheckLoopAlive,
+                                drainAlive =
+                                    DownloadCenter.drainLoopAlive,
+                            )
+                        }.getOrNull(),
+                    )
+                )
+            }
+            if (powerLines.isNotEmpty()) {
+                SettingsGroup("功耗") {
+                    for ((label, value) in powerLines) {
                         InfoRow(label, value)
                     }
                 }

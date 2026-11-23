@@ -76,7 +76,21 @@ interface WakeLockHandle {
  * acquired — a switch flipped off mid-run can never make one
  * run's release eat another run's hold.
  */
-class WakeLockCounter(private val handle: WakeLockHandle) {
+class WakeLockCounter(
+    private val handle: WakeLockHandle,
+    /**
+     * v7.6 (audit round 61, Step C): bookkeeping taps for
+     * the diagnostics page's 功耗 section — invoked ONLY on
+     * the underlying lock's transitions: [onFirstAcquire]
+     * after a successful 0 -> 1 acquire, [onLastRelease]
+     * after a successful 1 -> 0 release. They observe the
+     * transitions; they never influence them (defaults are
+     * no-ops, so tests and any other holder are unaffected;
+     * production passes PowerStats' meter — see WakeGuard).
+     */
+    private val onFirstAcquire: () -> Unit = {},
+    private val onLastRelease: () -> Unit = {},
+) {
 
     private val monitor = Object()
 
@@ -96,8 +110,13 @@ class WakeLockCounter(private val handle: WakeLockHandle) {
     fun acquireIf(enabled: Boolean): Boolean {
         if (!enabled) return false
         synchronized(monitor) {
-            if (count == 0) handle.acquire()
+            val first = count == 0
+            if (first) handle.acquire()
             count++
+            // v7.6: the 0 -> 1 transition just happened (the
+            // acquire above succeeded — a throw leaves the
+            // count untouched and never reaches this line).
+            if (first) onFirstAcquire()
         }
         return true
     }
@@ -107,7 +126,11 @@ class WakeLockCounter(private val handle: WakeLockHandle) {
         synchronized(monitor) {
             if (count == 0) return
             count--
-            if (count == 0) handle.release()
+            if (count == 0) {
+                handle.release()
+                // v7.6: the 1 -> 0 transition just happened.
+                onLastRelease()
+            }
         }
     }
 
@@ -220,7 +243,15 @@ object WakeGuard {
                 // WakeGuard owns the count (see WakeLockCounter);
                 // a platform-side count would only double-book it.
                 lock.setReferenceCounted(false)
-                WakeLockCounter(AndroidWakeLockHandle(lock))
+                WakeLockCounter(
+                    AndroidWakeLockHandle(lock),
+                    // v7.6 (Step C): the 功耗 meter taps — the
+                    // counter reports its underlying 0 -> 1 /
+                    // 1 -> 0 transitions and nothing else, so
+                    // PowerStats measures the ONE real hold.
+                    onFirstAcquire = { PowerStats.noteWakeLockAcquired() },
+                    onLastRelease = { PowerStats.noteWakeLockReleased() },
+                )
             }.getOrNull()
             counter = created
             return created

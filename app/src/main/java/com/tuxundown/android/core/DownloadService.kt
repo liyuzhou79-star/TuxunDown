@@ -70,7 +70,17 @@ class DownloadService : Service() {
     private fun ensureWorker() {
         synchronized(workerLock) {
             if (worker?.isAlive == true) return
-            worker = Thread { drainQueue() }.apply { isDaemon = true; start() }
+            worker = Thread {
+                // v7.6 (Step C): keep the 功耗 mirror honest
+                // even when drainQueue exits by exception —
+                // the loop is gone either way (see
+                // DownloadCenter.drainLoopAlive).
+                try {
+                    drainQueue()
+                } finally {
+                    DownloadCenter.drainLoopAlive = false
+                }
+            }.apply { isDaemon = true; start() }
         }
     }
 
@@ -208,7 +218,15 @@ class DownloadService : Service() {
     private fun startPrecheck() {
         if (precheckThread?.isAlive == true) return
         precheckRunning = true
-        precheckThread = Thread { precheckLoop() }.apply {
+        precheckThread = Thread {
+            // v7.6 (Step C): 功耗 mirror exit side (see
+            // DownloadCenter.precheckLoopAlive).
+            try {
+                precheckLoop()
+            } finally {
+                DownloadCenter.precheckLoopAlive = false
+            }
+        }.apply {
             isDaemon = true
             name = "link-precheck"
             start()
@@ -239,6 +257,10 @@ class DownloadService : Service() {
      * remains a warning flag only.
      */
     private fun precheckLoop() {
+        // v7.6 (Step C): 功耗 mirror — the precheck loop is
+        // alive from here until its thread exits (the exit
+        // side is written in startPrecheck's wrapper).
+        DownloadCenter.precheckLoopAlive = true
         var sleepMs = PRECHECK_INTERVAL_MS
         while (precheckRunning) {
             // Snapshot the queue generation BEFORE the pass:
@@ -700,6 +722,10 @@ class DownloadService : Service() {
     }
 
     private fun drainQueue() {
+        // v7.6 (Step C): 功耗 mirror — the drain loop is
+        // alive from here until its thread exits (the exit
+        // side is written in ensureWorker's wrapper).
+        DownloadCenter.drainLoopAlive = true
         val store = DownloadCenter.store
         // v1.6: dual channel is negotiated once per drain session.
         acquireCellularIfWanted()

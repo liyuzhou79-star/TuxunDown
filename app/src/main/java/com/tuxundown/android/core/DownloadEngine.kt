@@ -318,6 +318,15 @@ class DownloadEngine(
      * go through here — by then the hold is already released.
      */
     private fun emitProgress() {
+        // v7.6 (audit round 61, Step C): the 功耗 meter's
+        // sampler-tick tap. Verified at Step C that this is
+        // called exactly once per sampler tick — five call
+        // sites, one at the end of each transfer path's 1 s
+        // sampler loop body, no other callers — so one cheap
+        // atomic increment here counts ticks without adding
+        // a call to any loop and without touching the
+        // cadence. See PowerStats.
+        PowerStats.noteSamplerTick()
         wakeHeld = WakeGuard.reconcileTransfer(wakeHeld)
         onProgress(task)
     }

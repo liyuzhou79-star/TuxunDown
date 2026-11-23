@@ -689,6 +689,30 @@ object DownloadCenter {
         internal set
 
     /**
+     * v7.6 (audit round 61, Step C): UI-readable mirrors of
+     * the service's two long-lived loops, for the
+     * diagnostics page's 功耗 poll-source count (see
+     * PowerStats for the pinned caliber). Same pattern as
+     * [dualChannelActive]: DownloadService writes each
+     * mirror true at its loop's entry and false when the
+     * loop's thread exits, and writes nothing else. Null
+     * means the service has not reported in this process —
+     * the diagnostics page treats that as UNREADABLE and
+     * drops the whole poll-source figure rather than
+     * guessing. The mirrors live and die with the process,
+     * like the loops they mirror.
+     */
+    @Volatile
+    var drainLoopAlive: Boolean? = null
+        internal set
+
+    /** See [drainLoopAlive] — the link-precheck loop's
+     *  mirror. */
+    @Volatile
+    var precheckLoopAlive: Boolean? = null
+        internal set
+
+    /**
      * v1.7: the user's custom User-Agent setting ("" = built-in
      * default). A UA captured for a specific task (sniffer /
      * browser) still wins over this — see UserAgents.resolve.
