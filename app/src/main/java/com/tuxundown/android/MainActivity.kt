@@ -97,6 +97,7 @@ import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import com.tuxundown.android.core.A11yContrast
 import com.tuxundown.android.core.AbnormalFilter
 import com.tuxundown.android.core.Backup
 import com.tuxundown.android.core.BatchRename
@@ -2563,7 +2564,13 @@ fun DownApp() {
             onDismissRequest = { if (!sniffing) showAdd = false },
             title = { Text("新建下载") },
             text = {
-                Column {
+                // v6.2 audit round 47: this is the longest
+                // dialog in the app (three fields + scheduling
+                // + sniff history + three extra doors) — at
+                // 1.3-1.5x font scale its unscrollable column
+                // pushed the 开始 button off-screen. Scrolls now,
+                // like the three editor dialogs fixed in v2.9.
+                Column(Modifier.verticalScroll(rememberScrollState())) {
                     OutlinedTextField(
                         value = urlText,
                         onValueChange = { urlText = it },
@@ -2771,7 +2778,12 @@ fun DownApp() {
                 )
             },
             text = {
-                Column {
+                // v6.2 audit round 47: the filter rows + the
+                // (height-capped) result list + the estimate can
+                // outgrow a small screen at large font scale;
+                // the outer column scrolls, the inner LazyColumn
+                // keeps its own 360dp cap.
+                Column(Modifier.verticalScroll(rememberScrollState())) {
                     // v4.3: the list is partial — the parse budget
                     // stopped early or the page had more resources
                     // than the shown cap. Say so up front.
@@ -3534,7 +3546,7 @@ fun DownApp() {
             onDismissRequest = { hashTask = null },
             title = { Text("设置校验哈希") },
             text = {
-                Column {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
                     Text(
                         "把发布页给的哈希值粘进来：64 位自动认成 SHA-256，32 位认成 MD5。" +
                             "带「sha256:」这样的前缀、或者连文件名一整行粘进来也认得。" +
@@ -4438,6 +4450,7 @@ fun FilesScreen(onBack: () -> Unit) {
             onDismissRequest = { dupConfirm = false },
             title = { Text("删除这些重复副本？") },
             text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text(
                     "将删除 ${picked.size} 个文件，共回收 ${Format.size(plan.freedBytes)}。" +
                         "有任务记录的文件会连记录一起清掉，删了不能恢复。\n" +
@@ -4448,6 +4461,7 @@ fun FilesScreen(onBack: () -> Unit) {
                             "每组至少还留了一份，没勾的副本不受影响。"
                         }
                 )
+                }
             },
             confirmButton = {
                 TextButton(onClick = {
@@ -4493,6 +4507,7 @@ fun FilesScreen(onBack: () -> Unit) {
             onDismissRequest = { deleteEntry = null },
             title = { Text("删除") },
             text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text(
                     "「${e.name}」（${Format.size(e.size)}）\n" +
                         if (task != null) {
@@ -4502,6 +4517,7 @@ fun FilesScreen(onBack: () -> Unit) {
                             "这个文件已经没有任务记录了，删除就是把文件本体删掉，不能恢复。"
                         }
                 )
+                }
             },
             confirmButton = {
                 TextButton(onClick = {
@@ -4722,12 +4738,14 @@ fun SpeedTestScreen(onBack: () -> Unit) {
             onDismissRequest = { showCompareConfirm = false },
             title = { Text("多点对比测速") },
             text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text(
                     "会依次测 ${SpeedTest.ENDPOINTS.size} 个测速点，每个点测单线程和多线程，" +
                         "全程约 ${SpeedCompare.totalSeconds(SpeedTest.ENDPOINTS.size)} 秒，" +
                         "大约消耗 ${band.first}–${band.last} MB 流量（网速越快用得越多）。" +
                         "建议在 WiFi 下测；用流量测请先想好这个量。",
                 )
+                }
             },
             confirmButton = {
                 TextButton(onClick = {
@@ -5673,7 +5691,12 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
         AlertDialog(
             onDismissRequest = { ccShowConfirm = false },
             title = { Text("连接数对比实测") },
-            text = { Text(ConnCompare.consentText()) },
+            text = {
+                Text(
+                    ConnCompare.consentText(),
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                )
+            },
             confirmButton = {
                 TextButton(onClick = {
                     ccShowConfirm = false
@@ -5696,6 +5719,7 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
             onDismissRequest = { ccShowApplyConfirm = false },
             title = { Text("应用最快档") },
             text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text(
                     "以后从这个站点（$host）新下载时，起步就用 " +
                         "${bestTier?.connections ?: 0} 条连接，不再从头慢慢试。\n\n" +
@@ -5703,6 +5727,7 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
                         "如果这个站点以前学到过限流上限，也仍然不会超过它。\n\n" +
                         "想反悔随时可以：在「下载统计」页点「清除按主机学习数据」就能全部清掉、回到自动试探。"
                 )
+                }
             },
             confirmButton = {
                 TextButton(onClick = {
@@ -5785,11 +5810,15 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
                     val valueText: String
                     when {
                         r != null -> {
-                            dotColor = when (r.level) {
-                                HealthCheck.Level.OK -> Color(0xFF2E7D32)
-                                HealthCheck.Level.WARN -> Color(0xFFB26A00)
-                                HealthCheck.Level.BAD -> Color(0xFFB3261E)
-                            }
+                            // v6.2 audit round 47: the dot colours
+                            // are theme-split now (see A11yContrast)
+                            // — the old fixed trio's BAD red was
+                            // only 2.37:1 on the dark surface.
+                            dotColor = Color(
+                                A11yContrast.healthDotArgb(
+                                    r.level, isSystemInDarkTheme(),
+                                )
+                            )
                             stateWord = r.level.label
                             valueText = r.value
                         }
@@ -7246,7 +7275,10 @@ fun SettingsScreen(
                 if (list.isEmpty()) {
                     Text("没有发现孤儿文件：下载目录里的 .part 都还有任务认领。")
                 } else {
-                    Column {
+                    // v6.2 audit round 47: up to 20 file rows —
+                    // scrolls so the last rows and the buttons
+                    // stay reachable at large font scale.
+                    Column(Modifier.verticalScroll(rememberScrollState())) {
                         Text(
                             "找到 ${list.size} 个没有任务认领的半成品文件，" +
                                 "合计 ${Format.size(list.sumOf { it.size.coerceAtLeast(0) })}：",
@@ -7342,6 +7374,7 @@ fun SettingsScreen(
             onDismissRequest = { cleanupConfirm = null },
             title = { Text("清理旧任务记录") },
             text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text(
                     "将删除 $cDays 天前的 ${victims.size} 条记录" +
                         "（已完成 $doneN 条、失败 $failN 条）。\n" +
@@ -7349,6 +7382,7 @@ fun SettingsScreen(
                         "开始前会先把全部设置＋任务记录备份成文件存到下载目录" +
                         "（文件名带 before-cleanup），删错了用上面的「导入备份」选它就能恢复。",
                 )
+                }
             },
             confirmButton = {
                 TextButton(onClick = {

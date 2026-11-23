@@ -187,7 +187,11 @@ class SniffActivity : Activity() {
         // ---- floating take-over button (v1.4 item 17) ----
         val fab = Button(this).apply {
             text = "⬇ 用 TuxunDown 下载"
-            setTextColor(Color.WHITE)
+            // v6.2 audit round 47: white on this green is
+            // 2.90:1 (fails even the 3:1 graphics bar); black
+            // is 7.24:1 — the same fix the v2.9 swipe labels
+            // got, pinned in A11yContrastTest.
+            setTextColor(Color.BLACK)
             textSize = 15f
             background = GradientDrawable().apply {
                 cornerRadius = 60f
