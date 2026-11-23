@@ -700,7 +700,7 @@ fun DownApp() {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "6.1.0"
+        }.getOrNull() ?: "6.2.0"
     }
     var showGuide by remember {
         // v2.2 safe mode: after 2+ consecutive crashes, first-
@@ -7563,9 +7563,10 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 手机温控看得见了：诊断页的一键体检新增「设备温控」一项，把手机当前的发热状态分成正常、偏热、发热降速中三档显示；要是这台手机读不到温控状态，这一项就不显示，不会拿假数据糊弄\n" +
-            "· 下载中发热会提醒你：正在下载时如果手机已经发热降速，通知里会多写一句，提醒这时速度变慢可能不是网络的问题；只是提醒，不会自动暂停、也不会自动降速，下载照常进行\n" +
-            "· 「下载中保持运行」开关现在即时生效：下载途中改这个开关，约一秒内就按新设置走，不用等当前任务下完；另外桌面启动器图标的字形略微缩小了一点，看着更协调",
+            "· 弹窗在大字体下也能滑到底了：新建下载、嗅探列表、校验哈希等一批内容较长的弹窗都改成可以上下滚动，系统字体调大时，弹窗底部的按钮也不会被挤出屏幕够不着\n" +
+            "· 几处颜色看得更清了：一键体检里表示正常、注意、异常的状态点，改成按深色和浅色界面分别配色，两种界面下都清楚；嗅探时浮动按钮上的文字也换了对比更强的颜色，压在网页上也认得出\n" +
+            "· 任务卡片长按有快捷菜单了：长按任意一张任务卡，暂停、继续、插队到最前、改优先级、加备注、复制链接、复制诊断信息、删除任务都在一起，点一下就行，不用再展开卡片逐个找按钮；原来长按进入多选的入口挪到了这个菜单的最后一项「多选」，点它照样能进多选\n" +
+            "· 统计页多了「最快纪录」：会按每个任务下载时达到过的最高速度排个前三名，写明文件名、速度和完成时间；还没有任务测出过速度时，这一栏就不显示，不会编数据",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
             "· 文件直链 → 直接开始多线程下载，还能预先改好保存文件名\n" +
@@ -7997,7 +7998,7 @@ fun TaskCard(
         val version = runCatching {
             ctx.packageManager.getPackageInfo(ctx.packageName, 0)
                 .versionName
-        }.getOrNull() ?: "6.1.0"
+        }.getOrNull() ?: "6.2.0"
         val cm = ctx.getSystemService(
             android.content.Context.CLIPBOARD_SERVICE,
         ) as android.content.ClipboardManager
