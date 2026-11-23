@@ -425,9 +425,9 @@ object DownloadCenter {
 
     /** Record [outcome] if it describes an actual recovery/loss;
      *  a clean MAIN load with no drops is not an event. */
-    fun recordTasksRecovery(outcome: TaskStore.LoadOutcome) {
+    fun recordTasksRecovery(outcome: LoadOutcome) {
         val isEvent = outcome.doubleBad ||
-            outcome.source == TaskStore.LoadSource.BAK ||
+            outcome.source == LoadSource.BAK ||
             outcome.droppedRecords > 0 ||
             outcome.bakMergedRecords > 0
         if (!isEvent) return
@@ -473,7 +473,7 @@ object DownloadCenter {
     fun tasksRecoveryEventText(e: TasksRecoveryEvent): String = when {
         e.doubleBad ->
             "任务列表文件已损坏且备份也无法读取，已把坏文件原样保留为 tasks.json.corrupt，本次以空列表启动。"
-        e.source == TaskStore.LoadSource.BAK.name ->
+        e.source == LoadSource.BAK.name ->
             "任务列表文件已损坏，已从备份恢复全部任务。"
         e.bakMergedRecords > 0 ->
             "任务列表有 ${e.droppedRecords} 条记录损坏，已从备份补回 ${e.bakMergedRecords} 条。"

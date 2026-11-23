@@ -8,6 +8,27 @@ import java.util.UUID
 
 enum class TaskStatus { QUEUED, RUNNING, PAUSED, DONE, FAILED }
 
+/** v7.3 (audit round 58, B1): which store a task-list load came from. */
+enum class LoadSource { MAIN, BAK, EMPTY }
+
+/**
+ * v7.3 (audit round 58, B1): the structured result of one load
+ * decision (see TaskStore.decideLoad). [droppedRecords] counts
+ * records the chosen source's array held but per-record parsing
+ * discarded (before any .bak merge); [bakMergedRecords] counts
+ * records the B3 merge pulled back from .bak; [doubleBad] is
+ * true only when BOTH files existed and neither parsed as a
+ * JSON array — the case that used to silently return an empty
+ * list and let the next save destroy the evidence.
+ */
+data class LoadOutcome(
+    val source: LoadSource,
+    val records: List<TaskRecord>,
+    val droppedRecords: Int,
+    val bakMergedRecords: Int,
+    val doubleBad: Boolean,
+)
+
 /**
  * v3.5: one live connection of a running task, as published
  * by the engine's 1 s sampler (see DownloadEngine) for the
@@ -700,28 +721,6 @@ class TaskStore(context: Context) {
             }
             return accepted
         }
-
-        /** v7.3 (audit round 58, B1): which store a load came from. */
-        enum class LoadSource { MAIN, BAK, EMPTY }
-
-        /**
-         * v7.3 (audit round 58, B1): the structured result of one
-         * load decision. [droppedRecords] counts records the
-         * chosen source's array held but per-record parsing
-         * discarded (before any .bak merge); [bakMergedRecords]
-         * counts records the B3 merge pulled back from .bak;
-         * [doubleBad] is true only when BOTH files existed and
-         * neither parsed as a JSON array — the case that used to
-         * silently return an empty list and let the next save
-         * destroy the evidence.
-         */
-        data class LoadOutcome(
-            val source: LoadSource,
-            val records: List<TaskRecord>,
-            val droppedRecords: Int,
-            val bakMergedRecords: Int,
-            val doubleBad: Boolean,
-        )
 
         /** Raw array length of [text], or null when it does not
          *  parse as a JSON array at all. */
