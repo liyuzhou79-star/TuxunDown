@@ -124,12 +124,59 @@ jobs:
           print("formal release signing certificate OK")
           EOF
 
-      - name: Report APK size
+      # Size gate (added in v5.6.0): the hard red line for this
+      # project's release APK is 1.5 MB = 1,572,864 bytes. At
+      # v5.5.0 the signed package had grown to 1,482,238 bytes —
+      # only ~90 KB under the line — and steady feature growth
+      # means "someone eyeballs the size log" is not a reliable
+      # guard. So this step is UNCONDITIONAL (no `if:`): it runs
+      # on both the signed path and the unsigned dry-run path,
+      # after the build steps and before any upload step, prints
+      # each APK's total bytes plus a composition summary, and
+      # fails the whole run with ::error:: when any APK exceeds
+      # 1,572,864 bytes. Composition is summed from each zip
+      # entry's compressed size, grouped as dex /
+      # resources.arsc / res / lib / other (zip headers, alignment
+      # padding and the signing block count toward the total
+      # only, so the five groups need not add up to it exactly).
+      - name: Report APK size and enforce 1.5 MB gate
         run: |
           ls -la app/build/outputs/apk/release/
-          for f in app/build/outputs/apk/release/*.apk; do
-            echo "$f: $(stat -c%s "$f") bytes"
-          done
+          python3 - <<'EOF'
+          import glob, os, sys, zipfile
+          LIMIT = 1572864  # 1.5 MB red line, see the comment above this step.
+          def category(name):
+              if name.endswith(".dex"):
+                  return "dex"
+              if name == "resources.arsc":
+                  return "resources.arsc"
+              if name.startswith("res/"):
+                  return "res"
+              if name.startswith("lib/"):
+                  return "lib"
+              return "other"
+          paths = sorted(glob.glob(os.environ.get("APK_DIR", "app/build/outputs/apk/release") + "/*.apk"))
+          if not paths:
+              print("::error::Size gate: no release APK found to measure.")
+              sys.exit(1)
+          failed = False
+          for path in paths:
+              total = os.path.getsize(path)
+              groups = {"dex": 0, "resources.arsc": 0, "res": 0, "lib": 0, "other": 0}
+              with zipfile.ZipFile(path) as zf:
+                  for info in zf.infolist():
+                      groups[category(info.filename)] += info.compress_size
+              print(f"APK: {path}")
+              print(f"  total: {total} bytes (limit {LIMIT} bytes = 1.5 MB)")
+              for key in ("dex", "resources.arsc", "res", "lib", "other"):
+                  print(f"  {key}: {groups[key]} bytes (compressed entries)")
+              if total > LIMIT:
+                  print(f"::error::Size gate: {path} is {total} bytes, over the 1.5 MB red line ({LIMIT} bytes) by {total - LIMIT} bytes.")
+                  failed = True
+              else:
+                  print(f"  size gate: PASS ({LIMIT - total} bytes under the red line)")
+          sys.exit(1 if failed else 0)
+          EOF
 
       - name: Upload release APK
         if: ${{ !inputs.dry_run }}

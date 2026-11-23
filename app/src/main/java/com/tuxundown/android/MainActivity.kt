@@ -692,7 +692,7 @@ fun DownApp() {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "5.5.0"
+        }.getOrNull() ?: "5.6.0"
     }
     var showGuide by remember {
         // v2.2 safe mode: after 2+ consecutive crashes, first-
@@ -7349,9 +7349,9 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 诊断页新增一键体检：版本与签名、内存、启动耗时、下载空间、网络、域名解析、学习数据和任务状态九项汇成一页，每项都标明正常、注意还是异常；进了页面不会自动跑，点「开始体检」才查，结果可以复制发给人看\n" +
-            "· 这一版还给下载核心打了底：把关键判断都补上了自动检查，拆掉了没用的旧代码，跑起来更稳\n" +
-            "· 诊断页的说法对齐了：一键体检和下面更细的自检分工写清楚了，没配代理、空间读不到这些情况两边说法一致，不再让人对着两处猜",
+            "· 安装包瘦身了：从约 1.48 MB 降到约 1.38 MB。清掉的是随系统组件库附带、翻译成几十种语言却用不上的文案，和一份冗余的元数据，功能一个没少。App 界面与功能不受影响；使用其他系统语言时，系统组件附带的少数无障碍文案会显示默认英文，而不是该语言的译文\n" +
+            "· 关键判断的自动检查补齐了：上一版还没顾上的几个状态说法（校验状态、任务状态、代理类型、内存档位）和内存账本的兜底，都补上了自动检查，以后被改坏会当场拦下\n" +
+            "· 发布前多了一道体积守门：每次打包都会自动量一遍安装包大小，超过 1.5 MB 就发不出来，防止安装包不知不觉越做越大",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
             "· 文件直链 → 直接开始多线程下载，还能预先改好保存文件名\n" +
@@ -8478,7 +8478,7 @@ fun TaskCard(
                     val version = runCatching {
                         ctx.packageManager.getPackageInfo(ctx.packageName, 0)
                             .versionName
-                    }.getOrNull() ?: "5.5.0"
+                    }.getOrNull() ?: "5.6.0"
                     val cm = ctx.getSystemService(
                         android.content.Context.CLIPBOARD_SERVICE,
                     ) as android.content.ClipboardManager
