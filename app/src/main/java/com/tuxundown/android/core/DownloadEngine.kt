@@ -117,6 +117,12 @@ class DownloadEngine(
      *  exactly "read at task start": a running task's buffers
      *  are never resized mid-run, whatever happens later. */
     private val memoryTier: MemoryTier = MemoryTier.STANDARD,
+    /** v7.8 (Step A): tail duplication switch, read once per run
+     *  from DownloadCenter by the service. Default OFF (see
+     *  TailRace for the accounting that makes it honest, and the
+     *  v7.8 Step A checkpoint note for the default-off verdict).
+     *  Segmented HTTP path only — HLS and FTP never read this. */
+    private val tailRaceEnabled: Boolean = false,
 ) {
     /** v5.1: the run's frozen budget table (see MemoryTiers). */
     private val tierBudget: MemoryTiers.Budget = MemoryTiers.budgetFor(memoryTier)
@@ -254,7 +260,27 @@ class DownloadEngine(
         /** Live connection, so the sampler can evict a stalled worker. */
         @Volatile var connection: HttpURLConnection? = null
         @Volatile var lastAdvanceMs: Long = System.currentTimeMillis()
+        /** v7.8 (Step A): tail-race state (see TailRace). Null =
+         *  not raced. [raceId] 0 = original part, 1 = shadow
+         *  racer. [raceCancelled] is set on the loser the moment
+         *  the winner finishes (and the loser's connection is
+         *  disconnected), and its read loop checks it on every
+         *  iteration, so a loser never writes after the win.
+         *  [creditedTotal] accumulates ONLY this part's credited
+         *  (max口径) bytes — the sourceBytes delta for a raced
+         *  attempt, where the raw pos delta would double-count. */
+        @Volatile var race: TailRace.Ledger? = null
+        @Volatile var raceId: Int = -1
+        @Volatile var raceCancelled: Boolean = false
+        @Volatile var creditedTotal: Long = 0
     }
+
+    /** v7.8 (Step A): duplicate bytes fetched by tail-race losers
+     *  this run (real traffic, honestly NOT in downloadedBytes). */
+    private val duplicateBytes = AtomicLong(0)
+    /** v7.8 (Step A): raced span bytes committed this run,
+     *  against TailRace.budgetBytes. */
+    private val raceSpentBytes = AtomicLong(0)
 
     private val active = mutableListOf<ActiveChunk>()
     private val activeLock = Object()
@@ -1700,13 +1726,26 @@ class DownloadEngine(
                     downloadActive(early)
                     continue
                 }
+                // v7.8 (Step A): splitting found nothing worth
+                // cutting (largest remainder at/below MIN_SPLIT)
+                // — the split收益 is exhausted, so an idle worker
+                // may instead RACE the largest remaining span
+                // (see startRace / TailRace). Null when the
+                // switch is off or no span qualifies.
+                val raced = startRace()
+                if (raced != null) {
+                    downloadActive(raced)
+                    continue
+                }
             }
             var index = nextChunk.getAndIncrement()
             if (index >= chunkCount) {
                 // No fresh chunks: endgame. Take a pre-cut tail if
                 // one is waiting, else plan a fresh split of the
                 // largest in-flight remainder (see Endgame).
-                val stolen = stealTail() ?: return
+                // v7.8: when nothing is splittable either, a tail
+                // race is the last resort before exiting.
+                val stolen = stealTail() ?: startRace() ?: return
                 downloadActive(stolen)
                 continue
             }
@@ -1765,7 +1804,12 @@ class DownloadEngine(
         pollPendingTail()?.let { return it }
         synchronized(activeLock) {
             val idle = (activeWorkers.get() - active.size).coerceAtLeast(1)
-            val snapshot = active.map { Endgame.Range(it.index, it.pos, it.end) }
+            // v7.8: raced parts are invisible to splitting — a
+            // span already fetched by two connections must not
+            // be cut under them (its ledger owns the accounting
+            // until the winner drains it).
+            val snapshot = active.filter { it.race == null }
+                .map { Endgame.Range(it.index, it.pos, it.end) }
             val plan = Endgame.planSplit(snapshot, idle, MIN_SPLIT) ?: return null
             val owner = active.firstOrNull { it.index == plan.index } ?: return null
             val live = Endgame.planSplit(
@@ -1821,10 +1865,76 @@ class DownloadEngine(
         }
     }
 
+    /**
+     * v7.8 (Step A): tail duplication — hand the largest
+     * UNSPLITTABLE in-flight remainder to the calling (idle)
+     * worker as a shadow racer over the SAME span (see TailRace
+     * for the accounting and the trigger / budget numbers).
+     * Called only from the endgame zone, after stealTail found
+     * nothing worth splitting. The racer is deliberately NOT a
+     * chunkParts part: it owns no count, marks nothing done, and
+     * exists only in [active] (so the sampler can see / evict it
+     * like any connection). Raced spans are excluded from later
+     * splits (stealTail's snapshot skips raced parts) and a
+     * raced part is never raced twice. HLS / FTP never call
+     * this — segmented HTTP only.
+     */
+    private fun startRace(): ActiveChunk? {
+        if (!tailRaceEnabled) return null
+        synchronized(activeLock) {
+            val budgetLeft = TailRace.budgetBytes(task.totalSize) - raceSpentBytes.get()
+            val owner = active
+                .filter { it.race == null && it.pos < it.end }
+                .maxByOrNull { it.end - it.pos } ?: return null
+            // Snapshot the owner's position under its own lock:
+            // downloadRange's counting block holds the same lock,
+            // so a write is counted either fully BEFORE the race
+            // (normal path, and this snapshot already includes
+            // it) or fully AFTER (ledger path) — never both.
+            val start: Long
+            val ledger: TailRace.Ledger
+            synchronized(owner) {
+                start = owner.pos
+                val racesNow = active.mapNotNull { it.race }.distinct().size
+                if (!TailRace.shouldRace(
+                        true, task.totalSize, racesNow,
+                        owner.end - start, MIN_SPLIT, budgetLeft,
+                    )
+                ) return null
+                ledger = TailRace.Ledger(start, owner.end, owner.start, owner.end)
+                owner.race = ledger
+                owner.raceId = 0
+            }
+            val racer = ActiveChunk(owner.index, start, owner.end)
+            racer.race = ledger
+            racer.raceId = 1
+            active.add(racer)
+            raceSpentBytes.addAndGet(ledger.spanBytes)
+            task.tailRaceCount++
+            return racer
+        }
+    }
+
+    /** v7.8 (Step A): the winner finished — cancel the loser
+     *  NOW: flag first (its read loop checks it every iteration
+     *  and stopped()/pause checks still apply on top), then
+     *  disconnect so a blocked read wakes at once. The loser
+     *  writes nothing more; bytes it already wrote are the same
+     *  bytes at the same offsets, and its uncredited share is
+     *  already booked in duplicateBytes by the ledger. */
+    private fun cancelRaceLoser(winner: ActiveChunk) {
+        val ledger = winner.race ?: return
+        val loser = synchronized(activeLock) {
+            active.firstOrNull { it !== winner && it.race === ledger }
+        } ?: return
+        loser.raceCancelled = true
+        loser.connection?.let { dropConnection(it) }
+    }
+
     private fun downloadActive(ac: ActiveChunk) {
         var attempt = 0
         var ok = false
-        while (attempt < 3 && !stopped() && !ok) {
+        while (attempt < 3 && !stopped() && !ac.raceCancelled && !ok) {
             attempt++
             if (attempt > 1) task.retryCount++ // v1.4 stats: chunk-level retries
             try {
@@ -1847,10 +1957,21 @@ class DownloadEngine(
                 // their own disjoint [pos, end) range.
                 val src = sourceFor(ac, attempt)
                 val startPos = ac.pos
+                val startCredited = ac.creditedTotal
                 try {
                     downloadRange(ac, src)
                 } finally {
-                    val delta = ac.pos - startPos
+                    // v7.8: a raced attempt books only its
+                    // CREDITED delta (max口径) to the source —
+                    // the raw pos delta includes duplicate bytes
+                    // the other racer also brought in, and
+                    // booking it would inflate sourceBytes the
+                    // same way it would downloadedBytes.
+                    val delta = if (ac.race != null) {
+                        ac.creditedTotal - startCredited
+                    } else {
+                        ac.pos - startPos
+                    }
                     if (delta > 0) {
                         synchronized(task.sourceBytes) {
                             task.sourceBytes[src] =
@@ -1858,7 +1979,14 @@ class DownloadEngine(
                         }
                     }
                 }
-                ok = ac.pos >= ac.end
+                // v7.8: for a raced part, "done" means WINNER —
+                // reaching the end second (or being cancelled)
+                // completes nothing; the winner alone drains.
+                ok = if (ac.race != null) {
+                    ac.race!!.isWinner(ac.raceId)
+                } else {
+                    ac.pos >= ac.end
+                }
             } catch (e: Exception) {
                 if (isStorageFull(e)) {
                     // No point retrying into a full disk (audit A10).
@@ -1909,7 +2037,16 @@ class DownloadEngine(
             val grid = ChunkPlanner.gridOf(
                 task.totalSize, task.chunkSize, task.fineChunkSize, task.fineChunkCount
             )
-            val overlapped = ChunkPlanner.indexesOverlapping(grid, ac.start, ac.end)
+            // v7.8: a race winner drains the ORIGINAL part's
+            // full span (the race covered only its tail, but the
+            // part's earlier bytes are this part's too) — exactly
+            // one drain per part, by the winner alone, so the
+            // chunkParts invariant is the pre-race one.
+            val overlapped = if (ac.race != null) {
+                ChunkPlanner.indexesOverlapping(grid, ac.race!!.ownerStart, ac.race!!.ownerEnd)
+            } else {
+                ChunkPlanner.indexesOverlapping(grid, ac.start, ac.end)
+            }
             synchronized(activeLock) {
                 for (idx in overlapped) {
                     val left = (chunkParts[idx] ?: 1) - 1
@@ -2048,7 +2185,7 @@ class DownloadEngine(
                 runBufferSizeFor(bufferThreadsFor(task.threads, activeWorkers.get()))
             )
             var pos = from
-            while (!stopped()) {
+            while (!stopped() && !ac.raceCancelled) {
                 val limit = ac.end // may shrink when split
                 if (pos >= limit) break
                 val want = minOf(buf.size.toLong(), limit - pos).toInt()
@@ -2058,7 +2195,34 @@ class DownloadEngine(
                 pos += n
                 ac.pos = pos
                 ac.lastAdvanceMs = System.currentTimeMillis()
-                downloadedBytes.addAndGet(n.toLong())
+                // v7.8 (Step A): counting. Un-raced: every byte
+                // counts, as always. Raced: the write and its
+                // accounting are atomic under the part's own
+                // lock (startRace snapshots the owner's pos
+                // under the same lock), and the ledger splits
+                // this write into credited (max口径 — the only
+                // part that may touch downloadedBytes) and
+                // duplicate (booked separately, never counted
+                // as progress or speed).
+                var becameWinner = false
+                synchronized(ac) {
+                    val r = ac.race
+                    if (r == null) {
+                        downloadedBytes.addAndGet(n.toLong())
+                    } else {
+                        val adv = r.advance(ac.raceId, pos, n)
+                        if (adv.credited > 0) {
+                            downloadedBytes.addAndGet(adv.credited)
+                            ac.creditedTotal += adv.credited
+                        }
+                        if (adv.duplicate > 0) {
+                            duplicateBytes.addAndGet(adv.duplicate)
+                            task.duplicateBytes = duplicateBytes.get()
+                        }
+                        becameWinner = adv.becameWinner
+                    }
+                }
+                if (becameWinner) cancelRaceLoser(ac)
                 limiter?.throttle(n)
             }
             // The loop exited with pos at the original end: the

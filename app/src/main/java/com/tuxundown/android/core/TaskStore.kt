@@ -297,6 +297,14 @@ class TaskRecord(
     @Transient var precheckAtMs: Long = 0,
     @Transient var speedBps: Long = 0,
     @Transient var peakBps: Long = 0,
+    /** v7.8 (Step A): tail-race bookkeeping for THIS process's
+     *  runs — duplicate bytes fetched by race losers (real
+     *  traffic, never part of downloaded / sourceBytes) and how
+     *  many spans were raced. Transient like speedBps: Step C
+     *  surfaces them; a restart zeroes them rather than risk a
+     *  stale claim. */
+    @Transient @Volatile var duplicateBytes: Long = 0,
+    @Transient @Volatile var tailRaceCount: Int = 0,
     @Transient val speedHistory: MutableList<Long> = mutableListOf(),
     /** v3.5: live per-connection snapshot, republished by
      *  the engine's sampler every second while this task

@@ -79,6 +79,13 @@ package com.tuxundown.android.core
  * v7.8.0 list with that rework as its price. The duplicate
  * TRAFFIC itself (at most one chunk span) was never the
  * blocker.
+ *
+ * v7.8 (Step A) update: that rework has landed — see TailRace
+ * for the first-finisher-wins ledger (max口径 crediting, loser
+ * bytes booked as duplicate traffic, prompt loser cancel) and
+ * DownloadEngine.startRace for the wiring. It ships behind a
+ * user switch, default OFF, until a real-device run verifies
+ * the live wiring.
  */
 object Endgame {
 

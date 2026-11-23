@@ -1303,6 +1303,7 @@ class DownloadService : Service() {
             val legacy = store.fileOf(task)
             val engine = DownloadEngine(
                 task = task,
+                tailRaceEnabled = DownloadCenter.tailRaceEnabled,
                 targetProvider = {
                     val obtained = PublicStorage.obtainTarget(this, task)
                     // One-time copy of any <= v1.1 private partial into

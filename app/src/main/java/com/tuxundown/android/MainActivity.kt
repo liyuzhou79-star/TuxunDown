@@ -633,6 +633,8 @@ fun DownApp() {
     var chargeOnlyUi by remember { mutableStateOf(DownloadCenter.chargeOnlyDownload) }
     // v4.9: screen-off speed keeping (wake lock) switch mirror.
     var keepCpuAwakeUi by remember { mutableStateOf(DownloadCenter.keepCpuAwake) }
+    // v7.8: tail duplication switch mirror (default off).
+    var tailRaceUi by remember { mutableStateOf(DownloadCenter.tailRaceEnabled) }
     var dirName by remember { mutableStateOf(DownloadCenter.downloadDirName) }
     var limitKBps by remember { mutableStateOf(DownloadCenter.speedLimitKBps) }
     // v3.0: speed-limit schedule (switch + HH:MM window + window limit).
@@ -2096,6 +2098,8 @@ fun DownApp() {
             onChargeOnly = { chargeOnlyUi = it; DownloadCenter.chargeOnlyDownload = it },
             keepCpuAwake = keepCpuAwakeUi,
             onKeepCpuAwake = { keepCpuAwakeUi = it; DownloadCenter.keepCpuAwake = it },
+            tailRace = tailRaceUi,
+            onTailRace = { tailRaceUi = it; DownloadCenter.tailRaceEnabled = it },
             dirName = dirName,
             onPickDir = { dirPicker.launch(null) },
             onResetDir = {
@@ -7219,6 +7223,8 @@ fun SettingsScreen(
     onChargeOnly: (Boolean) -> Unit,
     keepCpuAwake: Boolean,
     onKeepCpuAwake: (Boolean) -> Unit,
+    tailRace: Boolean,
+    onTailRace: (Boolean) -> Unit,
     dirName: String,
     onPickDir: () -> Unit,
     onResetDir: () -> Unit,
@@ -7564,6 +7570,24 @@ fun SettingsScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 4.dp),
                 )
+                HorizontalDivider(Modifier.padding(vertical = 10.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("尾巴双下（实验）")
+                        Text(
+                            "下载快结束、最后一小段没法再切分时，用两条连接同时下这一段，" +
+                                "先下完的算数，另一条立即停下。重复下到的流量单独记账，" +
+                                "不会算进下载进度和速度里。默认关闭，确认下载稳定后再打开。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = tailRace, onCheckedChange = onTailRace)
+                }
                 HorizontalDivider(Modifier.padding(vertical = 10.dp))
                 Text("全局限速（所有任务合计的上限，多任务时按优先级分配，改了立即生效）")
                 ChipRow(

@@ -60,6 +60,19 @@ object DownloadCenter {
         set(v) { prefs().edit().putBoolean("keepCpuAwake", v).apply() }
 
     /**
+     * v7.8 (Step A): tail duplication (see TailRace) — in the
+     * endgame, the last unsplittable span is fetched by two
+     * connections at once and the first finisher wins. Default
+     * OFF: the first-finisher-wins accounting is unit-pinned,
+     * but the live wiring has no real-device run yet, so the
+     * user opts in explicitly. Duplicate bytes are booked
+     * separately and never inflate speed or progress either way.
+     */
+    var tailRaceEnabled: Boolean
+        get() = pBool("tailRaceEnabled", false)
+        set(v) { prefs().edit().putBoolean("tailRaceEnabled", v).apply() }
+
+    /**
      * v3.9: is external power connected right now? Read from
      * the sticky ACTION_BATTERY_CHANGED broadcast — querying it
      * with a null receiver returns the last broadcast without
