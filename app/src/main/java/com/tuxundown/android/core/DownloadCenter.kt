@@ -1251,6 +1251,33 @@ object DownloadCenter {
         store.save()
     }
 
+    /** Outcome of a 「再下一次」 request (see [redownload]). */
+    enum class RedownloadOutcome { CREATED, NOT_ELIGIBLE, DUPLICATE }
+
+    /**
+     * v8.5: 「再下一次」 — build a BRAND-NEW task from a DONE
+     * one and queue it through the normal creation path:
+     * RedownloadPlan decides the field copy, the ONE
+     * CreateDedup verdict judges it (DONE history does not
+     * block — that standing ruling is exactly what lets this
+     * through; an ACTIVE task holding the same link still
+     * blocks, like any other creation), store.add is the
+     * creation funnel, and enqueue queues it. The source
+     * record and its downloaded file are never touched; a
+     * filename clash is resolved at finalize by the existing
+     * FreeName rule (「名字 (1)」), never by overwriting.
+     */
+    fun redownload(source: TaskRecord): RedownloadOutcome {
+        val fresh = RedownloadPlan.newRecord(source)
+            ?: return RedownloadOutcome.NOT_ELIGIBLE
+        if (CreateDedup.isDuplicate(store.tasks, fresh.url, fresh.sources)) {
+            return RedownloadOutcome.DUPLICATE
+        }
+        store.add(fresh)
+        enqueue(fresh)
+        return RedownloadOutcome.CREATED
+    }
+
     /** Build a task record, flagging HLS (.m3u8) links automatically. */
     fun newTask(url: String, headers: Map<String, String> = emptyMap()): TaskRecord {
         val t = TaskRecord(url = url, headers = headers.toMutableMap())

@@ -15,8 +15,11 @@ import org.junit.Test
  */
 class CardQuickMenuTest {
 
-    private fun items(status: TaskStatus, selecting: Boolean = false) =
-        CardQuickMenu.itemsFor(status, selecting)
+    private fun items(
+        status: TaskStatus,
+        selecting: Boolean = false,
+        url: String = "",
+    ) = CardQuickMenu.itemsFor(status, selecting, url)
 
     @Test
     fun running_showsPause_neverResumeOrJump() {
@@ -120,6 +123,8 @@ class CardQuickMenuTest {
 
     @Test
     fun done_fullListAndOrder_pinned() {
+        // The helper's default url is "" — an adopted record's
+        // shape — so this list is also the no-RE_DOWNLOAD pin.
         assertEquals(
             listOf(
                 CardQuickMenu.Item.EDIT_NOTE,
@@ -129,6 +134,91 @@ class CardQuickMenuTest {
                 CardQuickMenu.Item.MULTI_SELECT,
             ),
             items(TaskStatus.DONE),
+        )
+    }
+
+    // ---- v8.5: 「再下一次」 (RE_DOWNLOAD) ----
+
+    @Test
+    fun canRedownload_doneWithUrl_only() {
+        assertTrue(
+            CardQuickMenu.canRedownload(
+                TaskStatus.DONE, "https://example.com/f.zip",
+            ),
+        )
+        assertFalse(CardQuickMenu.canRedownload(TaskStatus.DONE, ""))
+        assertFalse(CardQuickMenu.canRedownload(TaskStatus.DONE, "  "))
+        for (status in TaskStatus.values()) {
+            if (status == TaskStatus.DONE) continue
+            assertFalse(
+                "$status",
+                CardQuickMenu.canRedownload(
+                    status, "https://example.com/f.zip",
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun redownload_doneWithUrl_shows() {
+        assertTrue(
+            items(TaskStatus.DONE, url = "https://example.com/f.zip")
+                .contains(CardQuickMenu.Item.RE_DOWNLOAD),
+        )
+    }
+
+    @Test
+    fun redownload_doneBlankUrl_hides() {
+        assertFalse(
+            items(TaskStatus.DONE, url = "")
+                .contains(CardQuickMenu.Item.RE_DOWNLOAD),
+        )
+        assertFalse(
+            items(TaskStatus.DONE, url = "  ")
+                .contains(CardQuickMenu.Item.RE_DOWNLOAD),
+        )
+    }
+
+    @Test
+    fun redownload_nonDoneStates_hideEvenWithUrl() {
+        for (status in TaskStatus.values()) {
+            if (status == TaskStatus.DONE) continue
+            assertFalse(
+                "$status",
+                items(status, url = "https://example.com/f.zip")
+                    .contains(CardQuickMenu.Item.RE_DOWNLOAD),
+            )
+        }
+    }
+
+    @Test
+    fun doneWithUrl_fullListAndOrder_pinned() {
+        assertEquals(
+            listOf(
+                CardQuickMenu.Item.RE_DOWNLOAD,
+                CardQuickMenu.Item.EDIT_NOTE,
+                CardQuickMenu.Item.COPY_LINK,
+                CardQuickMenu.Item.COPY_DIAGNOSTICS,
+                CardQuickMenu.Item.DELETE,
+                CardQuickMenu.Item.MULTI_SELECT,
+            ),
+            items(TaskStatus.DONE, url = "https://example.com/f.zip"),
+        )
+        // While selecting, MULTI_SELECT drops out (as always)
+        // and RE_DOWNLOAD keeps its head position.
+        assertEquals(
+            listOf(
+                CardQuickMenu.Item.RE_DOWNLOAD,
+                CardQuickMenu.Item.EDIT_NOTE,
+                CardQuickMenu.Item.COPY_LINK,
+                CardQuickMenu.Item.COPY_DIAGNOSTICS,
+                CardQuickMenu.Item.DELETE,
+            ),
+            items(
+                TaskStatus.DONE,
+                selecting = true,
+                url = "https://example.com/f.zip",
+            ),
         )
     }
 }

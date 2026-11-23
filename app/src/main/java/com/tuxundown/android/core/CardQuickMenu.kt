@@ -27,6 +27,14 @@ package com.tuxundown.android.core
  *    these show in every state. (Copy-link has no older card
  *    button; it rides the same clipboard idiom as the
  *    diagnostics-copy button in the same function.)
+ *  - RE_DOWNLOAD (v8.5): 「再下一次」 — builds a BRAND-NEW
+ *    task from this finished one (see RedownloadPlan /
+ *    DownloadCenter.redownload). Shows ONLY for DONE with a
+ *    non-blank url: an adopted / orphan record carries
+ *    url = "" and has nothing to download again, so the
+ *    entry must hide there. This one rule ([canRedownload])
+ *    decides BOTH the menu item and the detail action
+ *    flow's button — the two surfaces never re-derive it.
  *  - MULTI_SELECT: long-press used to BE the multi-select
  *    entry (it is still the toggle while selecting). The
  *    menu now owns the long-press outside selecting mode,
@@ -53,16 +61,37 @@ object CardQuickMenu {
         COPY_DIAGNOSTICS,
         DELETE,
         MULTI_SELECT,
+        RE_DOWNLOAD,
     }
 
-    /** Menu items for [status], in display order. */
-    fun itemsFor(status: TaskStatus, selecting: Boolean): List<Item> {
+    /**
+     * v8.5: the ONE 「再下一次」 visibility rule — DONE and a
+     * non-blank url. Adopted / orphan records (url = "") can
+     * never re-download. The long-press menu (via [itemsFor])
+     * and the detail action flow both ask here; neither
+     * surface writes its own copy of the condition.
+     */
+    fun canRedownload(status: TaskStatus, url: String): Boolean =
+        status == TaskStatus.DONE && url.isNotBlank()
+
+    /** Record form of [canRedownload]. */
+    fun canRedownload(task: TaskRecord): Boolean =
+        canRedownload(task.status, task.url)
+
+    /** Menu items for [status], in display order. [url] only
+     *  feeds the RE_DOWNLOAD rule (see [canRedownload]). */
+    fun itemsFor(
+        status: TaskStatus,
+        selecting: Boolean,
+        url: String = "",
+    ): List<Item> {
         val items = mutableListOf<Item>()
         when (status) {
             TaskStatus.RUNNING, TaskStatus.QUEUED -> items += Item.PAUSE
             TaskStatus.PAUSED, TaskStatus.FAILED -> items += Item.RESUME
             TaskStatus.DONE -> Unit
         }
+        if (canRedownload(status, url)) items += Item.RE_DOWNLOAD
         if (status == TaskStatus.QUEUED) items += Item.JUMP_QUEUE
         if (status != TaskStatus.DONE) {
             items += Item.PRIORITY_HIGH

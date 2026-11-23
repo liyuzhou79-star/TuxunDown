@@ -9344,6 +9344,22 @@ fun TaskCard(
         )
         Toast.makeText(ctx, "链接已复制", Toast.LENGTH_SHORT).show()
     }
+    // v8.5: 「再下一次」 — the detail button and the quick
+    // menu item both land here; the actual creation is
+    // DownloadCenter.redownload (normal create path +
+    // enqueue, original record and file untouched).
+    fun redownloadTask() {
+        val ctx = context
+        val text = when (DownloadCenter.redownload(task)) {
+            DownloadCenter.RedownloadOutcome.CREATED ->
+                "已新建任务，开始再下一次"
+            DownloadCenter.RedownloadOutcome.DUPLICATE ->
+                "这个链接已经在任务列表里了"
+            DownloadCenter.RedownloadOutcome.NOT_ELIGIBLE ->
+                "这条记录没有下载链接，没法再下一次"
+        }
+        Toast.makeText(ctx, text, Toast.LENGTH_SHORT).show()
+    }
     val pct = WidgetState.taskPercent(task)
     // v7.5 (audit round 60): the finalize window — DONE is
     // already persisted but savedUri has not landed, so the
@@ -10205,6 +10221,14 @@ fun TaskCard(
                     )
                     CompactActionButton("复制诊断信息", { copyTaskDiagnostics() })
                     if (task.status == TaskStatus.DONE) {
+                        // v8.5: 「再下一次」 — visibility is
+                        // CardQuickMenu.canRedownload, the same
+                        // pure rule the long-press menu uses
+                        // (DONE + a real url; adopted records
+                        // with url = "" never show it).
+                        if (CardQuickMenu.canRedownload(task)) {
+                            CompactActionButton("再下一次", { redownloadTask() })
+                        }
                         // ---- quick actions (v1.4 item 9) ----
                         // v6.7.0 Step C: a ghost's open / install /
                         // share are disabled UP FRONT (the file is
@@ -10374,8 +10398,13 @@ fun TaskCard(
         expanded = quickMenuOpen,
         onDismissRequest = { quickMenuOpen = false },
     ) {
-        for (item in CardQuickMenu.itemsFor(task.status, selecting)) {
+        for (item in CardQuickMenu.itemsFor(task.status, selecting, task.url)) {
             when (item) {
+                CardQuickMenu.Item.RE_DOWNLOAD ->
+                    DropdownMenuItem(
+                        text = { Text("再下一次") },
+                        onClick = { quickMenuOpen = false; redownloadTask() },
+                    )
                 CardQuickMenu.Item.PAUSE ->
                     DropdownMenuItem(
                         text = { Text("暂停") },
