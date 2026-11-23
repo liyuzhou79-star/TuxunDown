@@ -25,6 +25,10 @@
 
 任务卡片、通知栏、桌面小部件和快捷设置磁贴用同一套状态说法：失败就叫失败、全在排队时就说排队中，哪个地方都不会换个说法让人猜。
 
+## 已知限制
+
+有些情况是目前明确接受的限制（比如不支持磁力链接、FTP 功能较简单），都写在 [已知限制](docs/known-issues.md) 里，每条都说明会发生什么、为什么、以及能怎么办。
+
 ## 权限与体积
 
 一共申请 10 项系统权限，每项都有明确用途：联网下载（INTERNET）、判断当前是 WiFi 还是流量（ACCESS_NETWORK_STATE）、在后台继续下载的前台服务（FOREGROUND_SERVICE、FOREGROUND_SERVICE_DATA_SYNC）、发送下载进度与完成通知（POST_NOTIFICATIONS）、完成时震动（VIBRATE）、打开系统的电池白名单页面（REQUEST_IGNORE_BATTERY_OPTIMIZATIONS，App 自己不改任何系统设置）、扫码添加链接时用相机（CAMERA，只在扫码页面打开时用）、开机后恢复未完成任务（RECEIVE_BOOT_COMPLETED，只服务于默认关闭的那个开关）、下载传输期间保持处理器运行做到息屏不降速（WAKE_LOCK，只在真正传输时持有，设置里可关）。
