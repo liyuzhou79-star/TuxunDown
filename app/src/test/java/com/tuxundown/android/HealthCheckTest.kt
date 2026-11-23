@@ -3,6 +3,7 @@ package com.tuxundown.android
 import com.tuxundown.android.core.HealthCheck
 import com.tuxundown.android.core.MemoryTier
 import com.tuxundown.android.core.SummaryNetStatus
+import com.tuxundown.android.core.ThermalStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -39,12 +40,58 @@ class HealthCheckTest {
 
     @Test
     fun proxyItemExistsOnlyWhenAProxyIsActive() {
-        val without = HealthCheck.itemsFor(proxyActive = false)
+        val without = HealthCheck.itemsFor(
+            proxyActive = false, thermalReadable = true,
+        )
         assertFalse(without.contains(HealthCheck.Item.PROXY))
         assertEquals(HealthCheck.Item.values().size - 1, without.size)
-        val with = HealthCheck.itemsFor(proxyActive = true)
+        val with = HealthCheck.itemsFor(
+            proxyActive = true, thermalReadable = true,
+        )
         assertTrue(with.contains(HealthCheck.Item.PROXY))
         assertEquals(HealthCheck.Item.values().size, with.size)
+    }
+
+    @Test
+    fun thermalItemExistsOnlyWhenTheStatusIsReadable() {
+        // v6.1: an unreadable thermal status omits the item
+        // entirely — the page must never show a faked state.
+        val readable = HealthCheck.itemsFor(
+            proxyActive = false, thermalReadable = true,
+        )
+        assertTrue(readable.contains(HealthCheck.Item.THERMAL))
+        val unreadable = HealthCheck.itemsFor(
+            proxyActive = false, thermalReadable = false,
+        )
+        assertFalse(unreadable.contains(HealthCheck.Item.THERMAL))
+        assertEquals(readable.size - 1, unreadable.size)
+        // The two absence rules compose: neither conditional
+        // item leaks into the other's absence.
+        val neither = HealthCheck.itemsFor(
+            proxyActive = false, thermalReadable = false,
+        )
+        assertEquals(HealthCheck.Item.values().size - 2, neither.size)
+    }
+
+    // ---------- thermal (v6.1) ----------
+
+    @Test
+    fun thermalBandsMapOneToOneOntoLevels() {
+        // The standing caliber: 正常 band -> 正常， 偏热 band ->
+        // 注意， 发热降速中 band -> 异常 (the page's strongest
+        // attention level — the device is limiting itself right
+        // now; the value text says it is not an app fault).
+        val normal = HealthCheck.thermalVerdict(ThermalStatus.Band.NORMAL)
+        assertEquals(HealthCheck.Item.THERMAL, normal.item)
+        assertEquals(HealthCheck.Level.OK, normal.level)
+        assertTrue(normal.value.contains("正常"))
+        val warm = HealthCheck.thermalVerdict(ThermalStatus.Band.WARM)
+        assertEquals(HealthCheck.Level.WARN, warm.level)
+        assertTrue(warm.value.contains("偏热"))
+        val hot = HealthCheck.thermalVerdict(ThermalStatus.Band.THROTTLING)
+        assertEquals(HealthCheck.Level.BAD, hot.level)
+        assertTrue(hot.value.contains("发热降速中"))
+        assertTrue(hot.value.contains("不是网络的问题"))
     }
 
     // ---------- version ----------

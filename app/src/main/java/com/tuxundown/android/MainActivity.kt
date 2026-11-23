@@ -5168,8 +5168,8 @@ fun HelpScreen(onBack: () -> Unit) {
             "抓成功后，这条记录会顶到历史最前面，这次结果也会成为主页上「上次嗅探结果」的内容，接着勾选下载就行。\n" +
             "要是这个页面现在打不开了（网站下线、需要登录、断网），原来的历史记录和上次的结果都原样保留，不会因为一次失败就丢掉，等网络或登录恢复了再点一次即可。",
         "「一键体检」是什么？什么时候用？" to
-            "在设置 → 引导与数据 → 诊断页的最上面：点「开始体检」，版本与签名、内存档位、上次启动耗时、下载空间、当前网络、域名解析、学习数据和任务状态九项会汇成一页速览，每项写明正常、注意还是异常。配了代理时多一项代理连通，没配就不列这一项。\n" +
-            "它点了才跑，进页面时什么都不查；九项里只有代理连通和域名解析会发出很小的网络请求，开始前页面上会先写明，其余都在本机完成。\n" +
+            "在设置 → 引导与数据 → 诊断页的最上面：点「开始体检」，版本与签名、内存档位、设备温控、上次启动耗时、下载空间、当前网络、域名解析、学习数据和任务状态会汇成一页速览，每项写明正常、注意还是异常。配了代理时多一项代理连通，没配就不列这一项；设备温控读不到时也不列，不会编一个状态出来。\n" +
+            "它点了才跑，进页面时什么都不查；只有代理连通和域名解析会发出很小的网络请求，开始前页面上会先写明，其余都在本机完成。\n" +
             "下载出问题、又说不清卡在哪一步时，先跑一次体检，结果可以一键复制（网址参数和敏感值会先去掉），把这段文字发给帮你看问题的人，对方一眼就能看出是哪一项不对。想更细地逐项查，用同一页下面原有的「开始自检」。",
     )
     LazyColumn(
@@ -5295,6 +5295,16 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
             // 2. memory tier (DownloadCenter's cached verdict).
             step(HealthCheck.Item.MEMORY) {
                 HealthCheck.memoryVerdict(DownloadCenter.memoryTier())
+            }
+            // 2b. v6.1: device thermal state — a one-shot
+            // snapshot read at tap time (this page's standing
+            // caliber: nothing listens, nothing polls). A null
+            // band (read failure / unknown status value) makes
+            // step() publish nothing, so the item is simply
+            // absent from the results — never a faked verdict.
+            step(HealthCheck.Item.THERMAL) {
+                ThermalStatus.currentBand(context)
+                    ?.let { HealthCheck.thermalVerdict(it) }
             }
             // 3. last cold start (StartupTiming's stored value).
             step(HealthCheck.Item.STARTUP) {
@@ -5727,7 +5737,7 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
         }
         item(key = "d-intro") {
             Text(
-                "这一页有两套检查：上面的「一键体检」是汇总速览，把九项状态一页看全；" +
+                "这一页有两套检查：上面的「一键体检」是汇总速览，把各项状态一页看全；" +
                     "下面「开始自检」是更细的逐项检查，会实测写盘速度、逐项列出结果。" +
                     "两边结果都只显示在这台手机上，不上传；下载出了问题要找人看时，" +
                     "把结果复制全文发过去就行。",
@@ -5743,11 +5753,18 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
         // verdict never rides on colour alone. ----
         item(key = "d-health") {
             val proxyActive = DownloadCenter.proxySettings().active
-            val healthItems = HealthCheck.itemsFor(proxyActive)
+            // v6.1: the thermal row is listed only when the
+            // status is readable on this device (one probe,
+            // remembered for this page visit); an unreadable
+            // status omits the row entirely — never faked.
+            val thermalReadable = remember {
+                ThermalStatus.currentBand(context) != null
+            }
+            val healthItems = HealthCheck.itemsFor(proxyActive, thermalReadable)
             val byItem = healthResults.associateBy { it.item }
             SettingsGroup("一键体检") {
                 Text(
-                    "把版本、内存、空间、网络、解析和任务状态汇成一页，一项一项看。" +
+                    "把版本、内存、温控、空间、网络、解析和任务状态汇成一页，一项一项看。" +
                         "点下面的按钮才会开始检查，进页面不会自动跑。提醒一句：" +
                         "代理连通和 DNS 两项会发出很小的网络请求，其余都在本机完成。",
                     style = MaterialTheme.typography.bodyMedium,

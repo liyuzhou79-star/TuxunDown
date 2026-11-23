@@ -39,6 +39,19 @@ package com.tuxundown.android.core
  *   [AbnormalFilter] definition) is 注意， never 异常 — a failed
  *   or parked task needs the user's attention, it is not proof
  *   the app itself is broken.
+ * - thermal (v6.1, audit round 46): the three [ThermalStatus]
+ *   bands map onto the three levels one-to-one — 正常 band is
+ *   正常， 偏热 band is 注意， 发热降速中 band is 异常. The top
+ *   level here does NOT mean the app is broken: it is the
+ *   strongest attention this page has, used because the device
+ *   is actively limiting its own performance right now, and
+ *   the value text says plainly that this is the phone
+ *   protecting itself. The item exists only when the status
+ *   can actually be read (see [itemsFor]) — an unreadable
+ *   status (read failure / unknown value) omits the item
+ *   entirely, never a guessed verdict. The read is a one-shot
+ *   snapshot taken when the user taps 开始体检， exactly like
+ *   every other item on this page; nothing listens or polls.
  *
  * The copyable text ([buildCopyText]) follows the
  * [TaskDiagnostics] redaction discipline: every value passes
@@ -58,12 +71,15 @@ object HealthCheck {
     }
 
     /** The check items, in page order. PROXY is only ever
-     *  listed when a proxy is configured AND active (see
-     *  [itemsFor]) — the page never probes a proxy that was
-     *  never configured. */
+     *  listed when a proxy is configured AND active, and
+     *  THERMAL only when the thermal status can actually be
+     *  read (see [itemsFor]) — the page never probes a proxy
+     *  that was never configured and never fakes a thermal
+     *  state it could not read. */
     enum class Item(val label: String) {
         VERSION("版本与签名"),
         MEMORY("内存档位"),
+        THERMAL("设备温控"),
         STARTUP("上次启动耗时"),
         SPACE("下载空间"),
         NETWORK("网络与开关门"),
@@ -80,10 +96,17 @@ object HealthCheck {
      *  judged here). */
     data class DnsProbe(val host: String, val ok: Boolean, val detail: String)
 
-    /** The items to show/run for a given proxy state: PROXY
-     *  appears only when a proxy is configured and active. */
-    fun itemsFor(proxyActive: Boolean): List<Item> =
-        Item.values().filter { it != Item.PROXY || proxyActive }
+    /** The items to show/run for a given proxy + thermal
+     *  state: PROXY appears only when a proxy is configured
+     *  and active; THERMAL appears only when the thermal
+     *  status is readable on this device (the caller probes
+     *  once with [ThermalStatus.currentBand] — a null band
+     *  means the item is simply absent, never faked). */
+    fun itemsFor(proxyActive: Boolean, thermalReadable: Boolean): List<Item> =
+        Item.values().filter {
+            (it != Item.PROXY || proxyActive) &&
+                (it != Item.THERMAL || thermalReadable)
+        }
 
     // ---------- per-item verdicts ----------
 
@@ -111,6 +134,29 @@ object HealthCheck {
         )
         MemoryTier.STANDARD, MemoryTier.HIGH -> Result(
             Item.MEMORY, Level.OK, MemoryTiers.tierLabel(tier),
+        )
+    }
+
+    /**
+     * Device thermal state — the verdict for a band the caller
+     * already read via [ThermalStatus.currentBand] (a null band
+     * never reaches this function: the item is omitted instead,
+     * see [itemsFor]). Band -> level is one-to-one (file doc):
+     * 正常 -> 正常， 偏热 -> 注意， 发热降速中 -> 异常.
+     */
+    fun thermalVerdict(band: ThermalStatus.Band): Result = when (band) {
+        ThermalStatus.Band.NORMAL -> Result(
+            Item.THERMAL, Level.OK,
+            "当前温控：正常，手机没有发热降速",
+        )
+        ThermalStatus.Band.WARM -> Result(
+            Item.THERMAL, Level.WARN,
+            "当前温控：偏热，手机开始小幅压低性能，还没到明显降速的程度",
+        )
+        ThermalStatus.Band.THROTTLING -> Result(
+            Item.THERMAL, Level.BAD,
+            "当前温控：发热降速中，手机在压低性能散热，" +
+                "这时下载变慢可能不是网络的问题",
         )
     }
 
