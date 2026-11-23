@@ -14,8 +14,8 @@ import org.junit.Test
 class HelpTopicsTest {
 
     @Test
-    fun has40Topics() {
-        assertEquals(40, HelpTopics.topics.size)
+    fun has41Topics() {
+        assertEquals(41, HelpTopics.topics.size)
     }
 
     @Test
