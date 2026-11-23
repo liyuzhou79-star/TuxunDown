@@ -6969,6 +6969,23 @@ fun SummaryCard(active: List<TaskRecord>, all: List<TaskRecord>, liveTick: Int) 
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    // v5.2: the network status line (see
+                    // SummaryNetStatus) — current network, dual
+                    // channel ONLY when really active, and the
+                    // first gate really holding a queued task.
+                    // Collected fresh here; liveTick re-runs this
+                    // card every second, so it stays as fresh as
+                    // the speed line above with no new polling.
+                    // Active form ONLY: in the resume form below
+                    // every task is user-paused, no gate is
+                    // holding anything, and a network line would
+                    // just be noise next to 全部继续.
+                    DownloadCenter.summaryNetLine(all),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             } else {
                 // Shown only for the resume-all case (see the call
                 // site): an aggregate over zero active tasks would

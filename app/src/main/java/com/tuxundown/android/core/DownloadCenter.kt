@@ -411,6 +411,22 @@ object DownloadCenter {
         set(v) { prefs().edit().putBoolean("dualChannel", v).apply() }
 
     /**
+     * v5.2: UI-readable mirror of the service's private
+     * dualActive (same pattern as the ProxyState mirror —
+     * syncProxyState). True ONLY while the cellular leg has
+     * actually been granted; the service writes it at every
+     * point where its own dualActive changes (acquire, leg
+     * lost, release). The summary card reads this volatile on
+     * its standing 1 s tick — no polling or callback is added
+     * for it. A stale-true after a process death is impossible:
+     * the mirror lives and dies with the process, like the
+     * service state it mirrors.
+     */
+    @Volatile
+    var dualChannelActive: Boolean = false
+        internal set
+
+    /**
      * v1.7: the user's custom User-Agent setting ("" = built-in
      * default). A UA captured for a specific task (sniffer /
      * browser) still wins over this — see UserAgents.resolve.
@@ -1192,6 +1208,74 @@ object DownloadCenter {
         val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
         return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
             caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    }
+
+    /**
+     * v5.2: the summary card's network status line, collected
+     * fresh on the card's standing 1 s tick (see
+     * SummaryNetStatus for the pure wording rules). ONE
+     * getNetworkCapabilities read answers the whole network
+     * segment — type AND validated — instead of re-querying
+     * per segment: no active network, or one without the
+     * INTERNET capability, is NONE (honest 无网络, never
+     * misreported as 流量 the way a plain !isOnWifi() would).
+     * A non-WiFi internet network counts as 流量, the same
+     * binary the traffic guard has always used.
+     *
+     * Gate evidence: the held-task subject is a QUEUED task
+     * whose scheduled time has arrived and which no outage /
+     * portal park is holding (the drain's own eligibility,
+     * QueueOrder) — running tasks are never gate-held. The
+     * traffic segment's evidence is per-task: a held task that
+     * TrafficGuard.shouldBlock judges blocked under exactly
+     * the inputs the service hands the engine (its lambda also
+     * treats an ACTIVE dual channel as the user's confirmation,
+     * hence the !dualChannelActive term) — never the threshold
+     * switch alone.
+     */
+    fun summaryNetLine(tasks: List<TaskRecord>): String {
+        val ctx = appContext
+        val caps = if (ctx == null) null else runCatching {
+            val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE)
+                as ConnectivityManager
+            cm.getNetworkCapabilities(cm.activeNetwork)
+        }.getOrNull()
+        val hasInternet = caps?.hasCapability(
+            NetworkCapabilities.NET_CAPABILITY_INTERNET
+        ) == true
+        val kind = when {
+            caps == null || !hasInternet -> SummaryNetStatus.NetKind.NONE
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ->
+                SummaryNetStatus.NetKind.WIFI
+            else -> SummaryNetStatus.NetKind.MOBILE
+        }
+        val now = System.currentTimeMillis()
+        val held = tasks.filter { t ->
+            t.status == TaskStatus.QUEUED && !t.netDeferred && !t.portalDeferred &&
+                !(t.scheduledAt > 0 && t.scheduledAt > now)
+        }
+        val trafficBlocked = !dualChannelActive && held.any { t ->
+            TrafficGuard.shouldBlock(
+                onWifi = kind == SummaryNetStatus.NetKind.WIFI,
+                totalSize = t.totalSize,
+                thresholdMB = trafficThresholdMB,
+                confirmed = t.mobileConfirmed,
+            )
+        }
+        return SummaryNetStatus.line(
+            SummaryNetStatus.Snapshot(
+                network = kind,
+                validated = caps?.hasCapability(
+                    NetworkCapabilities.NET_CAPABILITY_VALIDATED
+                ) == true,
+                dualActive = dualChannelActive,
+                wifiOnlyOn = wifiOnly,
+                chargeOnlyOn = chargeOnlyDownload,
+                charging = isCharging(),
+                hasQueuedDueTask = held.isNotEmpty(),
+                trafficBlockedTask = trafficBlocked,
+            )
+        )
     }
 
     /**

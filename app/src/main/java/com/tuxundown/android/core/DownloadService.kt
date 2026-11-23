@@ -137,6 +137,16 @@ class DownloadService : Service() {
     @Volatile private var dualRequested = false
     @Volatile private var dualActive = false
 
+    /** v5.2: every dualActive change also writes the
+     *  DownloadCenter mirror the summary card reads (see
+     *  DownloadCenter.dualChannelActive) — the two can never
+     *  drift because this is the only way dualActive changes
+     *  after its initializer. */
+    private fun setDualActive(v: Boolean) {
+        dualActive = v
+        DownloadCenter.dualChannelActive = v
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -305,7 +315,7 @@ class DownloadService : Service() {
      */
     private fun acquireCellularIfWanted() {
         dualRequested = DownloadCenter.dualChannel && !DownloadCenter.wifiOnly
-        dualActive = false
+        setDualActive(false)
         cellularNetwork = null
         if (!dualRequested) return
         val latch = java.util.concurrent.CountDownLatch(1)
@@ -333,7 +343,7 @@ class DownloadService : Service() {
                 override fun onLost(network: Network) {
                     if (cellularNetwork == network) {
                         cellularNetwork = null
-                        dualActive = false
+                        setDualActive(false)
                     }
                 }
             }
@@ -347,7 +357,7 @@ class DownloadService : Service() {
             cellCallback = cb
             latch.await(6, java.util.concurrent.TimeUnit.SECONDS)
         }
-        dualActive = cellularNetwork != null
+        setDualActive(cellularNetwork != null)
     }
 
     private fun releaseCellular() {
@@ -357,7 +367,7 @@ class DownloadService : Service() {
         }
         cellCallback = null
         cellularNetwork = null
-        dualActive = false
+        setDualActive(false)
     }
 
     private fun registerNetworkCallback() {
