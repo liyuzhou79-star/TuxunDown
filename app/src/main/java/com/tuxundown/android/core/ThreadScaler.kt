@@ -228,6 +228,29 @@ class ThreadScaler(
          * is bounded by the ladder's own rule — it still stops
          * at the first plateau; it only reaches the plateau
          * sooner.
+         *
+         * v7.8 (audit round 63, Step B2) re-check, after a
+         * real-device report suspected this window of parking
+         * the count low: EXCLUDED, pinned by the scripted
+         * pipeline simulations in ThreadScalerTest (real
+         * scaler + SpeedSmoothing EMA + GrowthRamp, 1 s vs
+         * 2 s cadence). The EMA's per-tick step is only a
+         * quarter of the raw gap, so a naive model CAN make
+         * the 1 s cadence settle one rung early — but only if
+         * the live connection count doubles within a single
+         * tick, which the spawn side makes impossible:
+         * GrowthRamp grants at most stepFor(desired) per
+         * adjudication, so after a target doubling the live
+         * count (and with it the raw speed, which also pays
+         * handshake + slow-start per new connection) spreads
+         * over several ticks, the EMA keeps rising > 10% per
+         * tick while the growth is real, and both cadences
+         * settle at the same rung in every simulated regime
+         * (responsive, saturating, noisy). Separately: on a
+         * REMEMBERED host the ladder never runs at all
+         * (StartPlan's hint branch starts with probing off),
+         * so this window cannot be the cause when the count
+         * shown is the remembered optimum itself.
          */
         fun evalDue(tick: Int, probing: Boolean): Boolean =
             probing || tick % 2 == 0

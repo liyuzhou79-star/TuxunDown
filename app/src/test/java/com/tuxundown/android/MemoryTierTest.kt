@@ -130,6 +130,53 @@ class MemoryTierTest {
     }
 
     @Test
+    fun bufferFloorChangeTouchesOnlyLowTierAbove64Connections() {
+        // v7.8 (audit 63 Step B2) arithmetic, after the floor
+        // drop (32 KB -> 16 KB, v7.7 Step B2) was suspected in
+        // a same-link speed regression: recompute every cell
+        // against the v7.6 formula (identical except a 32 KB
+        // floor) and pin exactly which cells moved.
+        //
+        //   tier      budget   @64     @96     @128
+        //   LOW       2 MB     32 KB   21 KB   16 KB  <- moved @96/@128
+        //   STANDARD  4 MB     64 KB   42 KB   32 KB  (never moved)
+        //   HIGH      6 MB     96 KB   64 KB   48 KB  (never moved)
+        //
+        // The 16 KB floor itself never even BINDS at <= 128
+        // connections: the smallest share (LOW @128) is
+        // exactly 16 KB. What changed is only that LOW's
+        // sub-32 KB shares at 65..128 connections are no
+        // longer rounded UP to 32 KB (which broke LOW's
+        // budget). At 64 connections — the count in the
+        // user's report — every tier is byte-identical to
+        // v7.6, and on a STANDARD/HIGH device (any flagship)
+        // every count up to 128 is identical too.
+        fun v76BufferSizeFor(threads: Int, perTaskBudgetBytes: Long): Int {
+            val t = threads.coerceAtLeast(1)
+            val budget = (perTaskBudgetBytes / t).toInt()
+            return budget.coerceIn(32 * 1024, DownloadEngine.BUFFER_SIZE)
+        }
+        for (tier in MemoryTier.values()) {
+            val budget = MemoryTiers.budgetFor(tier).perTaskBufferBytes
+            for (n in 1..128) {
+                val now = DownloadEngine.bufferSizeFor(n, budget)
+                val old = v76BufferSizeFor(n, budget)
+                if (tier == MemoryTier.LOW && n > 64) {
+                    assertTrue("LOW @$n must not exceed the v7.6 size", now <= old)
+                } else {
+                    assertEquals("$tier @$n must equal v7.6", old, now)
+                }
+            }
+        }
+        val low = MemoryTiers.budgetFor(MemoryTier.LOW).perTaskBufferBytes
+        assertEquals(21_845, DownloadEngine.bufferSizeFor(96, low))
+        assertEquals(16 * 1024, DownloadEngine.bufferSizeFor(128, low))
+        // And LOW's total at 128 now lands exactly on budget
+        // instead of doubling it, which was the fix's point.
+        assertEquals(low, DownloadEngine.bufferSizeFor(128, low).toLong() * 128)
+    }
+
+    @Test
     fun tieredBufferTotalsNeverExceedThePerTaskBudget() {
         // The v4.2 invariant, swept per tier: n buffers sized by
         // bufferSizeFor(n, budget) total at most the budget.

@@ -148,4 +148,45 @@ class StartPlanTest {
         // (e.g. 100) still bounds that start.
         assertEquals(100, StartPlan.decide(128, 100, false, 0).start)
     }
+
+    @Test
+    fun fullWidthOpenSwitchDefaultsToTheShippedV77Shape() {
+        // v7.8 (audit 63 Step B2): the A/B switch prepared for
+        // the user's same-link regression A/B ships in the
+        // v7.7 position — flipping it is a one-constant change
+        // once the real-device data lands (see
+        // StartPlan.FULL_WIDTH_OPEN).
+        assertTrue(StartPlan.FULL_WIDTH_OPEN)
+        assertEquals(16, StartPlan.BURST_START_LEGACY)
+    }
+
+    @Test
+    fun conservativeFormBurstsAtTheLegacy16() {
+        // Switch off: a fresh unknown host bursts at the
+        // v4.2-v7.6 width of 16 instead of 32; the cap still
+        // presses it, and every other branch is unchanged —
+        // a remembered optimum still STARTS at its count
+        // (only the grant pace changes, in GrowthRamp).
+        val d = StartPlan.decide(
+            hint = 0, cap = 0, resuming = false, persistedThreads = 0,
+            fullWidthOpen = false,
+        )
+        assertEquals(16, d.start)
+        assertTrue(d.probing)
+        assertEquals(
+            4,
+            StartPlan.decide(0, 4, false, 0, fullWidthOpen = false).start,
+        )
+        val hinted = StartPlan.decide(
+            hint = 64, cap = 0, resuming = false, persistedThreads = 0,
+            fullWidthOpen = false,
+        )
+        assertEquals(64, hinted.start)
+        assertFalse(hinted.probing)
+        // And the on position is exactly the shipped shape.
+        assertEquals(
+            32,
+            StartPlan.decide(0, 0, false, 0, fullWidthOpen = true).start,
+        )
+    }
 }

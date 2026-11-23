@@ -84,6 +84,42 @@ object StartPlan {
      *  ruling (see the class doc for the B2 relationship). */
     const val BURST_START = 32
 
+    /**
+     * v7.8 (audit round 63, Step B2): the A/B switch for the
+     * v7.7 fast-open shape, prepared after the user's
+     * same-link A/B report (v7.6.0 averaged 31.1 MB/s on a
+     * kernel.org mirror; v7.7.0 ran the SAME link at
+     * 2.7 MB/s with all 64 connections present but each
+     * crawling at 39-53 KB/s). The prime code-level suspect
+     * is the instant full-width open: a remembered host now
+     * opens its whole learned count at second 0 (GrowthRamp
+     * baseGrant, Step B3) where v7.6 granted 16 and climbed
+     * over ~6 s — exactly the burst shape per-IP fairness /
+     * penalty systems punish, and the silent-throttle shape
+     * the rate-limit memory cannot learn (it learns only
+     * from 429 / clustered-403 rejections on FAILED runs;
+     * a host that merely slows every connection teaches it
+     * nothing, and the remembered optimum re-arms the burst
+     * on every later run).
+     *
+     * TRUE (the default) keeps the shipped v7.7 behaviour
+     * exactly: burst 32, remembered optimum opens full width.
+     * FALSE selects the conservative form for a real-device
+     * A/B: fresh hosts burst at [BURST_START_LEGACY] (the
+     * v4.2-v7.6 width) and a remembered optimum is granted
+     * only the burst width up front, reaching full width
+     * through the ordinary ramp steps (max(8, desired/4)
+     * per adjudication — 32 -> 48 -> 64 for a learned 64,
+     * ~2 adjudications, a few seconds, never instant).
+     * Flipping the default waits on the user's A/B result;
+     * this constant is the ONLY thing that changes.
+     */
+    const val FULL_WIDTH_OPEN = true
+
+    /** The pre-v7.7 fresh-host burst, used when
+     *  [FULL_WIDTH_OPEN] is off (see its doc). */
+    const val BURST_START_LEGACY = 16
+
     data class Decision(val start: Int, val probing: Boolean)
 
     /**
@@ -102,6 +138,7 @@ object StartPlan {
         cap: Int,
         resuming: Boolean,
         persistedThreads: Int,
+        fullWidthOpen: Boolean = FULL_WIDTH_OPEN,
     ): Decision {
         val bound = if (cap in HostMemory.MIN_CAP..DownloadEngine.MAX_THREADS) {
             cap
@@ -132,6 +169,13 @@ object StartPlan {
             return Decision(start = start, probing = true)
         }
         // Fresh start on an unknown host: burst in, then trim.
-        return Decision(start = minOf(BURST_START, bound), probing = true)
+        // v7.8 (Step B2): with the A/B switch off the burst is
+        // the legacy 16 (see FULL_WIDTH_OPEN); the hint and
+        // resume branches above are identical in both forms —
+        // the conservative form differs only in how FAST the
+        // count is granted (GrowthRamp.baseGrantFor), not in
+        // the target itself.
+        val burst = if (fullWidthOpen) BURST_START else BURST_START_LEGACY
+        return Decision(start = minOf(burst, bound), probing = true)
     }
 }

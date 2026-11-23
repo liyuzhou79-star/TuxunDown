@@ -1,6 +1,8 @@
 package com.tuxundown.android
 
 import com.tuxundown.android.core.DownloadEngine
+import com.tuxundown.android.core.GrowthRamp
+import com.tuxundown.android.core.SpeedSmoothing
 import com.tuxundown.android.core.ThreadScaler
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -166,6 +168,129 @@ class ThreadScalerTest {
         assertEquals(64, s.onEval(100, canGrow = true, active = true))
         assertEquals(128, s.onEval(130, canGrow = true, active = true))
         assertFalse(s.probing)
+    }
+
+    // ---------- v7.8 (audit 63 Step B2): the 1 s probe window ----------
+
+    /**
+     * An engine-faithful pipeline simulation: a server model
+     * gives the raw capacity at the LIVE connection count; the
+     * raw rate approaches that capacity by [lag] per 1 s tick
+     * (handshake + slow-start mean a fresh connection never
+     * carries its full rate in its first second); the sampler
+     * smooths through the real [SpeedSmoothing] EMA; the real
+     * [GrowthRamp] turns the scaler's target into the live
+     * count (at most one step per adjudication — the live
+     * count can therefore never double within one tick); the
+     * scaler is evaluated either on the v7.7 cadence
+     * ([ThreadScaler.evalDue]: every tick while probing) or
+     * on the pre-v7.7 cadence (every second tick, always).
+     * Returns the target the ladder settled at when probing
+     * ended.
+     */
+    private fun probeExitTarget(
+        capacityAt: (Int) -> Double,
+        lag: Double,
+        oneSecondCadence: Boolean,
+        noise: DoubleArray? = null,
+        ticks: Int = 40,
+    ): Int {
+        val scaler = ThreadScaler(32, probing = true)
+        val ramp = GrowthRamp(scaler.target)
+        var live = ramp.granted
+        var ema = 0L
+        var rawState = 0.0
+        var exit: Int? = null
+        for (t in 1..ticks) {
+            var cap = capacityAt(live)
+            if (noise != null) cap *= noise[t % noise.size]
+            rawState += (cap - rawState) * lag
+            ema = SpeedSmoothing.next(ema, rawState.toLong())
+            val due = if (oneSecondCadence) {
+                ThreadScaler.evalDue(t, scaler.probing)
+            } else {
+                t % 2 == 0
+            }
+            if (due) {
+                val wasProbing = scaler.probing
+                scaler.onEval(ema, canGrow = true, active = true)
+                if (wasProbing && !scaler.probing && exit == null) {
+                    exit = scaler.target
+                }
+                live = ramp.allow(scaler.target)
+            }
+        }
+        return exit ?: scaler.target
+    }
+
+    /** Saturating server: total = smax * N / (N + K). The
+     *  per-doubling raw gains shrink as N grows. */
+    private fun saturating(k: Double): (Int) -> Double =
+        { n -> 100_000.0 * n / (n + k) }
+
+    @Test
+    fun probeWindowReachesTheTopOnAResponsiveServer() {
+        // Per-connection-limited server, line not yet the
+        // binding constraint (the kernel.org shape: ~570 KB/s
+        // per connection, total still climbing at 64): every
+        // doubling pays, so the ladder must reach 128 on the
+        // 1 s cadence — and does.
+        val responsive: (Int) -> Double =
+            { n -> minOf(n * 1000.0, 48_000.0) }
+        assertEquals(128, probeExitTarget(responsive, lag = 0.6, oneSecondCadence = true))
+        assertEquals(128, probeExitTarget(responsive, lag = 0.6, oneSecondCadence = false))
+    }
+
+    @Test
+    fun probeWindowSettlesWhereThe2sWindowSettlesOnSaturatingServers() {
+        // The audit question: does judging every 1 s park the
+        // ladder BELOW where the pre-v7.7 2 s window parked
+        // it? Across the saturating family (K = 8 / 16 / 32:
+        // per-doubling gains from +33% down to +6%) and raw
+        // response lags from realistic (0.6) to the fastest
+        // physically modellable (1.0 = raw rate reaches the
+        // new capacity within the same tick), the two
+        // cadences settle at the SAME rung in every case.
+        // The 1 s cadence can only misjudge if the live count
+        // doubles inside one tick — GrowthRamp's per-tick
+        // step makes that impossible (see evalDue's doc).
+        for (k in listOf(8.0, 16.0, 32.0)) {
+            for (lag in listOf(0.6, 1.0)) {
+                val one = probeExitTarget(saturating(k), lag, oneSecondCadence = true)
+                val two = probeExitTarget(saturating(k), lag, oneSecondCadence = false)
+                assertEquals("K=$k lag=$lag", two, one)
+            }
+        }
+        // The absolute rungs, pinned so a future change to
+        // either cadence or the EMA has to re-argue them:
+        // fast raw response settles one rung below the slow
+        // one on BOTH cadences alike (an EMA artifact, not a
+        // 1 s artifact).
+        assertEquals(64, probeExitTarget(saturating(32.0), 1.0, oneSecondCadence = true))
+        assertEquals(128, probeExitTarget(saturating(32.0), 0.6, oneSecondCadence = true))
+        assertEquals(64, probeExitTarget(saturating(16.0), 1.0, oneSecondCadence = true))
+        assertEquals(128, probeExitTarget(saturating(16.0), 0.6, oneSecondCadence = true))
+    }
+
+    @Test
+    fun probeWindowSurvivesSamplingNoise() {
+        // A ±3% deterministic wobble on the raw rate (the
+        // sampler's reality on any real line) must not knock
+        // the 1 s ladder off the rung the 2 s ladder reaches.
+        val noise = doubleArrayOf(
+            1.02, 0.99, 1.01, 0.98, 1.03, 1.00,
+            0.99, 1.02, 0.97, 1.01, 1.00, 0.99,
+        )
+        for (k in listOf(16.0, 32.0)) {
+            val one = probeExitTarget(
+                saturating(k), lag = 0.6, oneSecondCadence = true, noise = noise,
+            )
+            val two = probeExitTarget(
+                saturating(k), lag = 0.6, oneSecondCadence = false, noise = noise,
+            )
+            assertEquals("K=$k noisy", two, one)
+            assertEquals("K=$k noisy", 128, one)
+        }
     }
 
     @Test

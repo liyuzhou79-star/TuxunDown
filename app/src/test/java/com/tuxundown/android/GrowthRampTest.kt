@@ -59,6 +59,59 @@ class GrowthRampTest {
     }
 
     @Test
+    fun baseGrantForSelectsTheOpenForm() {
+        // v7.8 (audit 63 Step B2): the A/B switch's ramp half.
+        // Full-width form (shipped v7.7): ONLY a remembered
+        // optimum opens whole, at its pressed target.
+        assertEquals(64, GrowthRamp.baseGrantFor(true, hintUsed = true, pressedTarget = 64))
+        assertEquals(128, GrowthRamp.baseGrantFor(true, hintUsed = true, pressedTarget = 128))
+        assertEquals(
+            GrowthRamp.BASE_GRANT,
+            GrowthRamp.baseGrantFor(true, hintUsed = false, pressedTarget = 64),
+        )
+        // Conservative form: even a remembered optimum is
+        // granted only the burst width up front.
+        assertEquals(
+            GrowthRamp.BASE_GRANT,
+            GrowthRamp.baseGrantFor(false, hintUsed = true, pressedTarget = 64),
+        )
+        assertEquals(
+            GrowthRamp.BASE_GRANT,
+            GrowthRamp.baseGrantFor(false, hintUsed = false, pressedTarget = 64),
+        )
+        // A corrupt negative pressed target can never widen
+        // the full-width grant below zero.
+        assertEquals(0, GrowthRamp.baseGrantFor(true, hintUsed = true, pressedTarget = -5))
+    }
+
+    @Test
+    fun conservativeFormReachesALearned64InTwoAdjudications() {
+        // The conservative curve the A/B would run for the
+        // user's case (remembered optimum 64): 32 granted at
+        // second 0, then the ordinary steps — full width in
+        // 2 adjudications (a few seconds at the steady 2 s
+        // cadence), never instant, never the target itself
+        // being lowered.
+        val ramp = GrowthRamp(
+            64,
+            baseGrant = GrowthRamp.baseGrantFor(false, hintUsed = true, pressedTarget = 64),
+        )
+        assertEquals(32, ramp.granted)
+        assertEquals(48, ramp.allow(64))
+        assertEquals(64, ramp.allow(64))
+        assertEquals(64, ramp.allow(64)) // holds
+        // Same shape at the 128 top: 32 -> 64 -> 96 -> 128.
+        val top = GrowthRamp(
+            128,
+            baseGrant = GrowthRamp.baseGrantFor(false, hintUsed = true, pressedTarget = 128),
+        )
+        assertEquals(32, top.granted)
+        assertEquals(64, top.allow(128))
+        assertEquals(96, top.allow(128))
+        assertEquals(128, top.allow(128))
+    }
+
+    @Test
     fun negativeInitialDesireGrantsZero() {
         assertEquals(0, GrowthRamp(-5).granted)
     }

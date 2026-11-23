@@ -127,5 +127,37 @@ class GrowthRamp(
 
         fun stepFor(desired: Int): Int =
             maxOf(STEP_FLOOR, desired.coerceAtLeast(0) / STEP_DIVISOR)
+
+        /**
+         * v7.8 (audit round 63, Step B2): the base grant the
+         * engine constructs a run's ramp with — the single
+         * place the StartPlan.FULL_WIDTH_OPEN A/B switch
+         * reaches the ramp. [pressedTarget] is the start
+         * target AFTER the rate-limit cap and the global
+         * allowance have pressed it (the engine passes
+         * minOf(scaler target, allowance)).
+         *
+         * - full-width form (switch on, the shipped v7.7
+         *   behaviour): a remembered-optimum start
+         *   ([hintUsed]) is granted its whole pressed target
+         *   at second 0; every other start is granted the
+         *   burst width.
+         * - conservative form (switch off): EVERY start is
+         *   granted only the burst width; a remembered
+         *   optimum then climbs by [stepFor] per adjudication
+         *   (32 -> 48 -> 64 for a learned 64 — full width in
+         *   ~2 adjudications instead of instantly, the shape
+         *   v7.6 had with its narrower burst).
+         */
+        fun baseGrantFor(
+            fullWidthOpen: Boolean,
+            hintUsed: Boolean,
+            pressedTarget: Int,
+        ): Int =
+            if (fullWidthOpen && hintUsed) {
+                pressedTarget.coerceAtLeast(0)
+            } else {
+                BASE_GRANT
+            }
     }
 }
