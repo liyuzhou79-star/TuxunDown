@@ -97,8 +97,10 @@ import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import com.tuxundown.android.core.AbnormalFilter
 import com.tuxundown.android.core.Backup
 import com.tuxundown.android.core.BatchRename
+import com.tuxundown.android.core.ChargeGuard
 import com.tuxundown.android.core.BulkControl
 import com.tuxundown.android.core.CardFields
 import com.tuxundown.android.core.Changelog
@@ -1570,10 +1572,37 @@ fun DownApp() {
     // every other tab excludes them — including 已完成， which is
     // the tab they were folded away from.
     val anyArchived = store.tasks.any { it.archived }
+    // v5.2: the 异常 tab's gate context, read ONCE here on every
+    // recomposition from the live gate state (see AbnormalFilter
+    // for why the WiFi / charge half is judged by the gates and
+    // not by per-task flags: the drain stamps a flag/note only
+    // on the queue head, so tasks behind it would be missed).
+    // An unreadable WiFi state counts as "not on WiFi" — the
+    // same conservative read enqueue's gate makes.
+    val abnormalGates = AbnormalFilter.GateContext(
+        wifiGateClosed = DownloadCenter.wifiOnly &&
+            !runCatching { DownloadCenter.isOnWifi() }.getOrDefault(false),
+        chargeGateClosed = ChargeGuard.shouldPark(
+            DownloadCenter.chargeOnlyDownload, DownloadCenter.isCharging()
+        ),
+        nowMs = System.currentTimeMillis(),
+    )
+    // The tab's count and the tab's list share ONE predicate
+    // (AbnormalFilter.count is literally its filter's size).
+    val abnormalCount = AbnormalFilter.count(store.tasks, abnormalGates)
+    val anyAbnormal = abnormalCount >= 1
+    // v5.2: never strand the user on an invisible tab — the
+    // 异常 tab is hidden while searching (below) and disappears
+    // when its count reaches zero, so either event bounces a
+    // selected 异常 tab back to 全部.
+    LaunchedEffect(query, abnormalCount) {
+        if (tab == 5 && (query.isNotBlank() || abnormalCount == 0)) tab = 0
+    }
     val displayedTasks = store.tasks
         .filter {
             when (tab) {
                 4 -> it.archived
+                5 -> AbnormalFilter.isAbnormal(it, abnormalGates)
                 1 -> !it.archived && (it.status == TaskStatus.RUNNING ||
                     it.status == TaskStatus.QUEUED || it.status == TaskStatus.PAUSED)
                 2 -> !it.archived && it.status == TaskStatus.DONE
@@ -1927,8 +1956,25 @@ fun DownApp() {
                 ) {
                     // v2.4: the 已归档 tab appears only when at
                     // least one archived record exists.
-                    val tabs = listOf(0 to "全部", 1 to "下载中", 2 to "已完成", 3 to "失败") +
+                    // v5.2: same rule for the 异常 tab (5) — it
+                    // appears only when its count is at least 1,
+                    // and never while searching (a query switches
+                    // to global search, whose groups replace the
+                    // tab list; the LaunchedEffect above bounces
+                    // a selected 异常 tab back to 全部 first).
+                    // Its label carries the count in the app's
+                    // parenthesised-count style （分享清单（N 个） /
+                    // 任务（N）), from AbnormalFilter.count — the
+                    // same predicate the tab's list filters by.
+                    val abnormalTab = if (anyAbnormal && query.isBlank()) {
+                        listOf(5 to "异常（$abnormalCount）")
+                    } else {
+                        emptyList()
+                    }
+                    val archiveTab =
                         if (anyArchived) listOf(4 to "已归档") else emptyList()
+                    val tabs = listOf(0 to "全部", 1 to "下载中", 2 to "已完成", 3 to "失败") +
+                        abnormalTab + archiveTab
                     for ((m, label) in tabs) {
                         if (m == tab) {
                             Button(onClick = { }) { Text(label) }
