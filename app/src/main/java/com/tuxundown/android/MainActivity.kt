@@ -807,7 +807,7 @@ fun DownApp() {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "7.1.0"
+        }.getOrNull() ?: "7.2.0"
     }
     var showGuide by remember {
         // v2.2 safe mode: after 2+ consecutive crashes, first-
@@ -8312,11 +8312,12 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 排队位置看得见了：排队中的任务卡片会直接写明「排队中 · 第 N 位」，排在第几一眼看清，这个位置和实际轮到谁开始下载用的是同一套顺序，不会写一个、下一个\n" +
-            "· 排队不会再被一直压着了：低优先级任务连续排队满 30 分钟，会自动按中优先级排队，不会因为后面总有新任务进来就无限期等下去\n" +
-            "· 你定的规矩仍然最大：你设的高优先级、还有长按卡片手动「插队」，永远排在自动提升前面；老化只在低和中之间走，不会越过高优先级，原来的排队规则没有变\n" +
-            "· 这一版还把整个队列的取任务顺序从头到尾审计了一遍：每个任务进队列、被取走的路径都逐条核对过，确认没有哪条路能绕开统一的排队顺序私自先下\n" +
-            "· 有一处照实说明：同一优先级里，新建的任务仍排在已有任务前面，这是沿用至今的列表顺序；现在位置看得见，等太久长按卡片用「插队」就能提前\n" +
+            "· 这一版专做安全补强，把链接、密码和登录状态这些敏感东西的出口又收紧了一轮，下载功能和速度都没有变\n" +
+            "· 备份导入更严了：备份文件里的主链接和镜像只收 http、https、ftp 开头的，混进来的本地文件类链接会被跳过，不会照单全收\n" +
+            "· 自定义的密钥类请求头不再进备份：像 X-Api-Key 这类带密钥、令牌、密码字样的请求头，导出备份时和 Cookie 一样自动剔除，不会跟着备份文件走\n" +
+            "· 复制和分享前统一脱敏：任务诊断、崩溃日志、一键体检和下载报告复制出去之前都会先把链接参数和密钥类内容遮掉；分享任务清单时，如果链接里带着参数或账号信息，清单末尾会多一行提醒你先想清楚再发\n" +
+            "· 诊断页新增「安全现状」：申请了哪些权限、有哪些组件对外开放、代理密码是加密保存还是未设置，一页看清，密码本身不会显示出来\n" +
+            "· 嗅探浏览器能清除登录状态了：在嗅探浏览器里登录过的网站，现在可以一键清掉它的登录状态和浏览数据，不会再一直留着退不出去\n" +
             "· 升级方式不变：签名和以前一致，直接覆盖安装，任务记录都保留；没有新增权限，也没有新增第三方组件",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
@@ -8761,7 +8762,7 @@ fun TaskCard(
         val version = runCatching {
             ctx.packageManager.getPackageInfo(ctx.packageName, 0)
                 .versionName
-        }.getOrNull() ?: "7.1.0"
+        }.getOrNull() ?: "7.2.0"
         val cm = ctx.getSystemService(
             android.content.Context.CLIPBOARD_SERVICE,
         ) as android.content.ClipboardManager
