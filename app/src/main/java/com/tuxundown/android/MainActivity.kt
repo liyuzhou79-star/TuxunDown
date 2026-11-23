@@ -132,6 +132,7 @@ import com.tuxundown.android.core.SpeedCompare
 import com.tuxundown.android.core.SpeedHistory
 import com.tuxundown.android.core.SpeedTest
 import com.tuxundown.android.core.SpeedVerdict
+import com.tuxundown.android.core.StartupTiming
 import com.tuxundown.android.core.TaskHeaders
 import com.tuxundown.android.core.TaskRecord
 import com.tuxundown.android.core.TaskStatus
@@ -159,11 +160,22 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // v5.1 (Step C): fallback start for the cold-start
+        // measurement — one monotonic clock read, nothing else.
+        // StartupTiming prefers the process start time; this
+        // onCreate-entry read is only the fallback (see
+        // StartupTiming's 口径 note).
+        val onCreateEntryUptimeMs = android.os.SystemClock.uptimeMillis()
         // v2.2 crash self-rescue: install FIRST, before anything
         // that could itself crash, so even a launch-path failure
         // leaves a report the user can read and forward. Local
         // only — see CrashGuard.
         CrashGuard.install(this)
+        // v5.1 (Step C): claim this process's cold-start slot
+        // (first MainActivity creation only; crash-report /
+        // safe-mode launches are not measured). Clock reads
+        // only — no IO before the first frame.
+        StartupTiming.beginColdStart(this, onCreateEntryUptimeMs)
         DownloadCenter.init(this)
         // v2.1 safe-area pass: targetSdk 35 means Android 15 draws
         // this window edge-to-edge whether we ask or not, sliding
@@ -250,6 +262,33 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+
+        // v5.1 (Step C): the END of the cold-start measurement —
+        // a one-shot OnDrawListener on the decor view: the first
+        // time a frame is actually drawn, the measurement is
+        // finished and persisted (StartupTiming itself no-ops
+        // when this process is not measuring: warm start,
+        // recreation, crash-report launch). The listener
+        // unregisters via a posted runnable — mutating the
+        // observer from inside its own draw dispatch is not
+        // allowed, and the posted removal lands right after
+        // this frame. Registration is the only pre-frame cost.
+        val decorView = window.decorView
+        val firstDrawFired = java.util.concurrent.atomic.AtomicBoolean(false)
+        val firstDrawListener = object : android.view.ViewTreeObserver.OnDrawListener {
+            override fun onDraw() {
+                if (!firstDrawFired.compareAndSet(false, true)) return
+                decorView.post {
+                    runCatching {
+                        if (decorView.viewTreeObserver.isAlive) {
+                            decorView.viewTreeObserver.removeOnDrawListener(this)
+                        }
+                    }
+                }
+                StartupTiming.onFirstFrameDrawn(this@MainActivity)
+            }
+        }
+        decorView.viewTreeObserver.addOnDrawListener(firstDrawListener)
     }
 
     /**
@@ -5038,6 +5077,15 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
             out += "内存档位" to
                 "${com.tuxundown.android.core.MemoryTiers.tierLabel(DownloadCenter.memoryTier())}；" +
                 "每个下载任务的缓冲上限约 ${tierBudget.perTaskBufferBytes / (1024 * 1024)} MB"
+            // ---- v5.1 (Step C): last cold start — carried in
+            // the copied report exactly when the page shows the
+            // row (no stored value = no line in either place) ----
+            val startupText = StartupTiming.displayText(
+                StartupTiming.lastColdStartMs(context)
+            )
+            if (startupText != null) {
+                out += "上次启动耗时" to startupText
+            }
             // ---- tasks: counts + on-disk footprint ----
             val tasks = DownloadCenter.store.tasks
             out += "任务数" to Diagnostics.taskCountsLine(tasks)
@@ -5149,6 +5197,16 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
                     "${com.tuxundown.android.core.MemoryTiers.tierLabel(tier)}；" +
                         "每个下载任务的缓冲上限约 ${budget.perTaskBufferBytes / (1024 * 1024)} MB",
                 )
+                // v5.1 (Step C): last cold-start time, same
+                // group. No stored value (first install / never
+                // measured) = the row is simply absent — never
+                // a 0 or a made-up number (see StartupTiming).
+                val startupText = StartupTiming.displayText(
+                    StartupTiming.lastColdStartMs(context)
+                )
+                if (startupText != null) {
+                    InfoRow("上次启动耗时", startupText)
+                }
             }
         }
         item(key = "d-run") {
