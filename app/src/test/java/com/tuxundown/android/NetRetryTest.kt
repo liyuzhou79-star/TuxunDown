@@ -139,4 +139,36 @@ class NetRetryTest {
         assertFalse(NetRetry.isNetworkError(com.tuxundown.android.core.Errors.human(rawDns)))
         assertTrue(NetRetry.isNetworkError(rawDns))
     }
+
+    // ---- v5.3 (audit round 38): idle-wait notification text ----
+
+    @Test
+    fun deferredWaitTextNamesTheActualPark() {
+        // Portal-only: the network is UP, only the login is
+        // missing — the text must not claim 等待网络恢复 (the
+        // round-38 divergence: the drain's generic text used to
+        // overwrite the portal park's own 等待登录 WiFi post).
+        assertEquals(
+            "等待 WiFi 登录" to "这个 WiFi 要先登录，登录后自动继续",
+            NetRetry.deferredWaitText(hasNetParked = false, hasPortalParked = true),
+        )
+        assertEquals(
+            "等待网络恢复" to "断网的任务已排队，网络一回来就自动继续",
+            NetRetry.deferredWaitText(hasNetParked = true, hasPortalParked = false),
+        )
+    }
+
+    @Test
+    fun deferredWaitTextNetWinsWhenBothParkedAndNullWhenNone() {
+        // With the network actually down a login cannot happen
+        // anyway — the outage is the first blocker.
+        assertEquals(
+            "等待网络恢复" to "断网的任务已排队，网络一回来就自动继续",
+            NetRetry.deferredWaitText(hasNetParked = true, hasPortalParked = true),
+        )
+        assertEquals(
+            null,
+            NetRetry.deferredWaitText(hasNetParked = false, hasPortalParked = false),
+        )
+    }
 }

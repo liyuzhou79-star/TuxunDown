@@ -98,4 +98,32 @@ object NetRetry {
     }
 
     fun shouldDefer(usedAttempts: Int): Boolean = usedAttempts < MAX_ATTEMPTS
+
+    /**
+     * v5.3 (audit round 38): the drain's idle-wait notification
+     * text while it sits on parked tasks — (title, text), or
+     * null when nothing is parked. Both deferral families are
+     * bounded by [shouldDefer] (the portal park borrows this
+     * object's budget), so their shared wait wording lives here
+     * too. The drain used to post 「等待网络恢复 / 断网的任务
+     * 已排队」 for ANY park, overwriting the 「等待登录 WiFi」
+     * text the portal park itself had just posted — for a
+     * portal-only park the network is UP, only the login is
+     * missing, and the card's note says so; the notification
+     * now names the same reason. A network park wins when both
+     * kinds are parked: with the network actually down, a login
+     * cannot happen anyway, so 等待网络恢复 is the first
+     * blocker — the same first-gate naming order the summary
+     * card's network line uses.
+     */
+    fun deferredWaitText(
+        hasNetParked: Boolean,
+        hasPortalParked: Boolean,
+    ): Pair<String, String>? = when {
+        hasNetParked ->
+            "等待网络恢复" to "断网的任务已排队，网络一回来就自动继续"
+        hasPortalParked ->
+            "等待 WiFi 登录" to "这个 WiFi 要先登录，登录后自动继续"
+        else -> null
+    }
 }

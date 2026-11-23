@@ -763,11 +763,19 @@ class DownloadService : Service() {
                             continue
                         }
                     }
-                    notifyUpdate(
-                        "等待网络恢复",
-                        "断网的任务已排队，网络一回来就自动继续",
-                        0,
-                    )
+                    // v5.3 (audit round 38): the wait text names
+                    // the park that is actually holding the queue
+                    // (NetRetry.deferredWaitText) — a portal-only
+                    // park is 等待 WiFi 登录， not 等待网络恢复
+                    // (the network is up; only the login is
+                    // missing, exactly as the card's note says).
+                    // anyDeferred above guarantees a non-null
+                    // verdict here; the fallback is the old text.
+                    val waitText = NetRetry.deferredWaitText(
+                        hasNetParked = store.tasks.any { it.netDeferred },
+                        hasPortalParked = store.tasks.any { it.portalDeferred },
+                    ) ?: ("等待网络恢复" to "断网的任务已排队，网络一回来就自动继续")
+                    notifyUpdate(waitText.first, waitText.second, 0)
                     if (!drainWait(5000, wakeGen)) break
                     continue
                 }
