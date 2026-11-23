@@ -62,7 +62,7 @@ class BandwidthBudgetTest {
         )
         assertEquals(1024L, shares.sum())
         assertTrue(shares.all { it >= 51L })
-        assertEquals(51L, shares.min())
+        assertEquals(51L, shares.minOrNull())
     }
 
     @Test
