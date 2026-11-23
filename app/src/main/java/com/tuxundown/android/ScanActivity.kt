@@ -20,9 +20,9 @@ import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.RGBLuminanceSource
 import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.qrcode.QRCodeReader
+import com.tuxundown.android.core.CreateDedup
 import com.tuxundown.android.core.DownloadCenter
 import com.tuxundown.android.core.LinkSchemes
-import com.tuxundown.android.core.TaskStatus
 import com.tuxundown.android.core.ThunderLink
 
 /**
@@ -314,9 +314,9 @@ class ScanActivity : Activity() {
         }
         finished = true
         stopCamera()
-        val dup = DownloadCenter.store.tasks.any {
-            it.url == url && it.status != TaskStatus.DONE && it.status != TaskStatus.FAILED
-        }
+        // v5.4: the ONE dedup verdict (see CreateDedup), same
+        // as every other creation funnel.
+        val dup = CreateDedup.isDuplicate(DownloadCenter.store.tasks, url)
         if (dup) {
             Toast.makeText(this, "这个链接已经在任务列表里了", Toast.LENGTH_LONG).show()
         } else {

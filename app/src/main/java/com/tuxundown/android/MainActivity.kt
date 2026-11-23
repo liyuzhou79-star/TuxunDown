@@ -109,6 +109,7 @@ import com.tuxundown.android.core.ChunkMap
 import com.tuxundown.android.core.ChunkPlanner
 import com.tuxundown.android.core.ConnCompare
 import com.tuxundown.android.core.CrashGuard
+import com.tuxundown.android.core.CreateDedup
 import com.tuxundown.android.core.Errors
 import com.tuxundown.android.core.FailureAdvice
 import com.tuxundown.android.core.ChecksumVerifier
@@ -724,8 +725,13 @@ fun DownApp() {
                 // (the prompt then shows the REAL address).
                 val url = LinkExtract.extract(text).firstOrNull()
                     ?: ThunderLink.findDecoded(text).firstOrNull()
+                // v5.4: the prompt suppression follows the same
+                // CreateDedup verdict as creation itself — an
+                // unfinished task for this link silences the
+                // prompt; DONE history does not (re-downloading
+                // it is allowed, so offering it is right).
                 if (!url.isNullOrBlank() && url != DownloadCenter.clipboardPrompted &&
-                    store.tasks.none { it.url == url }
+                    !CreateDedup.isDuplicate(store.tasks, url)
                 ) {
                     clipboardLink = url
                 }
@@ -958,14 +964,21 @@ fun DownApp() {
         }
     }
 
-    /** Returns false when the same link is already an active task. */
+    /**
+     * The single-create funnel for this screen: paste / batch /
+     * text extract / share / .txt import / sniff picks all end
+     * up here. [quietDuplicate] is for batch callers — they
+     * count DUPLICATE outcomes and report 「跳过了 N 个重复」
+     * in their own summary instead of one toast per link.
+     */
     fun createTask(
         url: String,
         referer: String = "",
         fileName: String = "",
         mirrors: List<String> = emptyList(),
         daily: Boolean = false,
-    ): Boolean {
+        quietDuplicate: Boolean = false,
+    ): CreateOutcome {
         // v2.8 audit round 14: the intake gate. Only http /
         // https / ftp links may become tasks at all — a file://,
         // content:// or intent:// string arriving via a share, a
@@ -978,26 +991,31 @@ fun DownApp() {
                 "这个链接的格式不支持：只支持 http、https、ftp 开头的下载链接",
                 Toast.LENGTH_LONG,
             ).show()
-            return false
+            return CreateOutcome.REJECTED
         }
-        // Audit A2 (UI side): the same URL twice would produce two
-        // records fighting over one file name — refuse politely.
-        val dup = store.tasks.any {
-            it.url == url && it.status != TaskStatus.DONE && it.status != TaskStatus.FAILED
-        }
-        if (dup) {
-            Toast.makeText(context, "这个链接已经在任务列表里了", Toast.LENGTH_SHORT).show()
-            return false
+        // v1.6 multi-source: mirrors of the SAME file (validated by
+        // the engine before a single byte is taken from them).
+        // Cleaned BEFORE the dedup verdict so the verdict judges
+        // exactly the mirror set the record would carry.
+        val cleanMirrors = mirrors.map { it.trim() }
+            .filter { it.startsWith("http") && it != url }
+            .distinct()
+        // v5.4: the ONE dedup verdict (see CreateDedup) — an
+        // unfinished task (QUEUED / RUNNING / PAUSED / FAILED)
+        // holding this link (as primary or as a mirror) blocks
+        // creation; DONE history does not. On a block: no
+        // record, no enqueue, no service start.
+        if (CreateDedup.isDuplicate(store.tasks, url, cleanMirrors)) {
+            if (!quietDuplicate) {
+                Toast.makeText(context, "这个链接已经在任务列表里了", Toast.LENGTH_SHORT).show()
+            }
+            return CreateOutcome.DUPLICATE
         }
         // v1.6: newTask flags .m3u8 links as HLS stream tasks.
         val t = DownloadCenter.newTask(url)
         if (referer.isNotBlank()) t.headers["Referer"] = referer
         if (fileName.isNotBlank()) t.fileName = fileName.trim()
-        // v1.6 multi-source: mirrors of the SAME file (validated by
-        // the engine before a single byte is taken from them).
-        t.sources = mirrors.map { it.trim() }
-            .filter { it.startsWith("http") && it != url }
-            .distinct().toMutableList()
+        t.sources = cleanMirrors.toMutableList()
         if (daily && pendingScheduleAt > 0) {
             // v1.8: daily recurrence — the service re-queues the
             // task for the same time every day after each run.
@@ -1020,7 +1038,7 @@ fun DownApp() {
             },
             Toast.LENGTH_SHORT,
         ).show()
-        return true
+        return CreateOutcome.CREATED
     }
 
     /**
@@ -1047,7 +1065,7 @@ fun DownApp() {
         onCreated: () -> Unit = {},
     ) {
         if (!com.tuxundown.android.core.DownloadEngine.isHlsUrl(url)) {
-            if (createTask(url, referer, fileName, mirrors, daily)) onCreated()
+            if (createTask(url, referer, fileName, mirrors, daily) == CreateOutcome.CREATED) onCreated()
             return
         }
         Thread {
@@ -1065,7 +1083,7 @@ fun DownApp() {
                         com.tuxundown.android.core.Hls.sortedForChoice(variants),
                         referer, fileName, mirrors, daily, onCreated,
                     )
-                } else if (createTask(url, referer, fileName, mirrors, daily)) {
+                } else if (createTask(url, referer, fileName, mirrors, daily) == CreateOutcome.CREATED) {
                     onCreated()
                 }
             }
@@ -1181,6 +1199,15 @@ fun DownApp() {
         Thread {
             var created = 0
             var skipped = 0
+            // v5.4: duplicates are counted separately from the
+            // "not a direct file" skips and named in the summary
+            // (the per-link duplicate toast is quieted here —
+            // the summary below is the batch's one report).
+            // Batch self-dedup falls out of the funnel: each
+            // accepted link is in the store before the next line
+            // is judged, so a link appearing twice in one batch
+            // creates once and counts once as a duplicate.
+            var dupSkipped = 0
             for (line in lines) {
                 val make: String? = when {
                     FtpClient.isFtpUrl(line) -> line
@@ -1193,21 +1220,26 @@ fun DownApp() {
                 if (make == null) {
                     skipped++
                 } else {
-                    var ok = false
+                    var outcome = CreateOutcome.REJECTED
                     val latch = java.util.concurrent.CountDownLatch(1)
                     activity.runOnUiThread {
-                        ok = createTask(make)
+                        outcome = createTask(make, quietDuplicate = true)
                         latch.countDown()
                     }
                     latch.await()
-                    if (ok) created++ else skipped++
+                    when (outcome) {
+                        CreateOutcome.CREATED -> created++
+                        CreateOutcome.DUPLICATE -> dupSkipped++
+                        CreateOutcome.REJECTED -> skipped++
+                    }
                 }
             }
             activity.runOnUiThread {
                 Toast.makeText(
                     context,
                     "批量完成：新建 $created 个任务" +
-                        (if (skipped > 0) "，跳过 $skipped 个（重复或网页资源需单独选）" else "") +
+                        (if (dupSkipped > 0) "，跳过了 $dupSkipped 个重复" else "") +
+                        (if (skipped > 0) "，跳过 $skipped 个（网页资源需单独选）" else "") +
                         (if (thunderFailed > 0) "，$thunderFailed 个迅雷链接解不开" else ""),
                     Toast.LENGTH_LONG,
                 ).show()
@@ -2971,13 +3003,27 @@ fun DownApp() {
                         // home screen can reopen this same list.
                         sniffOpen = false
                         var created = 0
+                        // v5.4: batch summary names the duplicates
+                        // it skipped (per-link toast quieted).
+                        var dupSkipped = 0
                         for (res in chosen) {
-                            if (createTask(res.url, sniffPage)) created++
+                            when (createTask(res.url, sniffPage, quietDuplicate = true)) {
+                                CreateOutcome.CREATED -> created++
+                                CreateOutcome.DUPLICATE -> dupSkipped++
+                                CreateOutcome.REJECTED -> Unit
+                            }
                         }
                         if (chosen.isEmpty()) {
                             Toast.makeText(context, "先勾选要下载的资源", Toast.LENGTH_SHORT).show()
-                        } else if (created > 0) {
-                            Toast.makeText(context, "已新建 $created 个下载任务", Toast.LENGTH_SHORT).show()
+                        } else if (created > 0 || dupSkipped > 0) {
+                            Toast.makeText(
+                                context,
+                                (if (created > 0) "已新建 $created 个下载任务" else "") +
+                                    (if (dupSkipped > 0) {
+                                        (if (created > 0) "，" else "") + "跳过了 $dupSkipped 个重复"
+                                    } else ""),
+                                Toast.LENGTH_SHORT,
+                            ).show()
                         }
                     }
                 ) { Text("下载所选（${sniffChecked.size}）") }
@@ -3476,7 +3522,7 @@ fun DownApp() {
                                 if (createTask(
                                         v.url, pick.referer, pick.fileName,
                                         pick.mirrors, pick.daily,
-                                    )
+                                    ) == CreateOutcome.CREATED
                                 ) {
                                     // The task must be an HLS task
                                     // even when the variant URL does
@@ -3673,6 +3719,15 @@ fun DownApp() {
     }
     } // v2.1 safe-area Box
 }
+
+/**
+ * v5.4: the outcome of the home screen's single-create funnel
+ * (see CreateDedup for the dedup verdict behind DUPLICATE).
+ * Batch callers count DUPLICATE outcomes and report them in
+ * their summary; single-create callers let the funnel's own
+ * toast speak.
+ */
+enum class CreateOutcome { CREATED, DUPLICATE, REJECTED }
 
 fun kindLabel(kind: String): String = when (kind) {
     "apk" -> "安装包"
@@ -5671,10 +5726,11 @@ fun SettingsScreen(
     }
     fun downloadUpdate() {
         val l = updateLatest ?: return
-        val dup = DownloadCenter.store.tasks.any {
-            it.url == l.apkUrl && it.status != TaskStatus.DONE &&
-                it.status != TaskStatus.FAILED
-        }
+        // v5.4: the in-app update download is a creation entry
+        // point too — it goes through the same CreateDedup
+        // verdict as every other funnel (was: its own inline
+        // copy of the old rule; before that, none).
+        val dup = CreateDedup.isDuplicate(DownloadCenter.store.tasks, l.apkUrl)
         if (dup) {
             Toast.makeText(context, "这个更新已经在任务列表里了", Toast.LENGTH_SHORT).show()
             return

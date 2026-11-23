@@ -18,10 +18,10 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import com.tuxundown.android.core.CreateDedup
 import com.tuxundown.android.core.DownloadCenter
 import com.tuxundown.android.core.Errors
 import com.tuxundown.android.core.TaskRecord
-import com.tuxundown.android.core.TaskStatus
 import com.tuxundown.android.sniff.SniffResult
 import com.tuxundown.android.sniff.Sniffer
 
@@ -353,10 +353,11 @@ class SniffActivity : Activity() {
         // the funnel every path ends in, so the rule sits here
         // too, in depth.
         if (!com.tuxundown.android.core.LinkSchemes.isSupported(url)) return false
-        val dup = DownloadCenter.store.tasks.any {
-            it.url == url && it.status != TaskStatus.DONE && it.status != TaskStatus.FAILED
-        }
-        if (dup) return false
+        // v5.4: the ONE dedup verdict (see CreateDedup), same as
+        // every other creation funnel — no record, no enqueue
+        // on a block; the callers show the "already in the
+        // list" toast for a false return.
+        if (CreateDedup.isDuplicate(DownloadCenter.store.tasks, url)) return false
         // v1.6: newTask also flags .m3u8 links as HLS tasks.
         val task = DownloadCenter.newTask(url, headers)
         DownloadCenter.store.add(task)
