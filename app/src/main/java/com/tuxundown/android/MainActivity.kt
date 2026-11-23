@@ -695,7 +695,7 @@ fun DownApp() {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "5.7.0"
+        }.getOrNull() ?: "5.8.0"
     }
     var showGuide by remember {
         // v2.2 safe mode: after 2+ consecutive crashes, first-
@@ -7417,9 +7417,9 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 嗅探更会抓了：现在很多网页用的响应式图片组、还有藏在脚本数据里、斜杠被转义过的媒体地址，都能抓出来了；file:// 这类根本下不了的假链接不再混进结果列表，在浏览器里点到时会当场说明原因。在内置浏览器里登录后嗅探到的文件，建任务时也会带上登录状态，不会再白白失败\n" +
-            "· 嗅探历史能一键重新嗅探：新建下载框里的历史记录旁多了「重新嗅探」按钮，点一下就用原来的网页地址重新抓一遍，结果和新嗅探一模一样；抓成功会顶到历史最前面，抓失败了原来的记录和上次的结果都不动\n" +
-            "· 测大小更讲礼貌，列表也更干净：测每个文件大小时，对同一个网站最多同时测 3 个，不给对方服务器添堵；同一个文件被页面用不同写法链接了几次，现在只列一行，不再重复出现",
+            "· 新增「自动读取校验文件」（在设置里，默认关）：打开后，新建下载时会顺手看一眼网站有没有把 .sha256 / .md5 校验文件放在文件旁边，有就记下来，下完按网站给的值核对，卡片上会写明「已按网站给的校验值核对」；关着时不会发任何额外请求\n" +
+            "· 校验值粘贴更宽容了：从发布页把整行复制下来（带着文件名、带着「sha256:」前缀，或者另一种常见写法）现在都能认出来，不用自己动手删多余的部分；校验进行中改了校验值，旧结果也不会再错算到新值头上；删掉任务会顺手停掉正在跑的校验，不再白读一遍大文件\n" +
+            "· 重试会自己错峰了：网络或服务器抖动时，以前多个任务和连接会在同一瞬间齐刷刷重试，这一版给每次等待加了随机错峰，不再一拥而上；每次等待只会更短、不会更长，原来的等待上限不变",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
             "· 文件直链 → 直接开始多线程下载，还能预先改好保存文件名\n" +
@@ -8550,7 +8550,7 @@ fun TaskCard(
                     val version = runCatching {
                         ctx.packageManager.getPackageInfo(ctx.packageName, 0)
                             .versionName
-                    }.getOrNull() ?: "5.7.0"
+                    }.getOrNull() ?: "5.8.0"
                     val cm = ctx.getSystemService(
                         android.content.Context.CLIPBOARD_SERVICE,
                     ) as android.content.ClipboardManager
