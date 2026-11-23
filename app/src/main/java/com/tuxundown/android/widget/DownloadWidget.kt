@@ -94,7 +94,11 @@ object WidgetUpdater {
             val views = RemoteViews(context.packageName, R.layout.widget_download)
             views.setTextViewText(
                 R.id.widget_title,
-                if (s.activeCount > 0) "正在下载 ${s.activeCount} 个任务" else "TuxunDown",
+                // v5.3 (audit round 38): the wording verdict is
+                // WidgetState.headline's — 正在下载 only when a
+                // task is really RUNNING, 排队中 for a queue that
+                // is merely waiting / parked (see WidgetState).
+                WidgetState.headline(s),
             )
             views.setTextViewText(
                 R.id.widget_line,

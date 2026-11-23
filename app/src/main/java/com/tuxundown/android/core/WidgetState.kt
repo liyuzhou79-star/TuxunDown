@@ -45,6 +45,26 @@ object WidgetState {
     }
 
     /**
+     * v5.3 (audit round 38): the widget's title line. It used to
+     * read 「正在下载 N 个任务」 whenever the active set was
+     * non-empty — but the active set is RUNNING + QUEUED, so a
+     * queue parked whole (等 WiFi / 等充电 / 断网停泊， nothing
+     * actually transferring, the service possibly not even
+     * alive) was announced as downloading. The tile's umbrella
+     * word for the same set is 进行中 and the card's word for a
+     * queued task is 排队中； the widget now says 正在下载 only
+     * when [Summary.anyRunning] proves something is really
+     * moving, and 排队中 otherwise. The empty case keeps the
+     * bare app name (the line below it already says
+     * 没有进行中的任务）.
+     */
+    fun headline(s: Summary): String = when {
+        s.activeCount <= 0 -> "TuxunDown"
+        s.anyRunning -> "正在下载 ${s.activeCount} 个任务"
+        else -> "排队中 ${s.activeCount} 个任务"
+    }
+
+    /**
      * v5.3 (audit round 38): ONE task's integer percent, in the
      * same Long arithmetic as [summary] — the single-task mirror
      * the task card and the notification's per-task texts read.

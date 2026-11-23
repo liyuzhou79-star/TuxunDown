@@ -270,6 +270,51 @@ class WidgetStateTest {
         assertEquals(100, WidgetState.taskPercent(over))
     }
 
+    // ---- v5.3 (audit round 38): widget headline wording ----
+
+    @Test
+    fun headlineSaysDownloadingOnlyWhenSomethingReallyRuns() {
+        val running = WidgetState.summary(
+            listOf(
+                task(TaskStatus.RUNNING, total = 100, downloaded = 10),
+                task(TaskStatus.QUEUED, total = 100, downloaded = 0),
+            )
+        )
+        assertEquals("正在下载 2 个任务", WidgetState.headline(running))
+    }
+
+    @Test
+    fun headlineNeverCallsAParkedQueueDownloading() {
+        // The round-38 divergence: an all-QUEUED active set
+        // (parked whole by a gate / an outage, nothing moving)
+        // was announced as 正在下载. The honest word is the
+        // card's own word for the state: 排队中.
+        val parked = WidgetState.summary(
+            listOf(
+                task(TaskStatus.QUEUED, total = 100, downloaded = 10),
+                task(TaskStatus.QUEUED, total = 100, downloaded = 0),
+            )
+        )
+        assertEquals("排队中 2 个任务", WidgetState.headline(parked))
+    }
+
+    @Test
+    fun headlineIdleIsTheBareAppName() {
+        assertEquals(
+            "TuxunDown",
+            WidgetState.headline(WidgetState.summary(emptyList())),
+        )
+        // PAUSED / DONE / FAILED are outside the active set —
+        // the widget stays idle-named for them too.
+        val stopped = WidgetState.summary(
+            listOf(
+                task(TaskStatus.PAUSED, total = 100, downloaded = 10),
+                task(TaskStatus.FAILED, total = 100, downloaded = 10),
+            )
+        )
+        assertEquals("TuxunDown", WidgetState.headline(stopped))
+    }
+
     @Test
     fun unknownSizesGiveZeroPctNotAFakeNumber() {
         val s = WidgetState.summary(
