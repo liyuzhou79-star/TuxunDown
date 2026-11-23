@@ -1196,6 +1196,13 @@ fun DownApp() {
         }
             // v1.7: ftp:// lines are batch-eligible too (direct tasks).
             .filter { it.startsWith("http") || FtpClient.isFtpUrl(it) }
+        // v6.3 audit round 48: the batch loop inherits the
+        // extractor's cap (LinkExtract.MAX_LINKS) — a multi-line
+        // paste or a 4 MB .txt import otherwise fed it an
+        // unbounded line count, each page line costing a sniff.
+        // The overflow is counted and named, never silent.
+        val batchLines = LinkExtract.capBatch(lines)
+        val batchDropped = lines.size - batchLines.size
         if (lines.isEmpty()) {
             if (thunderFailed > 0) {
                 Toast.makeText(
@@ -1211,7 +1218,16 @@ fun DownApp() {
         if (scheduleMode == 1) pendingScheduleAt = 0L
         showAdd = false
         urlText = ""
-        Toast.makeText(context, "正在批量处理 ${lines.size} 个链接…", Toast.LENGTH_SHORT).show()
+        Toast.makeText(
+            context,
+            "正在批量处理 ${batchLines.size} 个链接…" +
+                if (batchDropped > 0) {
+                    "（一次最多 ${LinkExtract.MAX_LINKS} 个，另有 $batchDropped 个这次没处理）"
+                } else {
+                    ""
+                },
+            Toast.LENGTH_SHORT,
+        ).show()
         Thread {
             var created = 0
             var skipped = 0
@@ -1224,7 +1240,7 @@ fun DownApp() {
             // is judged, so a link appearing twice in one batch
             // creates once and counts once as a duplicate.
             var dupSkipped = 0
-            for (line in lines) {
+            for (line in batchLines) {
                 val make: String? = when {
                     FtpClient.isFtpUrl(line) -> line
                     LinkRouter.looksLikeFileUrl(line) -> line
@@ -6024,7 +6040,13 @@ fun DiagnosticsScreen(version: String, onBack: () -> Unit) {
                                     val text = clip.getItemAt(0)
                                         .coerceToText(context)?.toString() ?: ""
                                     if (text.isNotBlank()) {
-                                        ccUrl = text.trim()
+                                        // v6.3 audit round 48: the
+                                        // same shared-text caliber
+                                        // as the SEND intake (trim +
+                                        // MAX_SHARED_CHARS cap) —
+                                        // this paste was the one
+                                        // clipboard read with no cap.
+                                        ccUrl = LinkSchemes.sanitizeSharedText(text)
                                         ccUrlError = false
                                     }
                                 }

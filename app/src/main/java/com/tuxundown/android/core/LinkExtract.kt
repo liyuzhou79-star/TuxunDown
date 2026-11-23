@@ -45,4 +45,19 @@ object LinkExtract {
         }
         return out
     }
+
+    /**
+     * v6.3 audit round 48: the multi-line BATCH path's cap.
+     * [extract] has always capped its output at [MAX_LINKS],
+     * but a multi-line paste (or a .txt import, itself capped
+     * at 4 MB of bytes) reached the batch loop line by line
+     * with NO count cap at all — a 4 MB file of short lines is
+     * ~100k lines, and every non-file line costs a network
+     * sniff in sequence. The batch now keeps the first
+     * [MAX_LINKS] eligible lines, the same caliber as
+     * [extract]; the caller says plainly how many were left
+     * over so nothing is dropped silently.
+     */
+    fun capBatch(lines: List<String>): List<String> =
+        if (lines.size <= MAX_LINKS) lines else lines.take(MAX_LINKS)
 }

@@ -83,4 +83,26 @@ class LinkExtractTest {
         val text = (1..150).joinToString(" ") { "https://a.com/f$it.zip" }
         assertEquals(LinkExtract.MAX_LINKS, LinkExtract.extract(text).size)
     }
+
+    // v6.3 audit round 48: the batch path shares the extract cap.
+
+    @Test
+    fun batchUnderCapIsUnchanged() {
+        val lines = listOf("https://a.com/1.zip", "https://a.com/2.zip")
+        assertEquals(lines, LinkExtract.capBatch(lines))
+    }
+
+    @Test
+    fun batchExactlyAtCapIsUnchanged() {
+        val lines = (1..LinkExtract.MAX_LINKS).map { "https://a.com/f$it.zip" }
+        assertEquals(lines, LinkExtract.capBatch(lines))
+    }
+
+    @Test
+    fun batchOverCapKeepsTheFirstMaxLinksInOrder() {
+        val lines = (1..150).map { "https://a.com/f$it.zip" }
+        val capped = LinkExtract.capBatch(lines)
+        assertEquals(LinkExtract.MAX_LINKS, capped.size)
+        assertEquals(lines.take(LinkExtract.MAX_LINKS), capped)
+    }
 }
