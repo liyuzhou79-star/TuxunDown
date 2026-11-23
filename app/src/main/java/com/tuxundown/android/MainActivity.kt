@@ -95,6 +95,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.Lifecycle
@@ -134,6 +135,7 @@ import com.tuxundown.android.core.FtpClient
 import com.tuxundown.android.core.LinkExtract
 import com.tuxundown.android.core.MirrorAccess
 import com.tuxundown.android.core.LinkSchemes
+import com.tuxundown.android.core.NotificationStatus
 import com.tuxundown.android.core.QuietHours
 import com.tuxundown.android.core.ThunderLink
 import com.tuxundown.android.core.ProxySettings
@@ -7529,6 +7531,33 @@ fun SettingsScreen(
         }
         if (groupVisible("s-notify")) item(key = "s-notify") {
             SettingsGroup("提示") {
+                // v6.8 Step C: notification self-check line.
+                // Both facts are read HERE, during composition
+                // (the settings status lines' existing caliber —
+                // no polling, no timer): the permission state
+                // from the system (the app's first
+                // areNotificationsEnabled read site) and quiet
+                // hours from DownloadCenter. If the permission
+                // read throws or comes back unknown,
+                // NotificationStatus returns null and the line
+                // is simply absent — never a guessed value.
+                val notifyStatusLine = runCatching {
+                    NotificationStatus.statusLine(
+                        notificationsEnabled =
+                            NotificationManagerCompat.from(context)
+                                .areNotificationsEnabled(),
+                        quietEnabled = quietOn,
+                        quietActive = DownloadCenter.quietHoursActive(),
+                    )
+                }.getOrNull()
+                if (notifyStatusLine != null) {
+                    Text(
+                        notifyStatusLine,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
                 Row(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -7554,7 +7583,7 @@ fun SettingsScreen(
                         Text("通知静默时段")
                         Text(
                             "开启后，这个时段里下载完成不震动、不响铃；" +
-                                "完成通知会照常出现在通知栏，上面有「打开 / 分享」按钮。" +
+                                "通知开着的时候，完成通知会出现在通知栏，上面有「打开 / 分享」按钮。" +
                                 "几个任务同时下完会合并成一条通知，不刷屏。",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
