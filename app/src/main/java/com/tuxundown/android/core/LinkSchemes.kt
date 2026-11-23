@@ -55,6 +55,26 @@ object LinkSchemes {
     }
 
     /**
+     * Clean a mirror list typed into a mirror field (the add
+     * dialog's mirrors field, whose lines reach createTask, and
+     * the mirror-management dialog): trim each entry, keep only
+     * the schemes [isSupported] accepts — the SAME caliber as the
+     * main link's door, so an ftp mirror is addable here too and
+     * a string that merely starts with the letters "http" is
+     * not — drop the primary address itself and duplicates,
+     * preserving first-seen order. Rejected entries are dropped
+     * silently, the shape both fields have always had; the engine
+     * still same-file-validates every kept mirror before taking
+     * a single byte from it (SourceCheck).
+     */
+    fun cleanMirrors(raw: List<String>, primaryUrl: String): List<String> {
+        val primary = primaryUrl.trim()
+        return raw.map { it.trim() }
+            .filter { isSupported(it) && it != primary }
+            .distinct()
+    }
+
+    /**
      * Clean text arriving from another app's share intent:
      * null-safe, trimmed, and capped at [MAX_SHARED_CHARS] so a
      * hostile or broken sender cannot park megabytes in the add

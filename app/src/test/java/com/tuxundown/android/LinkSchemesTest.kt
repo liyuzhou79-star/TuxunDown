@@ -45,6 +45,84 @@ class LinkSchemesTest {
         assertFalse(LinkSchemes.isSupported("   "))
     }
 
+    // v6.3 step C: the mirror fields' cleaning IS isSupported —
+    // these pin the cleanMirrors layer itself (the scheme verdicts
+    // above already pin isSupported on its own).
+
+    @Test
+    fun mirrorCleaningAcceptsHttpHttpsFtp() {
+        val kept = LinkSchemes.cleanMirrors(
+            listOf(
+                "http://m1.com/f.zip",
+                "https://m2.com/f.zip",
+                // An ftp mirror was NOT addable under the old
+                // startsWith("http") caliber; now it is.
+                "ftp://m3.com/f.zip",
+            ),
+            primaryUrl = "https://a.com/f.zip",
+        )
+        assertEquals(
+            listOf(
+                "http://m1.com/f.zip",
+                "https://m2.com/f.zip",
+                "ftp://m3.com/f.zip",
+            ),
+            kept,
+        )
+    }
+
+    @Test
+    fun mirrorCleaningAcceptsUppercaseSchemeAndTrims() {
+        val kept = LinkSchemes.cleanMirrors(
+            listOf("  HTTP://m1.com/f.zip  ", "\tHttps://m2.com/f.zip "),
+            primaryUrl = "https://a.com/f.zip",
+        )
+        assertEquals(
+            listOf("HTTP://m1.com/f.zip", "Https://m2.com/f.zip"),
+            kept,
+        )
+    }
+
+    @Test
+    fun mirrorCleaningRejectsUnsupportedAndGarbage() {
+        val kept = LinkSchemes.cleanMirrors(
+            listOf(
+                "file:///sdcard/f.zip",
+                // Merely starts with the letters "http": the old
+                // caliber kept these, isSupported refuses them.
+                "http",
+                "http乱写",
+                "http:example.com/f.zip",
+                "",
+                "   ",
+            ),
+            primaryUrl = "https://a.com/f.zip",
+        )
+        assertEquals(emptyList<String>(), kept)
+    }
+
+    @Test
+    fun mirrorCleaningDropsPrimaryAndDuplicatesKeepingOrder() {
+        val kept = LinkSchemes.cleanMirrors(
+            listOf(
+                "https://m2.com/f.zip",
+                "https://a.com/f.zip", // the primary itself
+                "https://m1.com/f.zip",
+                " https://m2.com/f.zip ", // duplicate after trim
+            ),
+            primaryUrl = "https://a.com/f.zip",
+        )
+        assertEquals(
+            listOf("https://m2.com/f.zip", "https://m1.com/f.zip"),
+            kept,
+        )
+        // An empty field cleans to an empty list.
+        assertEquals(
+            emptyList<String>(),
+            LinkSchemes.cleanMirrors(emptyList(), "https://a.com/f.zip"),
+        )
+    }
+
     @Test
     fun sharedTextIsTrimmedAndCapped() {
         assertEquals("", LinkSchemes.sanitizeSharedText(null))

@@ -1026,9 +1026,12 @@ fun DownApp() {
         // the engine before a single byte is taken from them).
         // Cleaned BEFORE the dedup verdict so the verdict judges
         // exactly the mirror set the record would carry.
-        val cleanMirrors = mirrors.map { it.trim() }
-            .filter { it.startsWith("http") && it != url }
-            .distinct()
+        // v6.3 audit round 48 (step C): mirror cleaning now
+        // shares the main link's caliber — LinkSchemes
+        // .cleanMirrors judges with isSupported, so ftp mirrors
+        // are addable and "http"-prefixed garbage is dropped
+        // here instead of later (silently, as before).
+        val cleanMirrors = LinkSchemes.cleanMirrors(mirrors, url)
         // v5.4: the ONE dedup verdict (see CreateDedup) — an
         // unfinished task (QUEUED / RUNNING / PAUSED / FAILED)
         // holding this link (as primary or as a mirror) blocks
@@ -3640,9 +3643,12 @@ fun DownApp() {
             },
             confirmButton = {
                 TextButton(onClick = {
-                    st.sources = sourceText.lines().map { it.trim() }
-                        .filter { it.startsWith("http") && it != st.url }
-                        .distinct().toMutableList()
+                    // v6.3 audit round 48 (step C): same shared
+                    // mirror cleaning as createTask (LinkSchemes
+                    // .cleanMirrors / isSupported caliber).
+                    st.sources = LinkSchemes.cleanMirrors(
+                        sourceText.lines(), st.url,
+                    ).toMutableList()
                     // v5.4: a mirror removed from the list takes
                     // its recorded verdict and any override with
                     // it — no orphan records left behind.
