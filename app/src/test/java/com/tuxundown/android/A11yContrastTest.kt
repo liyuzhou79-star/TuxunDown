@@ -68,6 +68,51 @@ class A11yContrastTest {
     }
 
     @Test
+    fun dangerText_clearsTextBarOnEverySurfaceOfItsTheme() {
+        // Audit round 70: the 删除文件 button text, theme-split.
+        val light = A11yContrast.dangerTextArgb(dark = false)
+        assertTrue(
+            "light danger on surface",
+            A11yContrast.ratio(light, A11yContrast.LIGHT_SURFACE) >= 4.5,
+        )
+        assertTrue(
+            "light danger on background",
+            A11yContrast.ratio(light, A11yContrast.LIGHT_BACKGROUND) >= 4.5,
+        )
+        val dark = A11yContrast.dangerTextArgb(dark = true)
+        assertTrue(
+            "dark danger on surface",
+            A11yContrast.ratio(dark, A11yContrast.DARK_SURFACE) >= 4.5,
+        )
+        assertTrue(
+            "dark danger on background",
+            A11yContrast.ratio(dark, A11yContrast.DARK_BACKGROUND) >= 4.5,
+        )
+        assertTrue(
+            "dark danger on AMOLED black",
+            A11yContrast.ratio(dark, A11yContrast.AMOLED_SURFACE) >= 4.5,
+        )
+    }
+
+    @Test
+    fun dangerText_pre70FixedRedReallyFailed() {
+        // The regression round 70 fixes, pinned: the fixed
+        // WinPalette.Red #E81123 as button TEXT is under the
+        // 4.5:1 body-text bar on the light background and on
+        // both dark surfaces (it only passes on pure white
+        // and, barely, on AMOLED black).
+        assertTrue(
+            A11yContrast.ratio(0xFFE81123, A11yContrast.LIGHT_BACKGROUND) < 4.5,
+        )
+        assertTrue(
+            A11yContrast.ratio(0xFFE81123, A11yContrast.DARK_SURFACE) < 4.5,
+        )
+        assertTrue(
+            A11yContrast.ratio(0xFFE81123, A11yContrast.DARK_BACKGROUND) < 4.5,
+        )
+    }
+
+    @Test
     fun sniffFab_whiteTextFailsOnTheGreen_blackTextPasses() {
         // SniffActivity's floating button: white on the brand
         // green is 2.90:1 (fails even the 3:1 graphics bar);

@@ -508,6 +508,19 @@ object WinPalette {
 fun statusTextGreen(): Color =
     if (isSystemInDarkTheme()) WinPalette.ChartGreen else WinPalette.TextGreen
 
+/**
+ * Audit round 70 (v8.5 step A): the red for normal-size
+ * DANGER text (the 删除文件 button and its confirmation) —
+ * the theme-split pair pinned in A11yContrast.dangerTextArgb.
+ * The fixed WinPalette.Red (#E81123) is only 3.35:1 on the
+ * dark card surface and 4.32:1 on the light background, both
+ * under the 4.5:1 body-text bar; WinPalette.Red itself stays
+ * for graphics and large/bold text, where it clears 3:1.
+ */
+@androidx.compose.runtime.Composable
+fun dangerTextRed(): Color =
+    Color(com.tuxundown.android.core.A11yContrast.dangerTextArgb(isSystemInDarkTheme()))
+
 /** File-type badge colors (v1.4 item 8), readable in both themes. */
 fun kindColor(kind: String): Color = when (kind) {
     "apk" -> Color(0xFF2E9E4F)
@@ -8693,9 +8706,10 @@ fun SettingsGroup(title: String, content: @androidx.compose.runtime.Composable (
  * OutlinedButtons, each alone on its own line, stretching the
  * card; these are one size smaller (tight padding, no forced
  * full width) and live in a FlowRow so they sit side by side
- * where they fit. [red] marks a destructive action with the
- * card's existing danger red (WinPalette.Red — the same red
- * as the ghost mark, FAILED text and the swipe-delete side).
+ * where they fit. [red] marks a destructive action; since
+ * audit round 70 its TEXT takes the theme-split danger red
+ * (dangerTextRed / A11yContrast.dangerTextArgb) — the fixed
+ * WinPalette.Red is under the 4.5:1 text bar on dark cards.
  */
 @androidx.compose.runtime.Composable
 fun CompactActionButton(
@@ -8710,7 +8724,7 @@ fun CompactActionButton(
         Text(
             text,
             style = MaterialTheme.typography.labelLarge,
-            color = if (red) WinPalette.Red else Color.Unspecified,
+            color = if (red) dangerTextRed() else Color.Unspecified,
         )
     }
     if (filled) {
@@ -10505,7 +10519,7 @@ fun TaskCard(
                             ).show()
                         }
                     }.start()
-                }) { Text("删除文件", color = WinPalette.Red) }
+                }) { Text("删除文件", color = dangerTextRed()) }
             },
             dismissButton = {
                 TextButton(onClick = { deleteFileConfirm = false }) { Text("取消") }

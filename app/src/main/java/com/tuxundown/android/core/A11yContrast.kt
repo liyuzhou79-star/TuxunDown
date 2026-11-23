@@ -65,6 +65,26 @@ object A11yContrast {
                 if (dark) 0xFFE57373 else 0xFFB3261E
         }
 
+    /**
+     * Audit round 70 (v8.5 step A): the danger-red TEXT colour
+     * (the detail card's 删除文件 button and its confirmation
+     * dialog), theme-split like the status greens and the
+     * health dots above. The fixed WinPalette.Red #E81123 the
+     * button used to take only clears the text bar on the
+     * light SURFACE (4.63:1 on #FFFFFF) — it is 4.32:1 on the
+     * light background #F7F7F7 and far under the bar on both
+     * dark surfaces (3.35:1 on #242424, 3.72:1 on #1B1B1B;
+     * 4.54:1 on AMOLED black). So the light entry darkens a
+     * touch — the WARN-dot move above — to #DD0F21 (5.04:1 on
+     * #FFFFFF, 4.71:1 on #F7F7F7) and the dark entry brightens
+     * to #FF5252 (4.86:1 on #242424, 5.40:1 on #1B1B1B, 6.58:1
+     * on black). WinPalette.Red itself stays untouched: its
+     * other uses are graphics and large/bold text, where the
+     * bar is 3:1 and it still clears it.
+     */
+    fun dangerTextArgb(dark: Boolean): Long =
+        if (dark) 0xFFFF5252 else 0xFFDD0F21
+
     /** The sniff browser's floating-button green (SniffActivity). */
     const val SNIFF_FAB_GREEN: Long = 0xFF06B025
     const val WHITE: Long = 0xFFFFFFFF
