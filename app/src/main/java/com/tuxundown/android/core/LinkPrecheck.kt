@@ -13,6 +13,17 @@ package com.tuxundown.android.core
  *   "this URL is gone"; every other answer (200, a redirect, a
  *   401/403 refusal, a 5xx, a timeout, no network at all) proves
  *   nothing either way and never raises the flag.
+ * - And only when the answer came on a chain that never left
+ *   the task's own host (v8.6, Step B of the round-67 review).
+ *   Since v8.2 the probe follows redirects manually and a
+ *   cross-host hop goes out WITHOUT the task's Cookie
+ *   (SessionScope withholds it from any other host), so a
+ *   404/410 from another host was answered to a
+ *   credential-reduced request — it can be a login wall
+ *   wearing a not-found mask, not proof the file is gone.
+ *   The flag simply stays down; the real start re-probes
+ *   for itself regardless, exactly as with any other
+ *   inconclusive answer.
  * - A flag is a WARNING, never a verdict: when the task's turn
  *   comes it starts exactly as before and the engine's real
  *   probe decides. The card copy says so.
@@ -35,6 +46,17 @@ object LinkPrecheck {
 
     /** The only two answers that mean "gone". */
     fun isDeadCode(code: Int): Boolean = code == 404 || code == 410
+
+    /**
+     * The flag verdict (v8.6, Step B): [isDeadCode] AND the
+     * answer arrived on a chain that never left the task's own
+     * host. Once a hop leaves the host, the request that earns
+     * the final answer carries no Cookie (SessionScope), so
+     * even a 404/410 from out there proves no more than a 403
+     * does — nothing either way — and must not convict.
+     */
+    fun isDeadVerdict(code: Int, chainLeftHost: Boolean): Boolean =
+        !chainLeftHost && isDeadCode(code)
 
     /**
      * May this task be pre-checked now? QUEUED (not parked by an

@@ -26,6 +26,27 @@ class LinkPrecheckTest {
         }
     }
 
+    // ---- v8.6 (Step B): a cross-host answer cannot convict ----
+
+    @Test
+    fun deadVerdictNeedsSameHostChain() {
+        // The chain never left the task's host: the answering
+        // request carried the task's Cookie, so 404/410 still
+        // mean what they always meant.
+        assertTrue(LinkPrecheck.isDeadVerdict(404, chainLeftHost = false))
+        assertTrue(LinkPrecheck.isDeadVerdict(410, chainLeftHost = false))
+        // The chain crossed hosts: from that hop on the request
+        // carried no Cookie (SessionScope), so even a 404/410
+        // may be a login wall in a not-found mask — it proves
+        // nothing and must not raise the flag.
+        assertFalse(LinkPrecheck.isDeadVerdict(404, chainLeftHost = true))
+        assertFalse(LinkPrecheck.isDeadVerdict(410, chainLeftHost = true))
+        // Non-dead codes never convict on either kind of chain.
+        assertFalse(LinkPrecheck.isDeadVerdict(403, chainLeftHost = false))
+        assertFalse(LinkPrecheck.isDeadVerdict(200, chainLeftHost = true))
+        assertFalse(LinkPrecheck.isDeadVerdict(301, chainLeftHost = true))
+    }
+
     @Test
     fun candidatesAreQueuedDueAndFetchable() {
         assertTrue(LinkPrecheck.isCandidate(queued(), now))

@@ -308,14 +308,19 @@ class DownloadService : Service() {
      *  lesson). Rides the configured proxy and carries the task's
      *  own session headers, exactly like the real probe will. */
     private fun probeLinkDead(task: TaskRecord): Boolean {
-        var code = headRequestCode(task, "HEAD")
-        if (code == 405 || code == 501) {
-            code = headRequestCode(task, "GET")
+        var answer = headRequestCode(task, "HEAD")
+        if (answer.first == 405 || answer.first == 501) {
+            answer = headRequestCode(task, "GET")
         }
-        return LinkPrecheck.isDeadCode(code)
+        return LinkPrecheck.isDeadVerdict(answer.first, answer.second)
     }
 
-    private fun headRequestCode(task: TaskRecord, method: String): Int {
+    /** The probe's final answer: the terminal response code,
+     *  and whether the redirect chain ever left the task's own
+     *  host on the way (v8.6, Step B — a cross-host answer was
+     *  earned without the task's Cookie, so it cannot convict;
+     *  see LinkPrecheck.isDeadVerdict). */
+    private fun headRequestCode(task: TaskRecord, method: String): Pair<Int, Boolean> {
         // v8.2 audit round 67: redirects are followed MANUALLY
         // (see AuxRedirect). This probe carries the task's
         // Cookie; a platform-followed hop would re-send it to
@@ -324,6 +329,8 @@ class DownloadService : Service() {
         // Cookie only ever reaches the task's own host.
         var current = task.url
         var redirects = 0
+        val ownerHost = SessionScope.hostOf(task.url)
+        var leftHost = false
         while (true) {
             val c = ProxyState.open(java.net.URL(current))
             var next: String? = null
@@ -341,11 +348,18 @@ class DownloadService : Service() {
                 task.headers["Referer"]?.let { c.setRequestProperty("Referer", it) }
                 if (method == "GET") c.setRequestProperty("Range", "bytes=0-0")
                 val code = c.responseCode
-                if (!AuxRedirect.isRedirect(code)) return code
+                if (!AuxRedirect.isRedirect(code)) return code to leftHost
                 next = AuxRedirect.nextUrl(
                     current, c.getHeaderField("Location"), redirects,
                 )
-                if (next == null) return code
+                if (next == null) return code to leftHost
+                // v8.6 (Step B): remember the chain left the
+                // task's host — from this hop on the Cookie no
+                // longer rides (SessionScope), so the terminal
+                // answer cannot convict the link. An unparseable
+                // hop host counts as left (fail closed, the same
+                // way SessionScope judges doubt).
+                if (SessionScope.hostOf(next) != ownerHost) leftHost = true
             } finally {
                 if (next == null) {
                     // v4.1 (step A): same keep-alive discipline as the
