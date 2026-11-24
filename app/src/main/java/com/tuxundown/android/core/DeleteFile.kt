@@ -3,7 +3,8 @@ package com.tuxundown.android.core
 /**
  * v7.7.0 Step C2: 「删除文件」 on a DONE task's detail area —
  * pure decision + outcome logic (the Android side lives in
- * PublicStorage.deleteSavedFile and the card).
+ * PublicStorage.tryDeleteSavedFile / confirmDeleteSavedFile
+ * and the card).
  *
  * The action deletes the FILE ONLY. The task record stays and
  * is ghost-marked afterwards (GhostSnapshot.markMissing);
@@ -65,7 +66,7 @@ object DeleteFile {
         Block.ALREADY_GONE -> "文件已经不在了，不用再删；记录会标成「文件已不在」"
     }
 
-    enum class Outcome { DELETED, ALREADY_GONE, FAILED }
+    enum class Outcome { DELETED, ALREADY_GONE, FAILED, CANCELLED }
 
     fun outcome(
         before: Reconcile.Verdict?,
@@ -93,5 +94,59 @@ object DeleteFile {
             "文件「$fileName」已经不在了，不用再删（记录保留，已标成文件已不在）"
         Outcome.FAILED ->
             "没删掉，系统没有允许删除；文件还在，记录也没有动"
+        Outcome.CANCELLED ->
+            "已取消删除，文件还在，记录也没有动"
+    }
+
+    // ---- v8.7.0: system delete confirmation route ----
+    //
+    // On Android 11+ a direct delete of a file in the public
+    // Download folder can be refused by the system
+    // (RecoverableSecurityException): the file is ours in
+    // MediaStore terms only sometimes, and Flyme refuses the
+    // plain delete outright. The official remedy is
+    // MediaStore.createDeleteRequest — a system confirmation
+    // dialog; the system deletes after the user confirms.
+    // route() is the pure decision of whether a failed direct
+    // delete should escalate to that dialog.
+
+    enum class Route { DONE, ASK_SYSTEM, GIVE_UP }
+
+    /**
+     * DONE when the direct delete already worked; ASK_SYSTEM
+     * when it failed, the platform has createDeleteRequest
+     * (API 30+) and a request could actually be built;
+     * GIVE_UP otherwise (the honest FAILED wording stands).
+     */
+    fun route(
+        directDeleted: Boolean,
+        sdkInt: Int,
+        requestAvailable: Boolean,
+    ): Route = when {
+        directDeleted -> Route.DONE
+        sdkInt >= 30 && requestAvailable -> Route.ASK_SYSTEM
+        else -> Route.GIVE_UP
+    }
+
+    /**
+     * The verdict after the system confirmation dialog comes
+     * back. Not confirmed is its own outcome — the user said
+     * no, nothing was deleted and nothing may be reported as
+     * deleted or failed. Confirmed: the re-probe decides, and
+     * an unconfirmable probe (UNKNOWN / none) falls back to
+     * the system's own answer — the user confirmed and the
+     * system performs the deletion itself, the same fallback
+     * caliber as [outcome].
+     */
+    fun afterSystemConfirm(
+        confirmed: Boolean,
+        after: Reconcile.Verdict?,
+    ): Outcome {
+        if (!confirmed) return Outcome.CANCELLED
+        return when (after) {
+            Reconcile.Verdict.MISSING -> Outcome.DELETED
+            Reconcile.Verdict.EXISTS -> Outcome.FAILED
+            else -> Outcome.DELETED
+        }
     }
 }

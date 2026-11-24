@@ -148,6 +148,99 @@ class DeleteFileTest {
         )
     }
 
+    // ---- v8.7.0: system-confirmation route + verdict ----
+
+    @Test
+    fun directSuccessNeverEscalates() {
+        assertEquals(
+            DeleteFile.Route.DONE,
+            DeleteFile.route(directDeleted = true, sdkInt = 35, requestAvailable = true),
+        )
+        assertEquals(
+            DeleteFile.Route.DONE,
+            DeleteFile.route(directDeleted = true, sdkInt = 29, requestAvailable = false),
+        )
+    }
+
+    @Test
+    fun failedDirectDeleteEscalatesOnlyWithRequestOnApi30Plus() {
+        assertEquals(
+            DeleteFile.Route.ASK_SYSTEM,
+            DeleteFile.route(directDeleted = false, sdkInt = 30, requestAvailable = true),
+        )
+        assertEquals(
+            DeleteFile.Route.ASK_SYSTEM,
+            DeleteFile.route(directDeleted = false, sdkInt = 35, requestAvailable = true),
+        )
+        // API 29 has no createDeleteRequest: honest failure stands.
+        assertEquals(
+            DeleteFile.Route.GIVE_UP,
+            DeleteFile.route(directDeleted = false, sdkInt = 29, requestAvailable = true),
+        )
+        // Request could not be built (e.g. not a MediaStore Uri).
+        assertEquals(
+            DeleteFile.Route.GIVE_UP,
+            DeleteFile.route(directDeleted = false, sdkInt = 35, requestAvailable = false),
+        )
+    }
+
+    @Test
+    fun systemDialogDeclinedIsCancelledNotFailed() {
+        assertEquals(
+            DeleteFile.Outcome.CANCELLED,
+            DeleteFile.afterSystemConfirm(false, Reconcile.Verdict.MISSING),
+        )
+        assertEquals(
+            DeleteFile.Outcome.CANCELLED,
+            DeleteFile.afterSystemConfirm(false, Reconcile.Verdict.EXISTS),
+        )
+        assertEquals(
+            DeleteFile.Outcome.CANCELLED,
+            DeleteFile.afterSystemConfirm(false, null),
+        )
+    }
+
+    @Test
+    fun systemDialogConfirmedFollowsTheReprobe() {
+        assertEquals(
+            DeleteFile.Outcome.DELETED,
+            DeleteFile.afterSystemConfirm(true, Reconcile.Verdict.MISSING),
+        )
+        assertEquals(
+            DeleteFile.Outcome.FAILED,
+            DeleteFile.afterSystemConfirm(true, Reconcile.Verdict.EXISTS),
+        )
+        // Probe cannot tell: the system's own confirmed answer
+        // decides, the same fallback as outcome().
+        assertEquals(
+            DeleteFile.Outcome.DELETED,
+            DeleteFile.afterSystemConfirm(true, Reconcile.Verdict.UNKNOWN),
+        )
+        assertEquals(
+            DeleteFile.Outcome.DELETED,
+            DeleteFile.afterSystemConfirm(true, null),
+        )
+    }
+
+    @Test
+    fun cancelledTextIsDistinctAndSaysNothingMoved() {
+        val cancelled = DeleteFile.outcomeText(DeleteFile.Outcome.CANCELLED, "a.bin")
+        assertTrue(cancelled.contains("取消"))
+        assertTrue(cancelled.contains("文件还在"))
+        for (o in listOf(
+            DeleteFile.Outcome.DELETED,
+            DeleteFile.Outcome.ALREADY_GONE,
+            DeleteFile.Outcome.FAILED,
+        )) {
+            assertNotEquals(cancelled, DeleteFile.outcomeText(o, "a.bin"))
+        }
+        // All four outcome texts stay pairwise distinct.
+        val texts = DeleteFile.Outcome.entries.map {
+            DeleteFile.outcomeText(it, "a.bin")
+        }
+        assertEquals(texts.size, texts.toSet().size)
+    }
+
     @Test
     fun outcomeTextsAreDistinctAndHonest() {
         val deleted = DeleteFile.outcomeText(DeleteFile.Outcome.DELETED, "a.bin")

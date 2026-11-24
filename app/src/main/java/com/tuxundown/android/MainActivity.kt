@@ -9,6 +9,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
@@ -880,7 +881,7 @@ fun DownApp() {
     val appVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "8.6.0"
+        }.getOrNull() ?: "8.7.0"
     }
     var showGuide by remember {
         // v2.2 safe mode: after 2+ consecutive crashes, first-
@@ -4765,6 +4766,84 @@ fun FilesScreen(onBack: () -> Unit) {
     var dupConfirm by remember { mutableStateOf(false) }
     val dupCancelFlag = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
 
+    // ---- v8.7.0: system delete confirmation (API 30+) ----
+    // A user-triggered delete whose direct attempt the
+    // system refused escalates to MediaStore
+    // .createDeleteRequest: the system shows its own dialog
+    // and deletes itself. While that dialog is up, the
+    // refused entries wait here as (entries, directDeleted
+    // count, isSingleDelete); their records are removed ONLY
+    // for files the re-probe then proves gone — a cancelled
+    // dialog removes nothing at all.
+    var sysDeletePending by remember {
+        mutableStateOf<Triple<List<DownloadedFiles.Entry>, Int, Boolean>?>(null)
+    }
+
+    fun finishSysDelete(confirmed: Boolean) {
+        val pending = sysDeletePending ?: return
+        sysDeletePending = null
+        if (!confirmed) {
+            Toast.makeText(
+                context, "已取消删除，文件还在", Toast.LENGTH_SHORT,
+            ).show()
+            return
+        }
+        val entries = pending.first
+        val alreadyDeleted = pending.second
+        val single = pending.third
+        Thread {
+            var gone = 0
+            for (e in entries) {
+                val verdict = PublicStorage.probeRecords(
+                    context,
+                    listOf(
+                        Reconcile.RecordSnap(
+                            id = e.taskId, savedUri = e.uri,
+                            savedName = e.name, size = e.size,
+                        ),
+                    ),
+                    emptyList(),
+                )[e.uri]?.verdict
+                // The user confirmed and the system performed
+                // the deletion; only a positive EXISTS keeps
+                // the file (and its record) alive — the same
+                // fallback caliber as DeleteFile
+                // .afterSystemConfirm.
+                if (verdict != Reconcile.Verdict.EXISTS) {
+                    gone++
+                    if (e.taskId.isNotBlank()) {
+                        DownloadCenter.store.byId(e.taskId)?.let {
+                            ChecksumVerifier.requestCancel(it.id)
+                            DownloadCenter.store.remove(it)
+                            DownloadCenter.onRecordsRemoved(listOf(it))
+                        }
+                    }
+                }
+            }
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                Toast.makeText(
+                    context,
+                    if (single) {
+                        if (gone == 1) "文件已删除"
+                        else "删除失败，系统没有允许"
+                    } else {
+                        "已删除 ${alreadyDeleted + gone} 个重复文件"
+                    },
+                    Toast.LENGTH_SHORT,
+                ).show()
+                reloadKey++
+            }
+        }.start()
+    }
+
+    val sysDeleteLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        finishSysDelete(
+            result.resultCode == android.app.Activity.RESULT_OK,
+        )
+    }
+
     // ---- v6.7.0 Step B: 一键对账 — report only, every
     // disposition is a user tap (see Reconcile). Probe + scan
     // run on a background thread, only when the user taps. ----
@@ -5498,24 +5577,68 @@ fun FilesScreen(onBack: () -> Unit) {
                     val targets = picked.toList()
                     Thread {
                         var okCount = 0
+                        val refused = mutableListOf<DownloadedFiles.Entry>()
                         for (e in targets) {
-                            if (PublicStorage.deleteByUri(context, e.uri)) okCount++
-                            if (e.taskId.isNotBlank()) {
-                                DownloadCenter.store.byId(e.taskId)?.let {
-                                    DownloadCenter.store.remove(it)
-                                    DownloadCenter.onRecordsRemoved(listOf(it))
+                            if (PublicStorage.deleteByUri(context, e.uri)) {
+                                okCount++
+                                if (e.taskId.isNotBlank()) {
+                                    DownloadCenter.store.byId(e.taskId)?.let {
+                                        DownloadCenter.store.remove(it)
+                                        DownloadCenter.onRecordsRemoved(listOf(it))
+                                    }
+                                }
+                            } else {
+                                refused.add(e)
+                            }
+                        }
+                        // v8.7.0: entries the system refused
+                        // get one shared system confirmation
+                        // (API 30+); their records wait for
+                        // the re-probe in finishSysDelete.
+                        // Without a request (API 29, or a Uri
+                        // createDeleteRequest rejects) the
+                        // legacy behaviour stands verbatim:
+                        // records go with the attempt and the
+                        // toast counts only real deletions.
+                        val sender = if (refused.isNotEmpty()) {
+                            PublicStorage.deleteRequestSender(
+                                context, refused.map { it.uri },
+                            )
+                        } else {
+                            null
+                        }
+                        if (sender == null) {
+                            for (e in refused) {
+                                if (e.taskId.isNotBlank()) {
+                                    DownloadCenter.store.byId(e.taskId)?.let {
+                                        DownloadCenter.store.remove(it)
+                                        DownloadCenter.onRecordsRemoved(listOf(it))
+                                    }
                                 }
                             }
                         }
                         android.os.Handler(android.os.Looper.getMainLooper()).post {
-                            Toast.makeText(
-                                context,
-                                "已删除 $okCount 个重复文件",
-                                Toast.LENGTH_SHORT,
-                            ).show()
-                            dupGroups = null
-                            dupChecked = emptySet()
-                            reloadKey++
+                            if (sender != null) {
+                                sysDeletePending =
+                                    Triple(refused.toList(), okCount, false)
+                                dupGroups = null
+                                dupChecked = emptySet()
+                                reloadKey++
+                                sysDeleteLauncher.launch(
+                                    IntentSenderRequest
+                                        .Builder(sender)
+                                        .build(),
+                                )
+                            } else {
+                                Toast.makeText(
+                                    context,
+                                    "已删除 $okCount 个重复文件",
+                                    Toast.LENGTH_SHORT,
+                                ).show()
+                                dupGroups = null
+                                dupChecked = emptySet()
+                                reloadKey++
+                            }
                         }
                     }.start()
                 }) { Text("删除") }
@@ -5577,6 +5700,35 @@ fun FilesScreen(onBack: () -> Unit) {
                         deleteEntry = null
                         Thread {
                             val ok = PublicStorage.deleteByUri(context, e.uri)
+                            // v8.7.0: a refused direct delete
+                            // escalates to the system delete
+                            // confirmation (API 30+); record
+                            // removal then waits for the
+                            // re-probe in finishSysDelete, so
+                            // a cancelled dialog keeps both
+                            // file and record. No request ->
+                            // the legacy path below, unchanged.
+                            val sender = if (!ok) {
+                                PublicStorage.deleteRequestSender(
+                                    context, listOf(e.uri),
+                                )
+                            } else {
+                                null
+                            }
+                            if (sender != null) {
+                                android.os.Handler(
+                                    android.os.Looper.getMainLooper(),
+                                ).post {
+                                    sysDeletePending =
+                                        Triple(listOf(e), 0, true)
+                                    sysDeleteLauncher.launch(
+                                        IntentSenderRequest
+                                            .Builder(sender)
+                                            .build(),
+                                    )
+                                }
+                                return@Thread
+                            }
                             if (task != null) {
                                 ChecksumVerifier.requestCancel(task.id)
                                 DownloadCenter.store.remove(task)
@@ -8868,13 +9020,7 @@ fun GuideOverlay(version: String, onDone: () -> Unit) {
             "在服务器按单条连接限速时，速度可以达到浏览器单线程的数倍乃至十几倍。" +
             "免费开源，没有广告，不用注册账号。",
         "本版更新（v$version）" to
-            "· 在统计页「忘掉这个站」之后，那个站正在下的任务不会被打扰，还是按它开始时记住的数目下完；但它下完之后不会再把这个站悄悄学回来——忘掉就是忘掉了，下次再下这个站的文件会像新站一样重新试探连接数\n" +
-            "· 学习数据以前多处同时写的时候会互相冲掉：比如一边在统计页忘掉一个站，另一边正好有任务下完在记录学到的连接数，可能把别的站刚学到的数弄丢。这一版把所有写学习数据的地方排成一队，一次只写一处，不会再互相覆盖\n" +
-            "· 批量改名更稳了：确认改名的那一刻会再检查一遍，正在下载、正在收尾的任务不会被改名（改名会影响它最终存下来的文件名），被跳过的会算进提示里的跳过数目，明明白白\n" +
-            "· 代理什么时候生效，设置里写明了：新开始的下载和嗅探这类小请求会直接用新代理；已经在下载的任务不会中途换代理，想换就暂停后再继续，它就会按新代理走\n" +
-            "· 排队预检更准了：链接跳转到别的网站之后，那边回的「文件不存在」不再算数——跳转过去的请求不带原站的登录状态，证据不足，不会再冤枉一个好链接，在卡片上误报「可能已失效」\n" +
-            "· 帮助中心同步补清了两处：连接数话题里说明了忘掉一个站从什么时候开始算数，预检话题里说明了什么样的「不存在」才算数；「已知限制」里新增一条，讲清排队预检不带任务里单独填的授权信息时可能误报，真实开始下载时会带上、不受影响\n" +
-            "· 照例做了一轮内部审计：这一轮查的是下载进行中途改东西会不会出乱子——忘掉学习数据、删文件、再下一次、批量改名、导入备份、改连接上限和限速、换代理都逐项核对过，该修的都修了，核对下来本来就安全的也留了结论\n" +
+            "· 修好了已下载文件删不掉的问题：在部分手机上，公共「下载」目录里的文件直接删会被系统拒绝，之前只能提示删不掉。现在改成：直接删不掉时，系统会弹出一个确认框，你点确认后由系统来删；点取消就什么都不动。删完会再核对一遍文件到底还在不在，删成了、取消了、还是没删掉，都会如实告诉你。详情页的「删除文件」和文件页的删除都走这条新路\n" +
             "· 升级方式不变：签名和以前一致，直接覆盖安装，任务记录都保留；没有新增权限，也没有新增第三方组件",
         "核心用法" to
             "点「新建下载」，把链接粘进来就行：\n" +
@@ -9324,6 +9470,56 @@ fun TaskCard(
     var quickMenuOpen by remember(task.id) { mutableStateOf(false) }
     // v7.7.0 Step C2: 「删除文件」 confirmation open state.
     var deleteFileConfirm by remember(task.id) { mutableStateOf(false) }
+    // v8.7.0: ONE reporting point for every 「删除文件」
+    // outcome — direct delete and the system-confirmation
+    // route both end here. Only DELETED / ALREADY_GONE
+    // ghost-mark; FAILED and CANCELLED leave the file and
+    // the snapshot exactly as they were. (Declared before
+    // the launcher and the dialog lambda that call it.)
+    fun reportDeleteOutcome(outcome: DeleteFile.Outcome) {
+        val fileName = task.savedName.ifBlank { task.fileName }
+            .ifBlank { displayName }
+        if (outcome == DeleteFile.Outcome.DELETED ||
+            outcome == DeleteFile.Outcome.ALREADY_GONE
+        ) {
+            GhostSnapshot.markMissing(
+                Reconcile.RecordSnap(
+                    id = task.id,
+                    savedUri = task.savedUri,
+                    savedName = task.savedName.ifBlank { task.fileName },
+                    size = if (task.totalSize > 0) {
+                        task.totalSize
+                    } else {
+                        task.downloaded
+                    },
+                ),
+            )
+        }
+        Toast.makeText(
+            context,
+            DeleteFile.outcomeText(outcome, fileName),
+            Toast.LENGTH_LONG,
+        ).show()
+    }
+    // v8.7.0: the system delete confirmation (API 30+,
+    // MediaStore.createDeleteRequest) comes back here; the
+    // re-probe + DeleteFile.afterSystemConfirm settle what
+    // really happened (deleted / cancelled / still refused).
+    val sysDeleteLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        val ctx = context
+        val confirmed =
+            result.resultCode == android.app.Activity.RESULT_OK
+        Thread {
+            val outcome = runCatching {
+                PublicStorage.confirmDeleteSavedFile(ctx, task, confirmed)
+            }.getOrDefault(DeleteFile.Outcome.FAILED)
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                reportDeleteOutcome(outcome)
+            }
+        }.start()
+    }
     // v6.2 step B: the two clipboard actions live ONCE here —
     // the expanded-section diagnostics button below and the
     // quick menu both call these, never a second copy of the
@@ -9334,7 +9530,7 @@ fun TaskCard(
         val version = runCatching {
             ctx.packageManager.getPackageInfo(ctx.packageName, 0)
                 .versionName
-        }.getOrNull() ?: "8.6.0"
+        }.getOrNull() ?: "8.7.0"
         val cm = ctx.getSystemService(
             android.content.Context.CLIPBOARD_SERVICE,
         ) as android.content.ClipboardManager
@@ -10545,30 +10741,30 @@ fun TaskCard(
                     deleteFileConfirm = false
                     val ctx = context
                     Thread {
-                        val outcome = runCatching {
-                            PublicStorage.deleteSavedFile(ctx, task)
-                        }.getOrDefault(DeleteFile.Outcome.FAILED)
+                        // v8.7.0: direct delete first; when
+                        // the system refuses it on API 30+ the
+                        // attempt comes back NeedsConfirm and
+                        // the SYSTEM delete dialog takes over
+                        // (its result lands in sysDeleteLauncher
+                        // above, same reporting point).
+                        val attempt = runCatching {
+                            PublicStorage.tryDeleteSavedFile(ctx, task)
+                        }.getOrDefault(
+                            PublicStorage.DeleteAttempt.Finished(
+                                DeleteFile.Outcome.FAILED,
+                            ),
+                        )
                         android.os.Handler(android.os.Looper.getMainLooper()).post {
-                            if (outcome != DeleteFile.Outcome.FAILED) {
-                                GhostSnapshot.markMissing(
-                                    Reconcile.RecordSnap(
-                                        id = task.id,
-                                        savedUri = task.savedUri,
-                                        savedName = task.savedName
-                                            .ifBlank { task.fileName },
-                                        size = if (task.totalSize > 0) {
-                                            task.totalSize
-                                        } else {
-                                            task.downloaded
-                                        },
-                                    ),
-                                )
+                            when (attempt) {
+                                is PublicStorage.DeleteAttempt.Finished ->
+                                    reportDeleteOutcome(attempt.outcome)
+                                is PublicStorage.DeleteAttempt.NeedsConfirm ->
+                                    sysDeleteLauncher.launch(
+                                        IntentSenderRequest
+                                            .Builder(attempt.sender)
+                                            .build(),
+                                    )
                             }
-                            Toast.makeText(
-                                ctx,
-                                DeleteFile.outcomeText(outcome, fileName),
-                                Toast.LENGTH_LONG,
-                            ).show()
                         }
                     }.start()
                 }) { Text("删除文件", color = dangerTextRed()) }

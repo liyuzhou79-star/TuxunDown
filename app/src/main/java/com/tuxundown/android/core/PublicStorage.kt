@@ -2,7 +2,9 @@ package com.tuxundown.android.core
 
 import android.content.ContentValues
 import android.content.Context
+import android.content.IntentSender
 import android.net.Uri
+import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
@@ -703,31 +705,107 @@ object PublicStorage {
         }
     }
 
+    private fun snapOf(task: TaskRecord) = Reconcile.RecordSnap(
+        id = task.id,
+        savedUri = task.savedUri,
+        savedName = task.savedName.ifBlank { task.fileName },
+        size = if (task.totalSize > 0) task.totalSize else task.downloaded,
+    )
+
+    /** Result of a user-initiated 「删除文件」 attempt. */
+    sealed interface DeleteAttempt {
+        data class Finished(val outcome: DeleteFile.Outcome) : DeleteAttempt
+        data class NeedsConfirm(val sender: IntentSender) : DeleteAttempt
+    }
+
     /**
-     * v7.7.0 Step C2: delete a DONE task's saved file through
-     * its savedUri, honestly. Probe (the reconcile three-state
-     * probe, verbatim) -> delete ([deleteByUri]: DocumentFile
-     * for SAF documents, ContentResolver.delete for
-     * MediaStore entries — the existing per-provider paths) ->
-     * probe again, and [DeleteFile.outcome] maps the three
-     * facts to DELETED / ALREADY_GONE / FAILED. The task
-     * record is NOT touched here. Background thread only.
+     * v7.7.0 Step C2 + v8.7.0: delete a DONE task's saved file
+     * through its savedUri, honestly. Probe (the reconcile
+     * three-state probe, verbatim) -> delete ([deleteByUri]:
+     * DocumentFile for SAF documents, ContentResolver.delete
+     * for MediaStore entries — the existing per-provider
+     * paths) -> probe again, and [DeleteFile.outcome] maps the
+     * three facts to DELETED / ALREADY_GONE / FAILED.
+     *
+     * v8.7.0 (real-device report on Flyme): a FAILED direct
+     * delete on API 30+ now escalates to the system delete
+     * confirmation — [DeleteAttempt.NeedsConfirm] carries the
+     * IntentSender for MediaStore.createDeleteRequest and the
+     * UI layer launches it; [confirmDeleteSavedFile] settles
+     * the outcome when the dialog returns. Background paths
+     * (orphan .part cleanup, deleteTarget) keep calling
+     * [deleteByUri] directly — no dialog without the user.
+     * The task record is NOT touched here. Background thread
+     * only (except the UI-side launch).
      */
-    fun deleteSavedFile(context: Context, task: TaskRecord): DeleteFile.Outcome {
-        val snap = Reconcile.RecordSnap(
-            id = task.id,
-            savedUri = task.savedUri,
-            savedName = task.savedName.ifBlank { task.fileName },
-            size = if (task.totalSize > 0) task.totalSize else task.downloaded,
-        )
+    fun tryDeleteSavedFile(context: Context, task: TaskRecord): DeleteAttempt {
+        val snap = snapOf(task)
         fun probe(): Reconcile.Verdict? =
             probeRecords(context, listOf(snap), emptyList())[task.savedUri]?.verdict
         val before = probe()
         if (before == Reconcile.Verdict.MISSING) {
-            return DeleteFile.Outcome.ALREADY_GONE
+            return DeleteAttempt.Finished(DeleteFile.Outcome.ALREADY_GONE)
         }
         val deleted = deleteByUri(context, task.savedUri)
-        return DeleteFile.outcome(before, deleted, probe())
+        val outcome = DeleteFile.outcome(before, deleted, probe())
+        if (outcome == DeleteFile.Outcome.FAILED) {
+            // The probe just proved the file is still there,
+            // so whatever deleteByUri claimed, the direct
+            // delete did NOT do the job: route(false, ...).
+            val sender = deleteRequestSender(context, listOf(task.savedUri))
+            if (DeleteFile.route(false, Build.VERSION.SDK_INT, sender != null)
+                == DeleteFile.Route.ASK_SYSTEM
+            ) {
+                return DeleteAttempt.NeedsConfirm(sender!!)
+            }
+        }
+        return DeleteAttempt.Finished(outcome)
+    }
+
+    /**
+     * v8.7.0: settle a 「删除文件」 after the system delete
+     * confirmation dialog returns. [confirmed] is the dialog's
+     * own answer; the file is then re-probed and
+     * [DeleteFile.afterSystemConfirm] rules. Background thread
+     * only.
+     */
+    fun confirmDeleteSavedFile(
+        context: Context,
+        task: TaskRecord,
+        confirmed: Boolean,
+    ): DeleteFile.Outcome {
+        if (!confirmed) return DeleteFile.Outcome.CANCELLED
+        val snap = snapOf(task)
+        val after = probeRecords(
+            context, listOf(snap), emptyList(),
+        )[task.savedUri]?.verdict
+        return DeleteFile.afterSystemConfirm(true, after)
+    }
+
+    /**
+     * v8.7.0: the IntentSender for a system delete
+     * confirmation (MediaStore.createDeleteRequest, API 30+)
+     * covering [uriStrings], or null when the platform is too
+     * old or the request cannot be built (e.g. a Uri that is
+     * not a MediaStore entry — SAF documents refuse, and the
+     * caller falls back to the honest direct-delete result).
+     * The system shows its own dialog and performs the
+     * deletion itself after the user confirms.
+     */
+    fun deleteRequestSender(
+        context: Context,
+        uriStrings: Collection<String>,
+    ): IntentSender? {
+        if (Build.VERSION.SDK_INT < 30) return null
+        val uris = uriStrings.mapNotNull {
+            runCatching { Uri.parse(it) }.getOrNull()
+        }
+        if (uris.isEmpty()) return null
+        return runCatching {
+            MediaStore.createDeleteRequest(
+                context.contentResolver, uris,
+            ).intentSender
+        }.getOrNull()
     }
 
     /** Delete one file by its Uri string; false when refused. */
