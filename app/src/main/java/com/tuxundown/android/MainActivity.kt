@@ -3866,12 +3866,29 @@ fun DownApp() {
                 TextButton(
                     onClick = {
                         var n = 0
+                        var lateSkipped = 0
                         for (p in plan) {
                             if (!p.changed) continue
                             val t = store.byId(p.id) ?: continue
+                            // v8.6 audit round 71: re-check at
+                            // WRITE time, not just plan time —
+                            // between the dialog's plan and this
+                            // tap the drain may have claimed the
+                            // record (the claim lands before the
+                            // status flips to RUNNING), and a
+                            // running / finalizing task's name
+                            // must never change under its engine
+                            // (BatchRename's own scope rule).
+                            if (!BatchRename.eligible(t.status) ||
+                                DownloadCenter.isClaimed(t.id)
+                            ) {
+                                lateSkipped++
+                                continue
+                            }
                             t.fileName = p.newName
                             n++
                         }
+                        val skippedAll = skipped + lateSkipped
                         if (n > 0) store.saveNow()
                         batchRenameOpen = false
                         selectedIds = emptySet()
@@ -3879,10 +3896,10 @@ fun DownApp() {
                         Toast.makeText(
                             context,
                             when {
-                                n > 0 && skipped > 0 ->
-                                    "已改名 $n 个；$skipped 个正在下载或已完成，没改"
+                                n > 0 && skippedAll > 0 ->
+                                    "已改名 $n 个；$skippedAll 个正在下载或已完成，没改"
                                 n > 0 -> "已改名 $n 个"
-                                skipped > 0 -> "选中的都在下载中或已完成，没改"
+                                skippedAll > 0 -> "选中的都在下载中或已完成，没改"
                                 else -> "没有名字发生变化"
                             },
                             Toast.LENGTH_SHORT,
@@ -7993,6 +8010,8 @@ fun SettingsScreen(
                 }
                 Text(
                     "代理连不上时，任务会停下来并写明原因，绝不会悄悄改走直连。" +
+                        "生效时机：改了代理后，新开始的下载和嗅探、检查更新这类小请求会直接用新代理；" +
+                        "已经在下载的任务不会中途换代理，暂停后重新开始才会换。" +
                         "两个例外请注意：FTP 链接不走代理（协议限制）；内置浏览器打开网页本身不走代理" +
                         "（系统限制），但它抓到链接后建的下载任务走代理。" +
                         "代理密码只存在这台手机的设置里，不会进导出备份。",
@@ -9357,7 +9376,7 @@ fun TaskCard(
             DownloadCenter.RedownloadOutcome.DUPLICATE ->
                 "这个链接已经在任务列表里了"
             DownloadCenter.RedownloadOutcome.NOT_ELIGIBLE ->
-                "这条记录没有下载链接，没法再下一次"
+                "这条记录已经不在了，或没有下载链接，没法再下一次"
         }
         Toast.makeText(ctx, text, Toast.LENGTH_SHORT).show()
     }

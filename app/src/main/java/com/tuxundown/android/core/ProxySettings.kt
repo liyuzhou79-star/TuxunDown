@@ -97,13 +97,18 @@ object ProxyState {
 
     /** Open a connection honouring the current proxy (if any). */
     fun open(url: URL): HttpURLConnection {
-        val p = settings.javaProxy()
+        // v8.6 audit round 71: read the volatile mirror ONCE —
+        // a settings change landing between two reads used to
+        // pair one snapshot's proxy with the next snapshot's
+        // auth header.
+        val s = settings
+        val p = s.javaProxy()
         val c = if (p != null) {
             url.openConnection(p) as HttpURLConnection
         } else {
             url.openConnection() as HttpURLConnection
         }
-        settings.proxyAuthHeader()?.let {
+        s.proxyAuthHeader()?.let {
             c.setRequestProperty("Proxy-Authorization", it)
         }
         return c

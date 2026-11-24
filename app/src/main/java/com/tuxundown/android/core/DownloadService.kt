@@ -1348,6 +1348,12 @@ class DownloadService : Service() {
             }
             store.save()
             val legacy = store.fileOf(task)
+            // v8.6 audit round 71: capture this run's host-learn
+            // stamp BEFORE the hint / cap reads below — if the
+            // user forgets this host (or clears the table) while
+            // the run is in flight, the run's settle callbacks
+            // must not teach the host again (see HostLearnGuard).
+            val hostLearnStamp = DownloadCenter.hostLearnStamp(task.url)
             val engine = DownloadEngine(
                 task = task,
                 tailRaceEnabled = DownloadCenter.tailRaceEnabled,
@@ -1446,15 +1452,15 @@ class DownloadService : Service() {
                 // age the memory out when a host starts failing.
                 initialThreadsHint = DownloadCenter.hostThreadsHint(task.url),
                 onThreadsSettled = { threads ->
-                    DownloadCenter.recordHostThreads(task.url, threads)
+                    DownloadCenter.recordHostThreads(task.url, threads, hostLearnStamp)
                 },
-                onHostFailed = { DownloadCenter.recordHostFailure(task.url) },
+                onHostFailed = { DownloadCenter.recordHostFailure(task.url, hostLearnStamp) },
                 // v2.8: rate-limit memory — a remembered ceiling
                 // caps this run; a run that fails with a
                 // rate-limit signature teaches a new one.
                 initialThreadsCap = DownloadCenter.hostThreadsCap(task.url),
                 onRateLimited = { atLimit ->
-                    DownloadCenter.recordHostRateLimit(task.url, atLimit)
+                    DownloadCenter.recordHostRateLimit(task.url, atLimit, hostLearnStamp)
                 },
                 // v3.9: the global connection cap, split live
                 // across the running tasks by priority weight

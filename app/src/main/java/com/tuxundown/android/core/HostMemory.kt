@@ -300,3 +300,68 @@ class HostMemoryParseCache {
         return parsed
     }
 }
+
+/**
+ * v8.6 audit round 71: forget-vs-learn guard for the host table.
+ *
+ * The user can forget a host (or clear the whole table) WHILE a
+ * download from that host is still running. That run started
+ * before the forget, so its completion write-back (recordSuccess
+ * / recordFailure / recordRateLimit) would silently re-teach the
+ * very host the user just forgot — the next download would start
+ * from the "forgotten" values instead of fresh, which is exactly
+ * what 忘掉 promises will not happen.
+ *
+ * The guard is generation stamps, no table format change: a run
+ * captures [stampForRunStart] when it starts (the forget
+ * generation it can see at that moment); [onForget] /
+ * [onClearAll] advance the generation; a write-back may land
+ * only when its stamp still matches the host's current forget
+ * generation ([mayLearn]). A run that starts AFTER the forget
+ * stamps the new generation and learns normally — forgetting
+ * blocks only the runs that were already in flight, never future
+ * ones. Hosts never forgotten have generation 0, so unstamped /
+ * legacy callers keep learning exactly as before.
+ *
+ * Pure JVM logic — unit-tested. DownloadCenter owns the one
+ * instance and checks [mayLearn] inside its host-table lock, so
+ * the check and the write it gates are atomic against a forget
+ * taking the same lock.
+ */
+class HostLearnGuard {
+
+    private var nextGen = 0L
+    private var clearGen = 0L
+    private val forgetGen = HashMap<String, Long>()
+
+    private fun forgetStampOf(host: String): Long =
+        maxOf(forgetGen[host] ?: 0L, clearGen)
+
+    /** The stamp a run starting NOW must carry for [host]. */
+    @Synchronized
+    fun stampForRunStart(host: String): Long {
+        if (host.isBlank()) return 0L
+        return forgetStampOf(host)
+    }
+
+    /** The user forgot [host]: in-flight runs lose the right to
+     *  teach it again. */
+    @Synchronized
+    fun onForget(host: String) {
+        if (host.isBlank()) return
+        forgetGen[host] = ++nextGen
+    }
+
+    /** The user cleared the whole table: same, for every host. */
+    @Synchronized
+    fun onClearAll() {
+        clearGen = ++nextGen
+    }
+
+    /** May a write-back carrying [stamp] still teach [host]? */
+    @Synchronized
+    fun mayLearn(host: String, stamp: Long): Boolean {
+        if (host.isBlank()) return false
+        return stamp >= forgetStampOf(host)
+    }
+}

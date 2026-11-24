@@ -1214,7 +1214,15 @@ object DownloadCenter {
     fun applyHostMemory(text: String) {
         val (entries, dropped) = HostMemory.parseWithLoss(text)
         noteSubStoreDropped(dropped)
-        saveHostEntries(entries)
+        // Round 71: the replace takes the host-table lock like
+        // every other writer, so a restore landing mid-run is
+        // serialized against the engines' record* writes instead
+        // of racing them whole-table against whole-table.
+        // Running engines are unaffected either way — they
+        // snapshotted their hint / cap at construction.
+        synchronized(hostTableLock) {
+            saveHostEntries(entries)
+        }
     }
 
     // ---- v4.1: speed-test history — LOCAL ONLY. The key below
@@ -1268,6 +1276,19 @@ object DownloadCenter {
      * FreeName rule (「名字 (1)」), never by overwriting.
      */
     fun redownload(source: TaskRecord): RedownloadOutcome {
+        // v8.6 audit round 71: the UI hands over the record
+        // object it rendered; if that record was deleted after
+        // the render (another surface, a multi-select delete),
+        // the object survives with its DONE fields intact and
+        // would happily build a new task for a record the user
+        // already removed. Re-validate against the live store
+        // first — the same last-moment existence re-check
+        // runOne makes (audit C8). Identity, not just id: a
+        // record re-imported from a backup under the same id is
+        // a different record than the one the user tapped.
+        if (store.byId(source.id) !== source) {
+            return RedownloadOutcome.NOT_ELIGIBLE
+        }
         val fresh = RedownloadPlan.newRecord(source)
             ?: return RedownloadOutcome.NOT_ELIGIBLE
         if (CreateDedup.isDuplicate(store.tasks, fresh.url, fresh.sources)) {
@@ -1507,6 +1528,32 @@ object DownloadCenter {
     // string, so the cache can never serve a stale table.
     private val hostEntriesCache = HostMemoryParseCache()
 
+    // v8.6 audit round 71: EVERY host-table writer used to do a
+    // whole-table read-modify-write with no lock — the stats
+    // screen's forget / clear (main thread), the engine's
+    // record* callbacks (download threads) and a backup restore
+    // (applyHostMemory, restore thread) could interleave
+    // read -> read -> write -> write and silently drop another
+    // host's fresh update. All writers now serialize on this one
+    // lock; readers keep the lock-free cached read above (a
+    // reader sees the table just before or just after a write —
+    // both are whole, consistent snapshots).
+    private val hostTableLock = Any()
+
+    // v8.6 audit round 71: forget-vs-learn guard (see
+    // HostLearnGuard) — a run that started before the user
+    // forgot its host must not teach that host again when it
+    // settles. The mayLearn check runs INSIDE hostTableLock, so
+    // check + write are atomic against a forget on the UI
+    // thread taking the same lock.
+    private val hostLearnGuard = HostLearnGuard()
+
+    /** v8.6 audit round 71: the learn stamp a run starting now
+     *  must carry for this URL's host; the run hands it back to
+     *  the record* calls when it settles (see HostLearnGuard). */
+    fun hostLearnStamp(url: String): Long =
+        hostLearnGuard.stampForRunStart(HostMemory.hostOf(url))
+
     // v7.3 (B5): the cache re-parses only when the raw text
     // changes; accumulate its dropped-line count exactly once
     // per re-parse (tracked by the cache's version counter), so
@@ -1545,12 +1592,18 @@ object DownloadCenter {
     fun hostThreadsHint(url: String): Int =
         HostMemory.lookup(hostEntries(), HostMemory.hostOf(url), System.currentTimeMillis())
 
-    fun recordHostThreads(url: String, threads: Int) {
-        saveHostEntries(
-            HostMemory.recordSuccess(
-                hostEntries(), HostMemory.hostOf(url), threads, System.currentTimeMillis()
+    fun recordHostThreads(url: String, threads: Int, learnStamp: Long) {
+        val host = HostMemory.hostOf(url)
+        synchronized(hostTableLock) {
+            // Round 71: a run that started before the user
+            // forgot this host does not teach it again.
+            if (!hostLearnGuard.mayLearn(host, learnStamp)) return
+            saveHostEntries(
+                HostMemory.recordSuccess(
+                    hostEntries(), host, threads, System.currentTimeMillis()
+                )
             )
-        )
+        }
     }
 
     /** v4.3: the user picked [threads] for this URL's host in
@@ -1558,17 +1611,24 @@ object DownloadCenter {
      *  as that host's starting count (see HostMemory.recordManual
      *  for the cap/fails rules). */
     fun applyHostThreads(url: String, threads: Int) {
-        saveHostEntries(
-            HostMemory.recordManual(
-                hostEntries(), HostMemory.hostOf(url), threads, System.currentTimeMillis()
+        // The user's own explicit pick: never gated by the
+        // learn guard, but serialized like every other writer.
+        synchronized(hostTableLock) {
+            saveHostEntries(
+                HostMemory.recordManual(
+                    hostEntries(), HostMemory.hostOf(url), threads, System.currentTimeMillis()
+                )
             )
-        )
+        }
     }
 
     /** v4.3: forget every per-host learned optimum and rate-limit
      *  ceiling; the next download from each host re-probes. */
     fun clearHostMemory() {
-        prefs().edit().putString("hostThreads", "").apply()
+        synchronized(hostTableLock) {
+            hostLearnGuard.onClearAll()
+            prefs().edit().putString("hostThreads", "").apply()
+        }
     }
 
     /** v8.3: read-only snapshot of the learned per-host table,
@@ -1580,13 +1640,20 @@ object DownloadCenter {
      *  and rate-limit ceiling alike — see HostMemory.forget);
      *  every other host's memory is untouched. */
     fun forgetHost(host: String) {
-        saveHostEntries(HostMemory.forget(hostEntries(), host))
+        synchronized(hostTableLock) {
+            hostLearnGuard.onForget(host)
+            saveHostEntries(HostMemory.forget(hostEntries(), host))
+        }
     }
 
-    fun recordHostFailure(url: String) {
-        saveHostEntries(
-            HostMemory.recordFailure(hostEntries(), HostMemory.hostOf(url), System.currentTimeMillis())
-        )
+    fun recordHostFailure(url: String, learnStamp: Long) {
+        val host = HostMemory.hostOf(url)
+        synchronized(hostTableLock) {
+            if (!hostLearnGuard.mayLearn(host, learnStamp)) return
+            saveHostEntries(
+                HostMemory.recordFailure(hostEntries(), host, System.currentTimeMillis())
+            )
+        }
     }
 
     /** v2.8: remembered rate-limit ceiling for this URL's host
@@ -1596,13 +1663,17 @@ object DownloadCenter {
 
     /** v2.8: remember that this URL's host rejected parallel
      *  load at [threadsAtLimit] connections (see RateLimit). */
-    fun recordHostRateLimit(url: String, threadsAtLimit: Int) {
-        saveHostEntries(
-            HostMemory.recordRateLimit(
-                hostEntries(), HostMemory.hostOf(url), threadsAtLimit,
-                System.currentTimeMillis(),
+    fun recordHostRateLimit(url: String, threadsAtLimit: Int, learnStamp: Long) {
+        val host = HostMemory.hostOf(url)
+        synchronized(hostTableLock) {
+            if (!hostLearnGuard.mayLearn(host, learnStamp)) return
+            saveHostEntries(
+                HostMemory.recordRateLimit(
+                    hostEntries(), host, threadsAtLimit,
+                    System.currentTimeMillis(),
+                )
             )
-        )
+        }
     }
 
     // ---- v5.1 (Step B): memory tier, decided ONCE per process.

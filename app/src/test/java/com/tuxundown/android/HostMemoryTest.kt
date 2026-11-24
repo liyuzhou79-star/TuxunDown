@@ -1,8 +1,10 @@
 package com.tuxundown.android
 
 import com.tuxundown.android.core.DownloadEngine
+import com.tuxundown.android.core.HostLearnGuard
 import com.tuxundown.android.core.HostMemory
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -355,5 +357,57 @@ class HostMemoryTest {
         val cache = com.tuxundown.android.core.HostMemoryParseCache()
         cache.get(text)
         assertEquals(3, cache.lastDropped)
+    }
+
+    // ---- v8.6 audit round 71: HostLearnGuard ----
+
+    @Test
+    fun learnGuardNeverForgottenHostLearns() {
+        // No forget ever: any stamp (incl. a legacy 0) learns.
+        val g = HostLearnGuard()
+        val stamp = g.stampForRunStart("a.com")
+        assertTrue(g.mayLearn("a.com", stamp))
+        assertTrue(g.mayLearn("a.com", 0L))
+    }
+
+    @Test
+    fun learnGuardForgetBlocksInFlightRunOnly() {
+        val g = HostLearnGuard()
+        // A run starts, THEN the user forgets the host: the
+        // in-flight run's write-back is blocked...
+        val inFlight = g.stampForRunStart("a.com")
+        g.onForget("a.com")
+        assertFalse(g.mayLearn("a.com", inFlight))
+        // ...but a run starting after the forget learns normally.
+        val fresh = g.stampForRunStart("a.com")
+        assertTrue(g.mayLearn("a.com", fresh))
+        // Forgetting a DIFFERENT host never blocks this one.
+        assertTrue(g.mayLearn("b.com", g.stampForRunStart("b.com")))
+    }
+
+    @Test
+    fun learnGuardClearAllBlocksEveryInFlightRun() {
+        val g = HostLearnGuard()
+        val a = g.stampForRunStart("a.com")
+        val b = g.stampForRunStart("b.com")
+        g.onClearAll()
+        assertFalse(g.mayLearn("a.com", a))
+        assertFalse(g.mayLearn("b.com", b))
+        // Runs started after the clear learn again.
+        assertTrue(g.mayLearn("a.com", g.stampForRunStart("a.com")))
+        // A per-host forget after the clear still blocks the
+        // stamp taken in between.
+        val mid = g.stampForRunStart("a.com")
+        g.onForget("a.com")
+        assertFalse(g.mayLearn("a.com", mid))
+    }
+
+    @Test
+    fun learnGuardBlankHostNeverLearns() {
+        val g = HostLearnGuard()
+        assertFalse(g.mayLearn("", g.stampForRunStart("")))
+        g.onForget("")
+        g.onClearAll()
+        assertFalse(g.mayLearn("", 0L))
     }
 }
