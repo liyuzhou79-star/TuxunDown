@@ -9477,8 +9477,11 @@ fun TaskCard(
     // the snapshot exactly as they were. (Declared before
     // the launcher and the dialog lambda that call it.)
     fun reportDeleteOutcome(outcome: DeleteFile.Outcome) {
+        // Same name chain the card shows, spelled from task
+        // fields only (displayName is declared further down
+        // and a local fun cannot reach forward to it here).
         val fileName = task.savedName.ifBlank { task.fileName }
-            .ifBlank { displayName }
+            .ifBlank { task.url }
         if (outcome == DeleteFile.Outcome.DELETED ||
             outcome == DeleteFile.Outcome.ALREADY_GONE
         ) {
